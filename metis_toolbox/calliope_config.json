@@ -1,0 +1,19 @@
+{
+  "voice": "af_nicole",
+  "speed": 1.0,
+  "lang": "en-us",
+  "model_path": "kokoro_models/kokoro-v1.0.onnx",
+  "voices_path": "kokoro_models/voices-v1.0.bin",
+  "auto_speak": false,
+  "filler_delay_ms": 1000,
+  "prebuffer_chunks": 2,
+  "first_chunk_max_chars": 70,
+  "chunk_max_chars": 70,
+  "fillers": [
+    "Initiating Cogitator. Please wait.",
+    "Let me look into that for you.",
+    "Consulting the archives. One moment.",
+    "I would be glad to check on that.",
+    "Accessing the data streams now."
+  ]
+}

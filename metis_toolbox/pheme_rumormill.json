@@ -1,0 +1,46 @@
+{
+  "feeds": [
+    {
+      "id": "hackernews",
+      "label": "HACKER NEWS",
+      "url": "https://news.ycombinator.com/rss",
+      "format": "rss"
+    },
+    {
+      "id": "arstechnica",
+      "label": "ARS TECHNICA",
+      "url": "https://feeds.arstechnica.com/arstechnica/index",
+      "format": "rss"
+    },
+    {
+      "id": "theverge",
+      "label": "THE VERGE",
+      "url": "https://www.theverge.com/rss/index.xml",
+      "format": "atom"
+    },
+    {
+      "id": "theregister",
+      "label": "THE REGISTER",
+      "url": "https://www.theregister.com/headlines.atom",
+      "format": "rss"
+    },
+    {
+      "id": "bbcworld",
+      "label": "BBC WORLD",
+      "url": "https://feeds.bbci.co.uk/news/world/rss.xml",
+      "format": "rss"
+    },
+    {
+      "id": "npr",
+      "label": "NPR",
+      "url": "https://feeds.npr.org/1001/rss.xml",
+      "format": "rss"
+    },
+    {
+      "id": "wvnews",
+      "label": "WV NEWS",
+      "url": "https://www.wvnews.com/search/?f=rss&t=article&c=news/local&l=20&s=start_time&sd=desc",
+      "format": "rss"
+    }
+  ]
+}

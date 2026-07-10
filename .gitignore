@@ -1,0 +1,60 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# External binaries — Morpheus's mpv.exe / yt-dlp.exe live here, uncommitted
+bin/
+
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Secrets — never commit (.env.example is the committed template)
+.env
+
+# Runtime state & data (machine-local, not source)
+*.log
+*.tmp
+scribe_data.json
+timer_state.json
+felhaven_data.json
+felhaven_settings.json
+plutus_ledger.json
+argus_timeline.json
+morpheus_playlists.json
+morpheus_watch_later/
+
+# Cerberus & Sphynx — per-user PIN files + encrypted state, all machine-local.
+# The PIN-hash files are no longer shipped: first-run onboarding writes them, so
+# a fresh clone has none and the in-app setup triggers instead of inheriting the
+# author's PINs. cerberus_manifest.json (the config-list template) STAYS
+# committed. The vault holds ciphertext; the ledger holds key/file names + ts.
+sphynx_data.json
+cerberus_data.json
+cerberus_vault.json
+cerberus_ledger.json
+
+# Herodotus — the Markdown knowledge archive. Personal state, not source.
+herodotus_archive/
+
+# Calliope — kokoro-onnx model binaries (voices-v1.0.bin + kokoro-v1.0*.onnx),
+# ~90 MB+. Downloaded separately; see README_PANTHEON/Calliope.md.
+kokoro_models/
+
+# Calliope — pre-rendered filler audio (WAVs), regenerated from the config
+# phrases on first launch. Machine-local cache, not source.
+calliope_fillers/
+
+# Personal design / idea notes (kept local, not source of record)
+specs/felhaven_design_v01.md
+
+# OS cruft
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Editor / tool-local config (Claude Code per-user permission allowlist) — at
+# any depth, since a nested metis_toolbox/.claude/ copy exists too.
+**/.claude/settings.local.json

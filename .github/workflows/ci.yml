@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: metis_toolbox/requirements.txt
+      - run: pip install -r requirements.txt
+        working-directory: metis_toolbox
+      - run: python -X utf8 -m unittest discover -s tests -p "test_*.py"
+        working-directory: metis_toolbox
+
+  mypy:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: metis_toolbox/requirements.txt
+      - run: pip install -r requirements.txt mypy==2.1.0 types-requests==2.33.0.20260518 types-psutil==7.2.2.20260518
+        working-directory: metis_toolbox
+      - run: mypy --strict --explicit-package-bases tools/
+        working-directory: metis_toolbox

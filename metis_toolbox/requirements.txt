@@ -1,0 +1,21 @@
+# requirements.txt — Felhaven dashboard runtime
+# ==============================================
+# The dashboard core is stdlib + two tiny packages; the narration feature
+# (Calliope, output-only TTS) adds a lightweight ONNX speech stack. There is no
+# separate voice-assistant install anymore — voice INPUT was retired, so the old
+# torch-backed `requirements-metis.txt` is gone. kokoro-onnx pulls onnxruntime,
+# not torch/transformers, so this stays light.
+#
+# Install into the venv:
+#     metis_toolbox\.venv\Scripts\python -m pip install -r requirements.txt
+
+# ── Dashboard core ────────────────────────────────────────────────────────────
+psutil              # system vitals (Hephaestus), process attribution (Argus)
+requests            # every network tool (Aura, Midas, Pheme, Pythia, ...)
+
+# ── Calliope — narration (output-only TTS) ────────────────────────────────────
+kokoro-onnx         # text -> speech via ONNX (no torch/transformers)
+sounddevice         # speaker playback of Calliope's PCM (bundles PortAudio)
+numpy               # PCM buffers from kokoro-onnx
+# Model files (voices-v1.0.bin + a kokoro-v1.0*.onnx) are downloaded separately
+# and gitignored — see README_PANTHEON/Calliope.md for the one-time step.
