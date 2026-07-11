@@ -39,7 +39,6 @@ from panels.midas_panel      import MidasPanel
 from panels.pheme_panel      import PhemePanel
 from panels.morpheus_panel   import MorpheusPanel
 from panels.cogitator_panel  import CogitatorPanel
-from panels.narrator_panel    import NarratorLamp
 from panels.sidebar          import Sidebar
 
 # ── Baseline geometry for Felhaven window ────────────────────────────────────
@@ -117,11 +116,7 @@ class FelhavenApp:
         header.pack(fill="x", padx=16, pady=(12, 8))
         tk.Label(header, text="FELHAVEN", font=FONTS["title"],
                  fg=C["text1"], bg=C["bg"]).pack(side="left")
-        # Narration lamp at the far-right corner. Packed side="right" BEFORE the
-        # motto so it lands at the edge with the motto to its left. Off by
-        # default — click it to have Pythia read her answers aloud.
-        self._narrator_lamp = NarratorLamp(header)
-        self._narrator_lamp.pack(side="right", padx=(10, 0))
+        # The narration lamp lives in Hestia (Home view) now, not the header.
         tk.Label(header, text="Ex tenebris surgit lumen posteris",
                  font=FONTS["subtitle"], fg=C["text3"], bg=C["bg"]).pack(side="right")
         self.header_clock = _ClockCluster(header)

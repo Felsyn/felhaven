@@ -25,6 +25,7 @@ plutus_ledger.json
 argus_timeline.json
 morpheus_playlists.json
 morpheus_watch_later/
+machine_spirit_config.json
 
 # Cerberus & Sphynx — per-user PIN files + encrypted state, all machine-local.
 # The PIN-hash files are no longer shipped: first-run onboarding writes them, so

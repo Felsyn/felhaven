@@ -16,6 +16,7 @@ graceful network-failure text, and the TOOLS/_DISPATCH registry invariant.
 import json
 import os
 import sys
+import threading
 import unittest
 from unittest import mock
 
@@ -37,10 +38,13 @@ def _stream(*objs: dict) -> mock.Mock:
     return r
 
 
-def _final(content: str) -> dict:
-    """A terminal stream chunk carrying `content` and done=true."""
+def _final(content: str, prompt_tokens: int = 5, output_tokens: int = 3) -> dict:
+    """A terminal stream chunk carrying `content`, done=true, and token counts
+    (Ollama's prompt_eval_count/eval_count/eval_duration)."""
     return {"message": {"role": "assistant", "content": content},
-            "done": True, "done_reason": "stop"}
+            "done": True, "done_reason": "stop",
+            "prompt_eval_count": prompt_tokens, "eval_count": output_tokens,
+            "eval_duration": 2_000_000}
 
 
 class TestPythiaRegistry(unittest.TestCase):
@@ -114,6 +118,81 @@ class TestPythiaAsk(unittest.TestCase):
         with mock.patch("pythia.requests.post", return_value=_stream(_final(""))):
             out = pythia.ask("hi")
         self.assertTrue(out)   # falls back to a placeholder, never an empty string
+
+
+class TestPythiaStats(unittest.TestCase):
+    def test_stats_event_sums_across_tool_rounds(self):
+        responses = [
+            _stream({"message": {"role": "assistant", "content": "",
+                                 "tool_calls": [{"function": {"name": "get_weather",
+                                                              "arguments": {}}}]},
+                     "done": True, "prompt_eval_count": 10, "eval_count": 2,
+                     "eval_duration": 1_000_000}),
+            _stream(_final("It's 70 and clear.", prompt_tokens=20, output_tokens=8)),
+        ]
+        stub = {"get_weather": lambda **_: {"temp_f": 70, "description": "clear"}}
+        events = []
+        with mock.patch("pythia.requests.post", side_effect=responses), \
+                mock.patch.dict(pythia._DISPATCH, stub):
+            pythia.ask("weather?", on_event=events.append)
+
+        self.assertEqual(len(events), 1)
+        ev = events[0]
+        self.assertEqual(ev["type"], "stats")
+        self.assertEqual(ev["prompt_tokens"], 30)     # 10 + 20
+        self.assertEqual(ev["output_tokens"], 10)     # 2 + 8
+        self.assertEqual(ev["tools_called"], 1)
+        self.assertEqual(ev["tools_failed"], 0)
+        self.assertFalse(ev["cancelled"])
+
+    def test_stats_event_counts_tool_failure(self):
+        responses = [
+            _stream({"message": {"role": "assistant", "content": "",
+                                 "tool_calls": [{"function": {"name": "boom",
+                                                              "arguments": {}}}]},
+                     "done": True}),
+            _stream(_final("Sorry, that failed.")),
+        ]
+        events = []
+        with mock.patch("pythia.requests.post", side_effect=responses):
+            pythia.ask("do a thing?", on_event=events.append)
+
+        self.assertEqual(events[0]["tools_called"], 1)
+        self.assertEqual(events[0]["tools_failed"], 1)
+        self.assertEqual(events[0]["failed_tools"], ["boom"])
+
+    def test_cancel_stops_stream_and_reports_cancelled(self):
+        # Simulate a stream where cancel fires between two chunks: iter_lines
+        # yields once, the test sets cancel, then the loop must stop reading.
+        cancel = threading.Event()
+
+        def _lines():
+            yield json.dumps({"message": {"role": "assistant", "content": "Par"},
+                              "done": False}).encode()
+            cancel.set()
+            yield json.dumps(_final("tial answer never reached")).encode()
+
+        r = mock.Mock()
+        r.raise_for_status.return_value = None
+        r.iter_lines.return_value = _lines()
+        r.__enter__ = mock.Mock(return_value=r)
+        r.__exit__ = mock.Mock(return_value=False)
+
+        events = []
+        with mock.patch("pythia.requests.post", return_value=r):
+            out = pythia.ask("long question", on_event=events.append, cancel=cancel)
+
+        self.assertEqual(out, "Par")             # the second chunk was never applied
+        self.assertTrue(events[0]["cancelled"])
+
+    def test_system_prompt_comes_from_machine_spirit(self):
+        with mock.patch("pythia.machine_spirit.effective_prompt",
+                        return_value="CUSTOM PROMPT") as eff, \
+                mock.patch("pythia.requests.post", return_value=_stream(_final("hi"))) as post:
+            pythia.ask("hi")
+        eff.assert_called_once()
+        messages = post.call_args.kwargs["json"]["messages"]
+        self.assertEqual(messages[0], {"role": "system", "content": "CUSTOM PROMPT"})
 
 
 class TestPythiaPrewarm(unittest.TestCase):

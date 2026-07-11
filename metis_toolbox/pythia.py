@@ -9,14 +9,20 @@ Job:         Answer a question by talking to the local LLM (gemma4:e2b via
              tkinter, no threads, no persistence. The panel owns the UI and
              the background thread; Pythia is a pure request/response function.
 
-Contract:    ask(message, history=None) -> str
+Contract:    ask(message, history=None, on_delta=None, on_event=None,
+                 cancel=None) -> str
                  Runs the Ollama tool-calling loop and returns the model's
                  final answer as plain text. Degrades gracefully — on any
                  network/LLM failure it returns a short human-readable string
                  instead of raising, so the UI thread can print it verbatim.
+                 on_event fires once at the end with a stats payload (tokens,
+                 wall time, tool call/failure counts); cancel is a
+                 threading.Event checked mid-stream for cooperative Stop.
              TOOLS / _DISPATCH are built once, at import, by reading each tool
              module's own TOOL_DEFINITION — so the registry can never drift
-             out of sync with the handlers.
+             out of sync with the handlers. The system prompt itself lives in
+             machine_spirit.py (effective_prompt(), read fresh each call) —
+             Pythia owns no prompt text of its own.
 
 Regime:      Felhaven runs with metis_toolbox/ on sys.path, so this imports
              the tools top-level (`from tools import ...`), the same way
@@ -49,6 +55,7 @@ from typing import Any, Callable, Optional
 
 import requests
 
+import machine_spirit
 from tools import (
     horai, hephaestus, aura, ammit, midas, aether, pheme, zeno, eudoxus,
     argus, helios, hypatia, selene, morpheus, callimachus, herodotus,
@@ -107,19 +114,6 @@ _NUM_PREDICT = 1024             # max output tokens per round trip — same
 # cold reload. The model stays loaded until Ollama restarts.
 _KEEP_ALIVE = -1
 
-_SYSTEM_PROMPT = (
-    "You are Pythia, Felhaven's Resident AI. You have tools "
-    "that fetch live local data — weather, time, system vitals, a countdown "
-    "timer, market prices, network status, news headlines, math, and unit "
-    "conversions — plus web search: use search_web for current or unknown "
-    "facts, then fetch_page on one promising result if you need its full text. "
-    "Call a tool whenever the question needs current or computed data rather "
-    "than guessing. Keep answers concise and plain-spoken. "
-    "Reply in plain prose — complete sentences and short paragraphs. Do NOT use "
-    "Markdown: no asterisks, bullet points, numbered lists, headers, or bold or "
-    "italic markers. Your answers are read aloud, so write them to be spoken."
-)
-
 
 def _ms(start: float, end: Optional[float] = None) -> str:
     """Elapsed milliseconds as a log-friendly string."""
@@ -146,12 +140,20 @@ def _dispatch(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 def _chat(
     messages: list[dict[str, Any]],
     on_delta: Optional[Callable[[str], None]] = None,
-) -> dict[str, Any]:
+    cancel: Optional[threading.Event] = None,
+) -> tuple[dict[str, Any], dict[str, int]]:
     """One STREAMING round trip to Ollama's /api/chat. Reads the newline-delimited
     JSON stream, calls on_delta(piece) for each content token as it arrives, and
-    returns the assembled `message` dict (`content` plus any `tool_calls`). Raises
+    returns (assembled_message, round_stats). assembled_message carries `content`
+    plus any `tool_calls`; round_stats carries this round's prompt_tokens/
+    output_tokens/eval_ms (0 for any count Ollama's `done` chunk omits). Raises
     on HTTP/connection error — the caller in ask() converts that to a friendly
-    string. Logs time-to-first-token and total round-trip time."""
+    string. Logs time-to-first-token and total round-trip time.
+
+    If `cancel` is set mid-stream, the read loop breaks immediately: exiting the
+    `with requests.post(...)` block closes the connection, which makes Ollama
+    halt generation. Whatever content/tool_calls arrived so far are returned —
+    this never raises on cancellation."""
     payload = {
         "model": _MODEL,
         "messages": messages,
@@ -166,12 +168,15 @@ def _chat(
     role = "assistant"
     t0 = time.perf_counter()
     first_token_at: Optional[float] = None
+    stats = {"prompt_tokens": 0, "output_tokens": 0, "eval_ms": 0}
 
     with requests.post(
         _CHAT_URL, json=payload, stream=True, timeout=_REQUEST_TIMEOUT
     ) as resp:
         resp.raise_for_status()
         for raw in resp.iter_lines():
+            if cancel is not None and cancel.is_set():
+                break
             if not raw:
                 continue
             data: dict[str, Any] = json.loads(raw)
@@ -189,6 +194,9 @@ def _chat(
             if calls:
                 tool_calls.extend(calls)
             if data.get("done"):
+                stats["prompt_tokens"] = int(data.get("prompt_eval_count") or 0)
+                stats["output_tokens"] = int(data.get("eval_count") or 0)
+                stats["eval_ms"] = int((data.get("eval_duration") or 0) / 1_000_000)
                 ttft = _ms(t0, first_token_at) if first_token_at else "n/a"
                 log.info(
                     f"Pythia: round done_reason={data.get('done_reason')} "
@@ -198,7 +206,7 @@ def _chat(
     assembled: dict[str, Any] = {"role": role, "content": "".join(content_parts)}
     if tool_calls:
         assembled["tool_calls"] = tool_calls
-    return assembled
+    return assembled, stats
 
 
 # ── Contract ──────────────────────────────────────────────────────────────────
@@ -207,6 +215,8 @@ def ask(
     message: str,
     history: Optional[list[dict[str, Any]]] = None,
     on_delta: Optional[Callable[[str], None]] = None,
+    on_event: Optional[Callable[[dict[str, Any]], None]] = None,
+    cancel: Optional[threading.Event] = None,
 ) -> str:
     """
     Answer `message`, using tools as needed. `history` is prior turns as
@@ -218,24 +228,63 @@ def ask(
     including tool rounds — those usually stream no content. `on_delta` runs on
     the caller's (worker) thread, so it must marshal to the GUI thread itself.
 
+    If `on_event` is given, it's called exactly once, right before returning,
+    with a {"type": "stats", ...} payload summing prompt/output tokens and eval
+    time across every round (a tool-using answer runs multiple rounds), plus
+    tool call/failure counts and whether `cancel` fired. Runs on the caller's
+    (worker) thread like `on_delta`.
+
+    If `cancel` is given and gets set mid-answer, the in-flight round stops
+    promptly (closing the connection halts Ollama) and ask() returns whatever
+    text has streamed so far. Never raises for this either.
+
     Never raises: network/LLM problems come back as a short readable string so
     the panel can print the result straight to the transcript.
     """
     t_start = time.perf_counter()
-    messages: list[dict[str, Any]] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    system_prompt = machine_spirit.effective_prompt()
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": message})
 
+    prompt_tokens = 0
+    output_tokens = 0
+    eval_ms = 0
+    tools_called = 0
+    failed_tools: list[str] = []
+
+    def _emit(answer_text: str = "") -> str:
+        if on_event is not None:
+            on_event({
+                "type": "stats",
+                "prompt_tokens": prompt_tokens,
+                "output_tokens": output_tokens,
+                "wall_ms": int((time.perf_counter() - t_start) * 1000),
+                "eval_ms": eval_ms,
+                "tools_called": tools_called,
+                "tools_failed": len(failed_tools),
+                "failed_tools": failed_tools,
+                "cancelled": cancel is not None and cancel.is_set(),
+            })
+        return answer_text
+
     try:
         for _ in range(_MAX_TOOL_ROUNDS):
-            reply = _chat(messages, on_delta=on_delta)
+            reply, stats = _chat(messages, on_delta=on_delta, cancel=cancel)
+            prompt_tokens += stats["prompt_tokens"]
+            output_tokens += stats["output_tokens"]
+            eval_ms += stats["eval_ms"]
             messages.append(reply)                      # keep the model's turn in context
+
+            if cancel is not None and cancel.is_set():
+                log.info(f"Pythia: ask() cancelled {_ms(t_start)}")
+                return _emit((reply.get("content") or "").strip())
 
             tool_calls = reply.get("tool_calls") or []
             if not tool_calls:
                 log.info(f"Pythia: ask() total {_ms(t_start)}")
-                return (reply.get("content") or "").strip() or "(no answer)"
+                return _emit((reply.get("content") or "").strip() or "(no answer)")
 
             # Run each requested tool, feed the JSON result back as a tool turn.
             for call in tool_calls:
@@ -243,22 +292,25 @@ def ask(
                 name = fn.get("name", "")
                 args = fn.get("arguments") or {}
                 result = _dispatch(name, args)
+                tools_called += 1
+                if "error" in result:
+                    failed_tools.append(name)
                 messages.append({
                     "role": "tool",
                     "tool_name": name,
                     "content": json.dumps(result),
                 })
         # Ran out of rounds still wanting tools — hand back whatever text we have.
-        return "The oracle got stuck consulting its tools. Try rephrasing."
+        return _emit("The oracle got stuck consulting its tools. Try rephrasing.")
     except requests.Timeout:
         log.warning("Pythia: Ollama request timed out.")
-        return "The oracle is slow to answer (LLM timed out). Is the model still loading?"
+        return _emit("The oracle is slow to answer (LLM timed out). Is the model still loading?")
     except requests.ConnectionError:
         log.warning("Pythia: could not reach Ollama.")
-        return f"The oracle is unreachable — no Ollama server at {_BASE_URL}."
+        return _emit(f"The oracle is unreachable — no Ollama server at {_BASE_URL}.")
     except Exception as e:
         log.error(f"Pythia: unexpected failure: {e}")
-        return f"The oracle faltered: {e}"
+        return _emit(f"The oracle faltered: {e}")
 
 
 # ── Preload ─────────────────────────────────────────────────────────────────

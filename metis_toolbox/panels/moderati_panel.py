@@ -8,11 +8,12 @@ Job:         Host the system-monitoring tabs and switch between them. Build the
              update() — each tab body keeps its own update() and is registered
              with Kairos individually (see felhaven.py).
 
-Tabs:        HEPHAESTUS — system vitals (CPU/RAM/DISK + Aether connectivity)
-             EMANON     — rolling log watch
-             ARGUS      — network awareness (connections, traffic, firewall, DNS)
-             CERBERUS   — secrets guardian (vault, config custody, access log)
-             SETTINGS   — location / unit / clock (Themis)
+Tabs:        HEPHAESTUS     — system vitals (CPU/RAM/DISK + Aether connectivity)
+             EMANON         — rolling log watch
+             ARGUS          — network awareness (connections, traffic, firewall, DNS)
+             CERBERUS       — secrets guardian (vault, config custody, access log)
+             SETTINGS       — location / unit / clock (Themis)
+             MACHINE SPIRIT — Pythia's editable system prompt
 
 Why a host with no update(): Kairos maps worker-name -> [subscribers]; the tab
 bodies register under their existing worker names ("hephaestus", "aether",
@@ -30,6 +31,7 @@ from panels.emanon_panel     import EmanonPanel
 from panels.argus_panel      import ArgusPanel
 from panels.cerberus_panel   import CerberusPanel
 from panels.themis_panel     import ThemisPanel
+from panels.machine_spirit_panel import MachineSpiritPanel
 
 
 class ModeratiPanel(Card):
@@ -46,6 +48,7 @@ class ModeratiPanel(Card):
         self.argus      = ArgusPanel(self.body)
         self.cerberus   = CerberusPanel(self.body)
         self.themis     = ThemisPanel(self.body)
+        self.machine_spirit = MachineSpiritPanel(self.body)
 
         # key -> (body widget, accent color for the active underline).
         # Each deity keeps the card color it had as a standalone panel.
@@ -55,6 +58,7 @@ class ModeratiPanel(Card):
             "argus":      (self.argus,      C["blue"]),
             "cerberus":   (self.cerberus,   C["purple"]),
             "themis":     (self.themis,     C["amber"]),
+            "machine_spirit": (self.machine_spirit, C["green"]),
         }
 
         # ── Tab bar (loop over (key, label) — add a tab in one line) ─────────
@@ -65,7 +69,7 @@ class ModeratiPanel(Card):
         self._lines: dict[str, tk.Frame] = {}
         for key, text in (("hephaestus", "HEPHAESTUS"), ("emanon", "EMANON"),
                           ("argus", "ARGUS"), ("cerberus", "CERBERUS"),
-                          ("themis", "SETTINGS")):
+                          ("themis", "SETTINGS"), ("machine_spirit", "MACHINE SPIRIT")):
             wrap = tk.Frame(tab_row, bg=C["card"])
             wrap.pack(side="left", padx=(0, 14))
             lbl = tk.Label(wrap, text=text, font=FONTS["card_header"],
