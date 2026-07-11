@@ -125,6 +125,7 @@ arrives. Off by default; the kokoro-onnx model loads lazily on the first spoken 
 ## Architecture
 
 ```
+metis_toolbox/          ← THE APP ROOT: every path below is INSIDE this folder (e.g. binaries → metis_toolbox/bin/, not the clone root)
 felhaven.py             ← dashboard entry point: header + sidebar + content area
 kairos.py               ← central scheduler: one tick loop, all worker threads
 metis_logging.py        ← shared logging setup (rotating files → logs/)
@@ -177,7 +178,7 @@ tools/
     argus.py            ← network awareness: connections/listening/traffic/DNS/firewall/timeline (fetch-only)
     argus_peek.py       ← standalone CLI diagnostic (hand-run; raw seed of argus.py, not wired into the dashboard)
     morpheus.py         ← YouTube audio: headless mpv over JSON IPC + yt-dlp search
-bin/                    ← mpv.exe + yt-dlp.exe (Morpheus binaries; or PATH; gitignored)
+bin/                    ← mpv.exe + yt-dlp.exe (i.e. metis_toolbox/bin/; or on PATH; gitignored)
 kokoro_models/          ← Calliope's kokoro-onnx model + voices binaries (gitignored)
 ```
 
