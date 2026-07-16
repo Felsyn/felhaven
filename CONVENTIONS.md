@@ -7,7 +7,7 @@ deliberate exceptions. If you're about to add a tool, a panel, or a config file,
 read the relevant section first — the goal is that a new module looks like it was
 always here.
 
-This is a companion to [`readme.txt`](readme.txt) (the user-facing project doc).
+This is a companion to [`README.md`](README.md) (the user-facing project doc).
 Both live at the **outer root** (the clone's top folder, e.g. `metis/`) alongside
 `.gitignore`; all the *code* lives one level down in `metis_toolbox/`.
 
@@ -38,7 +38,7 @@ second module.
 
 ```
 metis\                  ← the clone's outer root (repo name)
-    readme.txt          ← user-facing project doc (markdown despite .txt)
+    README.md           ← user-facing project doc (also the public snapshot's README)
     CONVENTIONS.md       ← this file
     .gitignore
     metis_toolbox/      ← THE APP ROOT. Everything below is "the repo" in handoffs.

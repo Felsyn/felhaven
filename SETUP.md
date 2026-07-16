@@ -2,7 +2,7 @@
 
 The single source of truth for **getting Felhaven running on a fresh machine**.
 (For *what the modules are*, see [`metis_toolbox/README_PANTHEON/README.md`](metis_toolbox/README_PANTHEON/README.md);
-for the project overview, [`readme.txt`](readme.txt).)
+for the project overview, [`README.md`](README.md).)
 
 ## Honest portability answer
 
