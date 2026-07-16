@@ -82,15 +82,20 @@ downloaded separately and gitignored. Full contract:
 
 ## Requirements
 
-- Python 3.10+
-- `pip install -r metis_toolbox/requirements.txt` — `psutil` + `requests` (dashboard core) and `kokoro-onnx` + `sounddevice` + `numpy` (Calliope narration). kokoro-onnx pulls onnxruntime, **not** torch/transformers, so the stack stays light.
-- A free **Finnhub** API key for Midas PRICES (register at <https://finnhub.io/register>). Set it either by copying `metis_toolbox/.env.example` → `metis_toolbox/.env` and filling in `FINNHUB_API_KEY=...` (easiest — just relaunch, no shell restart), or as an OS environment variable (`setx FINNHUB_API_KEY "your-key"`, then open a new shell). If both are set, the OS variable wins. Without a key, PRICES rows show a no-key placeholder (no crash); the LEDGER tab works regardless (it makes no network calls).
-- A free **Brave Search** API key for **Callimachus** (Pythia's `search_web` / `fetch_page` tools). Unlike Finnhub's, this key **never touches `.env` or the environment** — it lives *only* in the **Cerberus vault**, encrypted, and is read at call time. Set it once with `python cerberus.py set <PIN> brave_api_key <your-brave-key>` (`<PIN>` is your Cerberus PIN — see [`SETUP.md`](SETUP.md) §7). Because the vault must be unlocked to read it, web search works only in a session where Cerberus was unlocked; a locked vault or a missing key degrades to a clean "search unavailable" error, never a crash.
-- For **Calliope** (narration): the kokoro-onnx model binaries (`kokoro-v1.0.int8.onnx` ~88 MB + `voices-v1.0.bin` ~27 MB), downloaded once into `metis_toolbox/kokoro_models/` (gitignored) — see [`README_PANTHEON/Calliope.md`](metis_toolbox/README_PANTHEON/Calliope.md) for the exact URLs. Without them the dashboard runs fine; it just doesn't talk (a logged no-op, never a crash).
-- For **Morpheus** (audio playback): the `mpv` and `yt-dlp` binaries. Drop `mpv.exe` and `yt-dlp.exe` into `metis_toolbox/bin/` (flash-drive-portable, takes precedence) or install them to PATH. No binaries → the Morpheus tab shows a placeholder and its controls are inert (no crash). **Honest caveat:** `yt-dlp` is the one churn-prone moving part in the whole stack — it breaks when YouTube changes its internals; the fix is `yt-dlp -U`. Blast radius is contained: when it breaks, music stops, but the rest of the dashboard is unaffected.
-- For **Echo** (text → audio *file*): the `ffmpeg` binary, **built with libopus** (the Opus encoder). Drop `ffmpeg.exe` into `metis_toolbox/bin/` (takes precedence) or install it to PATH — the same bin/-wins-over-PATH rule as Morpheus. A Windows build with libopus is the "release-essentials" package at <https://www.gyan.dev/ffmpeg/builds/>. No ffmpeg (or one without libopus) → Echo returns a clean error and writes nothing; the rest of the dashboard is unaffected. (Echo's synthesis reuses Calliope's kokoro model, so it also needs the §Calliope model binaries above.)
+Python 3.10+ and `pip install -r metis_toolbox/requirements.txt` — that is the
+whole runtime. **No database. No server.**
 
-No database. No server. **Two** API keys exist in the whole stack — **Finnhub** (Midas prices) and **Brave Search** (Callimachus web search) — and both are optional; every other network call uses a keyless public endpoint. They're stored differently on purpose: Finnhub's sits in `.env`, while Brave's lives **only** in the Cerberus vault (see below).
+**Two** API keys exist in the whole stack — **Finnhub** (Midas prices) and
+**Brave Search** (Callimachus web search) — and both are optional; every other
+network call uses a keyless public endpoint. They're stored differently on
+purpose: Finnhub's sits in `.env`, while Brave's lives **only** in the encrypted
+Cerberus vault. The optional extras degrade gracefully — without the narration
+models or the `mpv`/`yt-dlp`/`ffmpeg` binaries, that feature shows a placeholder
+or returns a clean error, never a crash.
+
+> **Installing on a fresh machine?** [`SETUP.md`](SETUP.md) is the single source
+> of truth: prerequisites, venv, Ollama for Pythia, the narration and audio
+> binaries, and how to seed both keys.
 
 ---
 
@@ -117,7 +122,7 @@ arrives. Off by default; the kokoro-onnx model loads lazily on the first spoken 
 | Weather location | `AURA_LOCATION` in `tools/aura.py` |
 | Star map location | `HYPATIA_LAT` / `HYPATIA_LON` in `tools/hypatia.py` (keep in sync with `AURA_LOCATION` — same place, two representations) |
 | Market watchlist | `midas_watchlist.json` (repo root — `{"tickers": [...]}`, US equities only). Shared seam: Plutus's LEDGER ticker dropdown reads the same file. |
-| Finnhub API key | `FINNHUB_API_KEY` — setup steps are under [Requirements](#requirements). Never committed (`.env` is gitignored). |
+| Finnhub API key | `FINNHUB_API_KEY` — setup steps are in [`SETUP.md`](SETUP.md) §6. Never committed (`.env` is gitignored). |
 | Brave Search API key | `brave_api_key` in the **Cerberus vault** — never `.env`, never an env var, never in the repo. Set via `python cerberus.py set <PIN> brave_api_key <key>`. Powers Callimachus (Pythia's web search). |
 | News feeds | `pheme_rumormill.json` (repo root — ordered `id` / `label` / `url` / `format` rows; tab order follows file order) |
 | Playlists (Morpheus) | `morpheus_playlists.json` (repo root — ordered `label` / `url` rows; PLAYLISTS-tab order follows file order). Adding a playlist is a JSON edit, never a code change |
