@@ -30,7 +30,7 @@ Each sidebar row selects one view in the content area.
 | **Celestarium** | `panels/hypatia_panel.py` · `tools/hypatia.py` · `tools/kepler.py` · `hypatia_stars.json` · `hypatia_constellations.json` · `hypatia_lore.json` | Zenith star-map projection (naval-scope style, north up) with clickable, highlightable constellations and mythology blurbs — plus a **Show Constellations** toggle for a stars-only view — and the five classical naked-eye planets (Mercury–Saturn) as alchemical-glyph markers, click for altitude + compass direction; a latitude teaching-mode preset (Current / North Pole / Equator / South Pole) dims the panel and jumps the chart, planets included; an embedded **Observation Conditions** widget (cloud-cover clarity stars, cloud %, moon illumination %) rides Aura's existing weather payload — zero new network calls |
 | **Dynastic Vault** | `panels/midas_panel.py` · `tools/midas.py` · `tools/plutus.py` · `midas_watchlist.json` | Two-tab card: **PRICES** (live price + daily % change for a configurable equities watchlist via Finnhub `/quote`) and **LEDGER** (Plutus — a manual buy/sell holdings ledger) |
 | **Scriptorium** | `panels/pheme_panel.py` · `tools/pheme.py` · `pheme_rumormill.json` | Config-driven RSS/Atom news aggregator — one independently-scrollable tab per feed (Hacker News, Ars Technica, The Verge, The Register, BBC World, NPR, WV News) |
-| **Vox Array** | `panels/morpheus_panel.py` · `tools/morpheus.py` · `morpheus_playlists.json` | YouTube **audio** player (no video, ever): saved playlists, keyless search, and transport controls (⏮ ⏯ ⏭ ⏹). Drives a headless **mpv** over its JSON IPC named pipe; uses **yt-dlp** for keyless search. Two external binaries, zero new pip packages |
+| **Vox Array** | `panels/vox_array_panel.py` · `panels/morpheus_panel.py` · `panels/echo_panel.py` · `tools/morpheus.py` · `tools/echo.py` · `morpheus_playlists.json` | Two-tab audio card. **MORPHEUS**: YouTube **audio** player (no video, ever) — saved playlists, keyless search, transport controls (⏮ ⏯ ⏭ ⏹); drives a headless **mpv** over its JSON IPC named pipe + **yt-dlp** for keyless search. **ECHO**: text → audio *file* — paste Markdown, get one `.opus` via **ffmpeg**/libopus into `local_audio/` (reuses Calliope's loaded model). Three external binaries (mpv, yt-dlp, ffmpeg), zero new pip packages |
 | **Cogitator** | `panels/cogitator_panel.py` · `panels/scribe_panel.py` · `panels/zeno_panel.py` · `panels/eudoxus_panel.py` · `tools/zeno.py` · `tools/eudoxus.py` · `scribe.py` | Three-tab utility card: **SCRIBE** (tasks + notes), **ZENO** (safe arithmetic evaluator), and **EUDOXUS** (unit converter). Request-driven; no Kairos worker. |
 
 Five tools are embedded inside other views rather than getting their own row:
@@ -86,7 +86,8 @@ downloaded separately and gitignored. Full contract:
 - `pip install -r metis_toolbox/requirements.txt` — `psutil` + `requests` (dashboard core) and `kokoro-onnx` + `sounddevice` + `numpy` (Calliope narration). kokoro-onnx pulls onnxruntime, **not** torch/transformers, so the stack stays light.
 - A free **Finnhub** API key for Midas PRICES (register at <https://finnhub.io/register>). Set it either by copying `metis_toolbox/.env.example` → `metis_toolbox/.env` and filling in `FINNHUB_API_KEY=...` (easiest — just relaunch, no shell restart), or as an OS environment variable (`setx FINNHUB_API_KEY "your-key"`, then open a new shell). If both are set, the OS variable wins. Without a key, PRICES rows show a no-key placeholder (no crash); the LEDGER tab works regardless (it makes no network calls).
 - For **Calliope** (narration): the kokoro-onnx model binaries (`kokoro-v1.0.int8.onnx` ~88 MB + `voices-v1.0.bin` ~27 MB), downloaded once into `metis_toolbox/kokoro_models/` (gitignored) — see [`README_PANTHEON/Calliope.md`](metis_toolbox/README_PANTHEON/Calliope.md) for the exact URLs. Without them the dashboard runs fine; it just doesn't talk (a logged no-op, never a crash).
-- For **Morpheus** (audio): the `mpv` and `yt-dlp` binaries. Drop `mpv.exe` and `yt-dlp.exe` into `metis_toolbox/bin/` (flash-drive-portable, takes precedence) or install them to PATH. No binaries → the Morpheus panel shows a placeholder and its controls are inert (no crash). **Honest caveat:** `yt-dlp` is the one churn-prone moving part in the whole stack — it breaks when YouTube changes its internals; the fix is `yt-dlp -U`. Blast radius is contained: when it breaks, music stops, but the rest of the dashboard is unaffected.
+- For **Morpheus** (audio playback): the `mpv` and `yt-dlp` binaries. Drop `mpv.exe` and `yt-dlp.exe` into `metis_toolbox/bin/` (flash-drive-portable, takes precedence) or install them to PATH. No binaries → the Morpheus tab shows a placeholder and its controls are inert (no crash). **Honest caveat:** `yt-dlp` is the one churn-prone moving part in the whole stack — it breaks when YouTube changes its internals; the fix is `yt-dlp -U`. Blast radius is contained: when it breaks, music stops, but the rest of the dashboard is unaffected.
+- For **Echo** (text → audio *file*): the `ffmpeg` binary, **built with libopus** (the Opus encoder). Drop `ffmpeg.exe` into `metis_toolbox/bin/` (takes precedence) or install it to PATH — the same bin/-wins-over-PATH rule as Morpheus. A Windows build with libopus is the "release-essentials" package at <https://www.gyan.dev/ffmpeg/builds/>. No ffmpeg (or one without libopus) → Echo returns a clean error and writes nothing; the rest of the dashboard is unaffected. (Echo's synthesis reuses Calliope's kokoro model, so it also needs the §Calliope model binaries above.)
 
 No database. No server. The only API key in the stack is Finnhub's (Midas); every other network call uses a keyless public endpoint.
 
@@ -118,7 +119,7 @@ arrives. Off by default; the kokoro-onnx model loads lazily on the first spoken 
 | Finnhub API key | `FINNHUB_API_KEY` — setup steps are under [Requirements](#requirements). Never committed (`.env` is gitignored). |
 | News feeds | `pheme_rumormill.json` (repo root — ordered `id` / `label` / `url` / `format` rows; tab order follows file order) |
 | Playlists (Morpheus) | `morpheus_playlists.json` (repo root — ordered `label` / `url` rows; PLAYLISTS-tab order follows file order). Adding a playlist is a JSON edit, never a code change |
-| Audio binaries (Morpheus) | `metis_toolbox/bin/mpv.exe` + `bin/yt-dlp.exe` (preferred), else on PATH. Gitignored. |
+| Audio binaries (Vox Array) | `metis_toolbox/bin/mpv.exe` + `bin/yt-dlp.exe` (Morpheus) and `bin/ffmpeg.exe` (Echo — needs libopus), preferred over PATH. Gitignored. |
 
 ---
 
@@ -178,7 +179,8 @@ tools/
     argus.py            ← network awareness: connections/listening/traffic/DNS/firewall/timeline (fetch-only)
     argus_peek.py       ← standalone CLI diagnostic (hand-run; raw seed of argus.py, not wired into the dashboard)
     morpheus.py         ← YouTube audio: headless mpv over JSON IPC + yt-dlp search
-bin/                    ← mpv.exe + yt-dlp.exe (i.e. metis_toolbox/bin/; or on PATH; gitignored)
+    echo.py             ← text → audio file: kokoro synth + ffmpeg → .opus (reuses calliope)
+bin/                    ← mpv.exe + yt-dlp.exe + ffmpeg.exe (i.e. metis_toolbox/bin/; or on PATH; gitignored)
 kokoro_models/          ← Calliope's kokoro-onnx model + voices binaries (gitignored)
 ```
 
@@ -222,5 +224,15 @@ Logs rotate into `logs/<program>.log` (~1 MB × 3 backups). The `` | ``-delimite
 | `plutus_ledger.json` | Holdings ledger — append-only buy/sell events (written by `tools/plutus.py`). Gitignored: personal financial data. |
 | `timer_state.json` | Timer state — survives restarts |
 | `morpheus_watch_later/` | mpv saved playback positions for Morpheus resume (written by mpv via `--save-position-on-quit`). Gitignored: machine-local state. |
+| `local_audio/` | Echo's generated `.opus` audio files (text → audio). Gitignored: machine-local runtime output, no retention cap. |
 | `argus_timeline.json` | Connection open/close timeline — bounded rolling diff (`maxlen=300`), written on change by `tools/argus.py`. Gitignored: machine-local state. |
 | `logs/*.log` | Rotating log files (written by `metis_logging.py`, read by `emanon.py`) |
+
+---
+
+## License
+
+The public snapshot of Felhaven is released under the **MIT License** — see
+[`LICENSE`](LICENSE). Use, copy, modify, and redistribute freely (including in
+your own projects); just keep the copyright notice and license text with it. No
+warranty.

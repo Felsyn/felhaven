@@ -1,9 +1,11 @@
 {
-  "config_dir": ".",
+  "config_dir": "config",
   "entries": [
     {"file": "pheme_rumormill.json", "desc": "Pheme news feeds — id/label/url/format rows (the Rumormill)."},
     {"file": "midas_watchlist.json", "desc": "Midas tickers — also the source for Plutus's ledger dropdown."},
     {"file": "morpheus_playlists.json", "desc": "Morpheus playlists — label/url rows for the audio engine."},
+    {"file": "hypatia_lore.json", "desc": "Hypatia constellation lore — hand-curated mythology text per constellation."},
+    {"file": "calliope_config.json", "desc": "Calliope narrator — voice, speed, language, and TTS model paths."},
     {"file": "sphynx_data.json", "desc": "Sphynx gate PIN hash — the Number of Bane that guards the app itself."},
     {"file": "cerberus_manifest.json", "desc": "This file — the Custody list of config files and their descriptions."}
   ]

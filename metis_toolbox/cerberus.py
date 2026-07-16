@@ -96,7 +96,7 @@ log = logging.getLogger("METIS.cerberus")
 _APP_ROOT     = Path(__file__).resolve().parent
 _DATA_PATH    = _APP_ROOT / "cerberus_data.json"      # committed: PIN hash
 _VAULT_PATH   = _APP_ROOT / "cerberus_vault.json"     # gitignored: ciphertext
-_MANIFEST_PATH = _APP_ROOT / "cerberus_manifest.json"  # committed: config list
+_MANIFEST_PATH = _APP_ROOT / "config" / "cerberus_manifest.json"  # committed: config list
 _LEDGER_PATH  = _APP_ROOT / "cerberus_ledger.json"    # gitignored: access log
 
 # PBKDF2 iterations for the Vault key. Modern default; runs once per unlock,
@@ -417,10 +417,11 @@ def ledger_entries() -> list[dict[str, Any]]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Custody manifest (R1) — a hand-authored list of PIN-gated config files.
+#  Custody manifest (R1) — a hand-authored WHITELIST of PIN-gated config files.
 #  File shape: {"config_dir": "<path>", "entries": [{"file","desc"}, ...]}.
-#  The manifest curates DESCRIPTIONS; it does not gate visibility — files on
-#  disk but absent from the manifest still appear with a "(no description)".
+#  The manifest gates visibility: ONLY files it lists appear in Custody. Nothing
+#  is auto-discovered from disk — Custody is the curated set of editable configs,
+#  not a directory dump. To surface a new config, add an entry here.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _manifest_load() -> dict[str, Any]:
@@ -450,9 +451,9 @@ def manifest_config_dir() -> str | None:
 
 
 def manifest_configs() -> list[dict[str, Any]]:
-    """Custody rows: manifest-described files first (in manifest order), then
-    any other files present in the config dir with a '(no description)'
-    placeholder. Each row: {file, desc, exists}."""
+    """Custody rows — the manifest whitelist, in manifest order. ONLY files the
+    manifest lists appear; nothing is auto-discovered from disk. A listed file
+    missing from disk still shows (exists=False). Each row: {file, desc, exists}."""
     m = _manifest_load()
     cfg_dir = manifest_config_dir()
 
@@ -469,14 +470,6 @@ def manifest_configs() -> list[dict[str, Any]]:
             "desc": entry.get("desc") or "(no description)",
             "exists": _exists(fname),
         }
-
-    if cfg_dir and os.path.isdir(cfg_dir):
-        for fname in sorted(os.listdir(cfg_dir)):
-            if fname in rows:
-                continue
-            if os.path.isfile(os.path.join(cfg_dir, fname)):
-                rows[fname] = {"file": fname, "desc": "(no description)",
-                               "exists": True}
 
     return list(rows.values())
 

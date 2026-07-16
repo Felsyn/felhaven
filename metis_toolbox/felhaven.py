@@ -37,7 +37,7 @@ from panels.aura_panel       import WeatherPanel
 from panels.hypatia_panel    import HypatiaPanel
 from panels.midas_panel      import MidasPanel
 from panels.pheme_panel      import PhemePanel
-from panels.morpheus_panel   import MorpheusPanel
+from panels.vox_array_panel  import VoxArrayPanel
 from panels.cogitator_panel  import CogitatorPanel
 from panels.sidebar          import Sidebar
 
@@ -143,7 +143,7 @@ class FelhavenApp:
             "hypatia":    HypatiaPanel(self._content_area),
             "midas":      MidasPanel(self._content_area),
             "pheme":      PhemePanel(self._content_area),
-            "morpheus":   MorpheusPanel(self._content_area),
+            "morpheus":   VoxArrayPanel(self._content_area),
             "cogitator":  CogitatorPanel(self._content_area, self.data, self._schedule_save),
         }
 
@@ -161,7 +161,9 @@ class FelhavenApp:
         self.kairos.register_panel("hypatia",    self._views["hypatia"])
         self.kairos.register_panel("midas",      self._views["midas"])
         self.kairos.register_panel("pheme",      self._views["pheme"])
-        self.kairos.register_panel("morpheus",   self._views["morpheus"])
+        # Reach through the Vox Array host to the Morpheus tab body — the
+        # Moderati precedent (register_panel("hephaestus", …moderati.hephaestus)).
+        self.kairos.register_panel("morpheus",   self._views["morpheus"].morpheus)
         self.kairos.start()
 
         # Let the Settings tab nudge the location/time workers on Save so a

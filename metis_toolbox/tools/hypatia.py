@@ -91,7 +91,7 @@ _active_preset = "current"
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _STARS_PATH = os.path.join(_APP_ROOT, "hypatia_stars.json")
 _CONSTELLATIONS_PATH = os.path.join(_APP_ROOT, "hypatia_constellations.json")
-_LORE_PATH = os.path.join(_APP_ROOT, "hypatia_lore.json")
+_LORE_PATH = os.path.join(_APP_ROOT, "config", "hypatia_lore.json")
 
 
 # ── Loaders ───────────────────────────────────────────────────────────────────

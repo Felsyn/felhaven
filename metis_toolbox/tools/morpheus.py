@@ -71,7 +71,7 @@ log = logging.getLogger("METIS.morpheus")
 # playlist config both live here. Anchored to __file__, so cwd never matters.
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _BIN_DIR = os.path.join(_APP_ROOT, "bin")
-_PLAYLISTS_PATH = os.path.join(_APP_ROOT, "morpheus_playlists.json")
+_PLAYLISTS_PATH = os.path.join(_APP_ROOT, "config", "morpheus_playlists.json")
 
 # Where mpv saves playback positions for resume. Explicit because --no-config
 # disables mpv's default watch-later location — see _ensure_mpv.

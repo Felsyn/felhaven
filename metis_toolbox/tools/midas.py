@@ -90,7 +90,7 @@ _QUOTE_URL = "https://finnhub.io/api/v1/quote"
 _HTTP_TIMEOUT = 6
 
 # Watchlist config lives at the app root, next to felhaven.py and .env.
-_WATCHLIST_PATH = os.path.join(_APP_ROOT, "midas_watchlist.json")
+_WATCHLIST_PATH = os.path.join(_APP_ROOT, "config", "midas_watchlist.json")
 
 
 def _load_watchlist() -> list[str]:

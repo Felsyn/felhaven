@@ -5,7 +5,8 @@
 Morpheus controls an **audio engine** — play a YouTube URL, pause, skip, stop,
 and search for a track. No video, no thumbnails, no downloads, no transcoding, no
 play history. *"I want to listen to this playlist today"* is the whole brief. It's
-the purple **Vox Array — audio** card.
+the **MORPHEUS** tab of the purple **Vox Array — audio** card (`VoxArrayPanel`
+owns the header and the MORPHEUS/ECHO tab bar; see [Echo](Echo.md)).
 
 ## Two binaries, zero new pip packages
 
@@ -92,7 +93,7 @@ position, not content**, so duplicate labels delete exactly the targeted row.
 | `morpheus_playlists.json` | yes | Saved playlists (config). |
 | `bin/mpv.exe`, `bin/yt-dlp.exe` | **no** (large binaries) | The engines; PATH copies also work. |
 | `morpheus_watch_later/` | **no** (runtime) | mpv's resume checkpoints. |
-| `panels/morpheus_panel.py` → `MorpheusPanel` | yes | The **Vox Array** card. |
+| `panels/morpheus_panel.py` → `MorpheusPanel` | yes | The **MORPHEUS** tab body (a bare `tk.Frame` inside `VoxArrayPanel`). |
 
 ## Using it
 

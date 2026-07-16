@@ -288,9 +288,10 @@ class TestManifest(_Base):
         with open(cerberus._MANIFEST_PATH, "w", encoding="utf-8") as f:
             json.dump(obj, f)
 
-    def test_described_and_undescribed_files(self):
-        # Two real files on disk; only one is described in the manifest.
-        for name in ("described.json", "stray.json"):
+    def test_only_manifest_entries_appear(self):
+        # Custody is a whitelist: files on disk but absent from the manifest —
+        # stray .json, scripts, icons, .env — must never surface.
+        for name in ("described.json", "stray.json", "launch.bat", ".env"):
             with open(os.path.join(self._dir, name), "w", encoding="utf-8") as f:
                 f.write("{}")
         self._write_manifest({
@@ -298,9 +299,9 @@ class TestManifest(_Base):
             "entries": [{"file": "described.json", "desc": "the described one"}],
         })
         rows = {r["file"]: r for r in cerberus.manifest_configs()}
+        self.assertEqual(set(rows), {"described.json"})
         self.assertEqual(rows["described.json"]["desc"], "the described one")
         self.assertTrue(rows["described.json"]["exists"])
-        self.assertEqual(rows["stray.json"]["desc"], "(no description)")
 
     def test_manifest_entry_without_desc_falls_back(self):
         self._write_manifest({

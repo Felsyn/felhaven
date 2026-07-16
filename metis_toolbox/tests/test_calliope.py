@@ -95,23 +95,23 @@ class TestCleanForSpeech(_CalliopeBase):
 
 class TestTakeChunk(_CalliopeBase):
     def test_short_text_is_one_chunk(self):
-        self.assertEqual(calliope._take_chunk("Short one.", 90), ("Short one.", ""))
+        self.assertEqual(calliope.take_chunk("Short one.", 90), ("Short one.", ""))
 
     def test_splits_long_at_clause_boundary(self):
         text = "Based on the search results, the main objective is to find the informant."
-        chunk, rest = calliope._take_chunk(text, 40)
+        chunk, rest = calliope.take_chunk(text, 40)
         self.assertEqual(chunk, "Based on the search results,")
         self.assertTrue(rest.startswith("the main objective"))
 
     def test_prefers_sentence_end_over_clause(self):
         text = "First done. Then a much longer continuation follows here."
-        chunk, rest = calliope._take_chunk(text, 40)
+        chunk, rest = calliope.take_chunk(text, 40)
         self.assertEqual(chunk, "First done.")
         self.assertTrue(rest.startswith("Then a much"))
 
     def test_falls_back_to_space(self):
         text = "one two three four five six seven eight nine ten"
-        chunk, rest = calliope._take_chunk(text, 12)
+        chunk, rest = calliope.take_chunk(text, 12)
         self.assertLessEqual(len(chunk), 13)          # broke at a space near the cap
         self.assertTrue(chunk and rest)
         self.assertEqual(chunk, chunk.strip())
@@ -214,8 +214,8 @@ class TestFillers(_CalliopeBase):
     def test_wav_round_trip(self):
         pcm = (np.sin(np.linspace(0, 20, 2400)) * 0.5).astype(np.float32)
         path = Path(self._tmp.name) / "t.wav"
-        calliope._save_wav(path, pcm)
-        back = calliope._load_wav(path)
+        calliope.save_wav(path, pcm)
+        back = calliope.load_wav(path)
         self.assertEqual(back.shape, pcm.shape)
         self.assertLess(float(np.max(np.abs(back - pcm))), 1e-3)   # int16 quantization
 
@@ -232,7 +232,7 @@ class TestFillers(_CalliopeBase):
         pcm = np.zeros(1200, dtype=np.float32)
         phrases = calliope._CONFIG["fillers"]
         calliope._FILLER_DIR.mkdir(parents=True, exist_ok=True)
-        calliope._save_wav(calliope._filler_path(phrases[0]), pcm)   # pre-cache one
+        calliope.save_wav(calliope._filler_path(phrases[0]), pcm)   # pre-cache one
         with mock.patch("calliope.synthesize", return_value=pcm) as synth:
             calliope.generate_fillers()
         self.assertEqual(synth.call_count, len(phrases) - 1)      # the cached one skipped
@@ -241,7 +241,7 @@ class TestFillers(_CalliopeBase):
         pcm = np.zeros(600, dtype=np.float32)
         phrase = calliope._CONFIG["fillers"][0]
         calliope._FILLER_DIR.mkdir(parents=True, exist_ok=True)
-        calliope._save_wav(calliope._filler_path(phrase), pcm)
+        calliope.save_wav(calliope._filler_path(phrase), pcm)
         with mock.patch("calliope._ensure_workers"):
             calliope.speak_filler()
         self.assertEqual(calliope._audio_queue.qsize(), 1)
@@ -262,7 +262,7 @@ class TestFillers(_CalliopeBase):
         pcm = np.zeros(600, dtype=np.float32)
         phrase = calliope._CONFIG["fillers"][0]
         calliope._FILLER_DIR.mkdir(parents=True, exist_ok=True)
-        calliope._save_wav(calliope._filler_path(phrase), pcm)
+        calliope.save_wav(calliope._filler_path(phrase), pcm)
         calliope._real_audio_queued = True
         with mock.patch("calliope._ensure_workers"):
             calliope.speak_filler()

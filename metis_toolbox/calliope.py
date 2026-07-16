@@ -20,6 +20,13 @@ Contract:    speak(text) -> None
                  The pure, hardware-free half: text in, 24 kHz float32 PCM out
                  (or None on any failure). This is the hermetic-testable seam —
                  mock _load_model() and no audio device or model file is touched.
+
+Shared seam:  synthesize(), take_chunk(), save_wav(), load_wav() and SAMPLE_RATE
+              are the public kokoro-audio helpers. Echo (tools/echo.py) reuses
+              them so there is ONE source of truth for how kokoro PCM is chunked
+              and written to a WAV — Echo owns no model instance and no second
+              WAV writer (the same "one source of truth" spirit as the singleton
+              model). Do not re-privatise them.
              prewarm() -> Thread
                  Load the kokoro-onnx model on a background thread at startup so
                  the first spoken line isn't delayed by the one-time model load.
@@ -59,14 +66,15 @@ import threading
 import time
 import wave
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import numpy as np
 
 log = logging.getLogger("METIS.calliope")
 
-_CONFIG_FILE = Path(__file__).resolve().parent / "calliope_config.json"
-_FILLER_DIR = _CONFIG_FILE.parent / "calliope_fillers"
+_APP_DIR = Path(__file__).resolve().parent
+_CONFIG_FILE = _APP_DIR / "config" / "calliope_config.json"
+_FILLER_DIR = _APP_DIR / "calliope_fillers"
 
 # ── Config (loaded once at import; fail soft to sane defaults) ─────────────────
 
@@ -102,9 +110,10 @@ _auto_speak: bool = bool(_CONFIG.get("auto_speak", False))
 
 
 def _resolve(path_str: str) -> Path:
-    """Resolve a config path against this file's directory unless it's absolute."""
+    """Resolve a config path against the app dir unless it's absolute. Anchored
+    at the app root (not config/), so kokoro_models/… paths keep resolving there."""
     p = Path(path_str)
-    return p if p.is_absolute() else (_CONFIG_FILE.parent / p)
+    return p if p.is_absolute() else (_APP_DIR / p)
 
 
 # ── kokoro-onnx model (lazy singleton, loaded once and held warm) ─────────────
@@ -190,9 +199,11 @@ def synthesize(text: str) -> Optional[np.ndarray]:
             )
         log.info(
             "Calliope: synth %d chars -> %.2fs audio in %.0fms",
-            len(cleaned), len(audio) / _SAMPLE_RATE, (time.perf_counter() - t0) * 1000,
+            len(cleaned), len(audio) / SAMPLE_RATE, (time.perf_counter() - t0) * 1000,
         )
-        return audio
+        # kokoro-onnx is untyped, so model.create() is Any; the contract is a
+        # float32 ndarray. cast keeps the public return type honest (no runtime op).
+        return cast(np.ndarray, audio)
     except Exception as e:  # noqa: BLE001 — a synthesis bug must not crash the GUI
         log.error("Calliope: synthesis failed: %s", e)
         return None
@@ -200,7 +211,7 @@ def synthesize(text: str) -> Optional[np.ndarray]:
 
 # ── Playback (serialized; one utterance at a time) ────────────────────────────
 
-_SAMPLE_RATE = 24000           # kokoro-onnx emits 24 kHz natively
+SAMPLE_RATE = 24000           # kokoro-onnx emits 24 kHz natively
 _play_lock = threading.Lock()
 
 
@@ -209,13 +220,13 @@ def _play(audio: np.ndarray) -> None:
     absent device degrades to a logged no-op. sounddevice is imported lazily so
     the pure synthesize() path (and its test) never needs an audio backend."""
     try:
-        import sounddevice as sd
+        import sounddevice as sd  # type: ignore[import-untyped]
     except Exception as e:  # noqa: BLE001
         log.error("Calliope: sounddevice unavailable (%s) — cannot play.", e)
         return
     with _play_lock:            # never overlap two utterances on one device
         try:
-            sd.play(audio, _SAMPLE_RATE)
+            sd.play(audio, SAMPLE_RATE)
             sd.wait()
         except Exception as e:  # noqa: BLE001 — device busy / no output device
             log.error("Calliope: playback failed: %s", e)
@@ -288,7 +299,7 @@ _CHUNK_BOUNDARIES = (
 )
 
 
-def _take_chunk(text: str, cap: int) -> tuple[str, str]:
+def take_chunk(text: str, cap: int) -> tuple[str, str]:
     """Split `text` into (chunk, rest): a chunk of at most ~`cap` chars broken at
     the latest natural boundary before the cap, and the remainder. If the text
     already fits, the whole thing is the chunk. A single over-long token with no
@@ -333,7 +344,7 @@ def _synth_worker() -> None:
             except queue.Empty:
                 break
         cap = _CHUNK_MAX_CHARS if first_done else _FIRST_CHUNK_MAX_CHARS
-        chunk, buf = _take_chunk(buf, cap)
+        chunk, buf = take_chunk(buf, cap)
         first_done = True
         if not chunk:
             continue
@@ -460,17 +471,17 @@ def _filler_path(phrase: str) -> Path:
     return _FILLER_DIR / f"filler_{digest}.wav"
 
 
-def _save_wav(path: Path, pcm: np.ndarray) -> None:
+def save_wav(path: Path, pcm: np.ndarray) -> None:
     """Write float32 [-1, 1] PCM as a 24 kHz mono 16-bit WAV (stdlib only)."""
     ints = np.clip(pcm * 32767.0, -32768, 32767).astype("<i2")
     with wave.open(str(path), "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
-        w.setframerate(_SAMPLE_RATE)
+        w.setframerate(SAMPLE_RATE)
         w.writeframes(ints.tobytes())
 
 
-def _load_wav(path: Path) -> np.ndarray:
+def load_wav(path: Path) -> np.ndarray:
     """Read a 16-bit WAV back to float32 [-1, 1] PCM."""
     with wave.open(str(path), "rb") as w:
         frames = w.readframes(w.getnframes())
@@ -496,7 +507,7 @@ def generate_fillers() -> None:
         if audio is None:
             continue
         try:
-            _save_wav(path, audio)
+            save_wav(path, audio)
             log.info("Calliope: cached filler %r", phrase)
         except Exception as e:  # noqa: BLE001
             log.error("Calliope: could not save filler %r (%s)", phrase, e)
@@ -522,7 +533,7 @@ def speak_filler() -> None:
     if not ready:
         return
     try:
-        pcm = _load_wav(_filler_path(random.choice(ready)))
+        pcm = load_wav(_filler_path(random.choice(ready)))
     except Exception as e:  # noqa: BLE001
         log.error("Calliope: could not load filler (%s)", e)
         return

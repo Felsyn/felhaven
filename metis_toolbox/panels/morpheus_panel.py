@@ -1,7 +1,14 @@
 """
 Morpheus panel — YouTube audio player (no video, ever).
 
-MorpheusPanel hosts, top to bottom inside self.body:
+MorpheusPanel is a bare tk.Frame tab body inside VoxArrayPanel (the MORPHEUS
+tab) — the "Vox Array" Card header + tab bar are owned by that host now. It
+keeps its own update() and stays registered with Kairos directly under the
+"morpheus" worker (felhaven.py reaches through the host to it). This is exactly
+the Moderati refactor (VitalsPanel / EmanonPanel became bare Frame tab bodies);
+only the outer shell changed — transport, playlists, search are untouched.
+
+MorpheusPanel hosts, top to bottom inside itself:
     Transport row  — now-playing label + position + ⏮ ⏯ ⏭ ⏹ (always visible).
     Tab bar        — PLAYLISTS / SEARCH (midas tab pattern: tk.Label + underline).
     PLAYLISTS tab  — one clickable row per morpheus_playlists.json entry.
@@ -36,7 +43,7 @@ import queue
 import threading
 import tkinter as tk
 
-from theme import C, FONTS, Card, PhosphorScroll
+from theme import C, FONTS, PhosphorScroll
 
 from tools import morpheus
 
@@ -114,11 +121,14 @@ class _ScrollFrame(tk.Frame):
         self._canvas.yview_moveto(0)
 
 
-class MorpheusPanel(Card):
-    """Transport + playlists + search. Status polled by Kairos; mutations by UI."""
+class MorpheusPanel(tk.Frame):
+    """Transport + playlists + search. Status polled by Kairos; mutations by UI.
+
+    A bare Frame tab body inside VoxArrayPanel (the MORPHEUS tab); the Card
+    header + tab bar are the host's now."""
 
     def __init__(self, parent):
-        super().__init__(parent, "Vox Array — audio", C["purple"])
+        super().__init__(parent, bg=C["card"])
 
         avail = morpheus.available()
         self._enabled = bool(avail["mpv"] and avail["ytdlp"])
@@ -143,7 +153,7 @@ class MorpheusPanel(Card):
     # ── transport row ─────────────────────────────────────────────────────────
 
     def _build_transport(self) -> None:
-        tr = tk.Frame(self.body, bg=C["card"])
+        tr = tk.Frame(self, bg=C["card"])
         tr.pack(fill="x", pady=(6, 4))
 
         self._now_lbl = tk.Label(
@@ -195,7 +205,7 @@ class MorpheusPanel(Card):
     # ── tab bar ─────────────────────────────────────────────────────────────
 
     def _build_tabs(self) -> None:
-        tab_row = tk.Frame(self.body, bg=C["card"])
+        tab_row = tk.Frame(self, bg=C["card"])
         tab_row.pack(fill="x", pady=(6, 0))
 
         self._tabs: dict[str, tk.Label] = {}
@@ -212,8 +222,8 @@ class MorpheusPanel(Card):
             self._tabs[key] = lbl
             self._lines[key] = line
 
-        self._playlists_frame = tk.Frame(self.body, bg=C["card"])
-        self._search_frame = tk.Frame(self.body, bg=C["card"])
+        self._playlists_frame = tk.Frame(self, bg=C["card"])
+        self._search_frame = tk.Frame(self, bg=C["card"])
 
         if self._enabled:
             self._build_playlists(self._playlists_frame)

@@ -48,6 +48,10 @@ kokoro_models/
 # phrases on first launch. Machine-local cache, not source.
 calliope_fillers/
 
+# Echo — generated .opus audio files (text → audio). Runtime output, not source;
+# same bucket as morpheus_watch_later/. No retention cap by design.
+local_audio/
+
 # Personal design / idea notes (kept local, not source of record)
 specs/felhaven_design_v01.md
 

@@ -48,10 +48,11 @@ log = logging.getLogger("METIS.pheme")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-# pheme_rumormill.json sits at the repo root — one directory up from tools/.
-# abspath() makes resolution independent of the current working directory.
+# pheme_rumormill.json lives in config/ under the app root — two levels up from
+# tools/. abspath() makes resolution independent of the current working directory.
 _CONFIG_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "config",
     "pheme_rumormill.json",
 )
 

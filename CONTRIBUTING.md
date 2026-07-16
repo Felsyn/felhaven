@@ -37,9 +37,11 @@ network, no audio, no models needed) runs from `metis_toolbox/`:
 python -X utf8 -m unittest discover -s tests -p "test_*.py"
 ```
 
-## A note on reuse
+## License
 
-This snapshot ships **without a license**, which means it is "all rights
-reserved" by default: you're welcome to view, clone, and fork it on GitHub, but
-it is **not licensed for redistribution or reuse** elsewhere. If you'd like to
-use part of it, open an issue and ask.
+This snapshot is released under the **MIT License** — see
+[`LICENSE`](LICENSE). You're free to use, copy, modify, and redistribute it,
+including in your own projects, as long as the copyright notice and license text
+travel with it. It's provided as-is, with no warranty. (Development still lives
+in a separate private repo — see above — so this covers *reuse* of the code, not
+a contribution pipeline back into the project.)

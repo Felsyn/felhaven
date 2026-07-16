@@ -17,6 +17,10 @@ dependencies** that a clone alone can't satisfy:
 - **Calliope (narration)** needs a ~325 MB kokoro voice model downloaded
   separately, plus a working audio device. Missing → the dashboard runs, it just
   doesn't talk.
+- **Vox Array audio (Morpheus + Echo)** needs external binaries dropped into
+  `metis_toolbox/bin/`: `mpv` + `yt-dlp` for Morpheus (YouTube playback), and
+  `ffmpeg` (with libopus) for Echo (text → audio file). Missing → those two tabs
+  degrade (a placeholder / a clean error); nothing else is affected. See §5.
 
 Everything else (weather, system vitals, stocks, news, star map, timer,
 calculator, etc.) runs from the base install with no keys.
@@ -89,7 +93,29 @@ Filler audio and all voice/latency tuning live in `metis_toolbox/calliope_config
 If the models are absent, Calliope logs it once and stays silent — nothing else
 is affected.
 
-## 5. Keys — seed your own (both optional, both degrade gracefully)
+## 5. Audio binaries — Vox Array (optional)
+
+The **Vox Array** card's two tabs each need one external binary. Both follow the
+same rule: a copy in `metis_toolbox/bin/` **wins over** PATH (flash-drive-portable),
+and absence degrades cleanly — never a crash. All are gitignored, so a fresh clone
+won't have them: this is a per-machine setup step.
+
+- **Morpheus** (YouTube audio playback) — `mpv.exe` + `yt-dlp.exe`. Drop them in
+  `metis_toolbox/bin/` or install to PATH. Missing → the MORPHEUS tab shows a
+  placeholder with inert controls. *Caveat:* `yt-dlp` is the one churn-prone piece
+  in the whole stack — it breaks when YouTube changes its internals; the fix is
+  `yt-dlp -U`.
+- **Echo** (text → audio *file*) — `ffmpeg.exe`, **built with libopus** (the Opus
+  encoder Echo uses). A Windows build with libopus is the "release-essentials"
+  package at <https://www.gyan.dev/ffmpeg/builds/> — unzip and drop its
+  `bin/ffmpeg.exe` into `metis_toolbox/bin/`. Missing, or built without libopus →
+  Echo returns a clean error and writes nothing. Echo's synthesis reuses Calliope's
+  kokoro model (§4), so it needs those binaries too.
+
+Echo's output `.opus` files land in `metis_toolbox/local_audio/` (gitignored,
+machine-local, no retention cap).
+
+## 6. Keys — seed your own (both optional, both degrade gracefully)
 
 These are **your** keys; none are shipped in the repo.
 
@@ -105,10 +131,10 @@ These are **your** keys; none are shipped in the repo.
   ```
   python cerberus.py set <PIN> brave_api_key <your-brave-key>
   ```
-  (`<PIN>` is your Cerberus PIN — see §6.) No key → web search returns a clean
+  (`<PIN>` is your Cerberus PIN — see §7.) No key → web search returns a clean
   "search unavailable" error; the rest of the chat is unaffected.
 
-## 6. First run — the boot gates set themselves up
+## 7. First run — the boot gates set themselves up
 
 Launch via the portable launcher (double-click, or from a shell):
 
@@ -138,7 +164,7 @@ starts fresh. If you only want the dashboard panels (no chat, no keys), you can
 skip the launcher and run `python felhaven.py` directly — but you'll still hit the
 Sphynx gate, which `Felhaven.bat` normally fronts.
 
-## 7. Personalize
+## 8. Personalize
 
 - **Location, units & clock** — open the **SETTINGS** tab (under **Moderati**) and
   enter your latitude / longitude, plus an optional weather-location string (a city
@@ -149,7 +175,7 @@ Sphynx gate, which `Felhaven.bat` normally fronts.
   - *Headless/CI override:* set the `AURA_LOCATION` env var (city, ZIP, or
     `lat,lon`) to override the weather location without touching the settings file.
 
-## 8. Optional — run the tests
+## 9. Optional — run the tests
 
 Hermetic (no network, no audio, no models needed):
 

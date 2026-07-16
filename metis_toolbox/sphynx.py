@@ -52,7 +52,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-_DATA_PATH = Path(__file__).with_name("sphynx_data.json")
+_DATA_PATH = Path(__file__).resolve().parent / "config" / "sphynx_data.json"
 
 _ATTEMPTS_REMAINING = 3   # resets to this every process start — see State above
 
