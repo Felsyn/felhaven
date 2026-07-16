@@ -4,11 +4,16 @@ Thanks for looking! First, an honest heads-up about what this repository is.
 
 ## This is a read-only public snapshot
 
-`Felsyn/felhaven` is a **frozen, portable snapshot** (FOE v.01) of Felhaven — a
-personal, local-first dashboard built on the Metis Toolbox. **Active development
-happens in a separate private repository;** this repo is a point-in-time copy
-published so others can read, run, and learn from it. It has no ongoing commit
-history and is not where the project is worked on day to day.
+`Felsyn/felhaven` is a **read-only public mirror** of the **Felhaven Operating
+Environment (FOE)** — a personal, local-first dashboard built on the Metis
+Toolbox. **Active development happens in a separate private repository;** this
+repo is published so others can read, run, and learn from it, and is not where
+the project is worked on day to day.
+
+It is **refreshed periodically**, not frozen: each release lands here as a single
+clean commit, and it is **never force-pushed** — so if you have already cloned
+it, **`git pull` brings you the latest release**. What you won't find is the
+private repo's day-to-day commit history; only the published snapshots.
 
 ## Issues are welcome
 
