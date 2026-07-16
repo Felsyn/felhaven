@@ -78,13 +78,20 @@ _FILLER_DIR = _APP_DIR / "calliope_fillers"
 
 # ── Config (loaded once at import; fail soft to sane defaults) ─────────────────
 
+# These mirror the shipped calliope_config.json (and the table in specs/calliope.md
+# §3): the fallback is only "a working narrator" if it names the model that is
+# actually on disk — fp32, not int8 — and keeps the fp32-era latency tuning.
 _DEFAULTS: dict[str, Any] = {
     "voice": "af_nicole",
-    "speed": 1.3,
+    "speed": 1.0,
     "lang": "en-us",
-    "model_path": "kokoro_models/kokoro-v1.0.int8.onnx",
+    "model_path": "kokoro_models/kokoro-v1.0.onnx",
     "voices_path": "kokoro_models/voices-v1.0.bin",
     "auto_speak": False,
+    "filler_delay_ms": 1000,
+    "prebuffer_chunks": 2,
+    "first_chunk_max_chars": 70,
+    "chunk_max_chars": 70,
 }
 
 
@@ -263,14 +270,14 @@ def _split_sentences(text: str) -> list[str]:
 # chunks grow to _CHUNK_MAX_CHARS. An epoch counter gives clean barge-in: stop()
 # bumps it, and any synth already in flight (or buffered text) is discarded.
 
-_FIRST_CHUNK_MAX_CHARS = int(_CONFIG.get("first_chunk_max_chars", 90))
-_CHUNK_MAX_CHARS = int(_CONFIG.get("chunk_max_chars", 240))
+_FIRST_CHUNK_MAX_CHARS = int(_CONFIG.get("first_chunk_max_chars", _DEFAULTS["first_chunk_max_chars"]))
+_CHUNK_MAX_CHARS = int(_CONFIG.get("chunk_max_chars", _DEFAULTS["chunk_max_chars"]))
 # Lookahead depth: hold the answer until this many chunks are synthesized before
 # playback starts, so a lead exists before the first word. Because synth is now
 # faster than real time (RTF < 1), once the lead exists it only grows — gaps
 # vanish structurally. The filler covers this wait. Only applies to auto-speak
 # turns (a filler is playing); the manual speak button plays immediately.
-_PREBUFFER_CHUNKS = int(_CONFIG.get("prebuffer_chunks", 2))
+_PREBUFFER_CHUNKS = int(_CONFIG.get("prebuffer_chunks", _DEFAULTS["prebuffer_chunks"]))
 _PREBUFFER_TIMEOUT = 6.0       # s — safety cap so prebuffer can never hang
 _AUDIO_BUFFER = 16             # max synthesized chunks held ahead of playback
 
@@ -516,7 +523,7 @@ def generate_fillers() -> None:
 def filler_delay_ms() -> int:
     """How long the GUI should wait after Enter before firing the filler (a beat
     so it doesn't react the instant you hit the key). Config-driven, ms."""
-    return int(_CONFIG.get("filler_delay_ms", 1000))
+    return int(_CONFIG.get("filler_delay_ms", _DEFAULTS["filler_delay_ms"]))
 
 
 def speak_filler() -> None:

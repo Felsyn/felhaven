@@ -13,6 +13,7 @@ the coalescing logic is exercised via the pure _coalesce() helper). The
 kokoro-onnx model is replaced by a fake whose .create() returns canned PCM.
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -64,6 +65,39 @@ class _CalliopeBase(unittest.TestCase):
         for q in (calliope._text_queue, calliope._audio_queue):
             while not q.empty():
                 q.get_nowait()
+
+
+class TestConfigDefaults(_CalliopeBase):
+    """_load_config() promises a missing/garbled config degrades to a WORKING
+    narrator, but nothing exercises that path on a healthy install — so the
+    defaults can rot silently (they once still named the retired int8 model,
+    which exists on no current install: the fallback synthesized nothing).
+    Guard it in lockstep against the shipped config rather than by restating
+    the values here, which would rot the same way."""
+
+    def _shipped(self) -> dict:
+        with open(calliope._CONFIG_FILE, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_defaults_agree_with_shipped_config(self):
+        shipped = self._shipped()
+        for key, default in calliope._DEFAULTS.items():
+            with self.subTest(key=key):
+                self.assertIn(key, shipped, f"{key} defaulted but not shipped")
+                self.assertEqual(default, shipped[key])
+
+    def test_defaults_cover_every_tunable_config_key(self):
+        # 'fillers' is prose, not a tunable: absent, generate_fillers() renders
+        # none and the narrator still speaks, so it is deliberately undefaulted.
+        missing = set(self._shipped()) - set(calliope._DEFAULTS) - {"fillers"}
+        self.assertEqual(missing, set())
+
+    def test_config_absent_still_yields_a_loadable_model_path(self):
+        # The fail-soft path: no config at all must still name the model that
+        # ships on disk, not a retired one.
+        with mock.patch.object(calliope, "_CONFIG_FILE", Path("no-such-config.json")):
+            cfg = calliope._load_config()
+        self.assertEqual(cfg["model_path"], self._shipped()["model_path"])
 
 
 class TestSplitSentences(_CalliopeBase):
