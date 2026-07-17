@@ -17,10 +17,13 @@ dependencies** that a clone alone can't satisfy:
 - **Calliope (narration)** needs a ~325 MB kokoro voice model downloaded
   separately, plus a working audio device. Missing → the dashboard runs, it just
   doesn't talk.
-- **Vox Array audio (Morpheus + Echo)** needs external binaries dropped into
-  `metis_toolbox/bin/`: `mpv` + `yt-dlp` for Morpheus (YouTube playback), and
-  `ffmpeg` (with libopus) for Echo (text → audio file). Missing → those two tabs
-  degrade (a placeholder / a clean error); nothing else is affected. See §5.
+- **Vox Array audio (Morpheus + Echo + Orpheus)** needs external binaries dropped
+  into `metis_toolbox/bin/`: `mpv` + `yt-dlp` for Morpheus (YouTube playback), and
+  `ffmpeg` (with libopus) for Echo (text → audio file) **and** Orpheus (playing
+  that file back) — one binary, shared, decode instead of encode. Missing →
+  those tabs degrade (a placeholder / a clean error); nothing else is affected.
+  See §5. All spoken/played audio (Calliope, Orpheus) also needs a working
+  output device — Harmonia is the one thing in the process that touches it.
 
 Everything else (weather, system vitals, stocks, news, star map, timer,
 calculator, etc.) runs from the base install with no keys.
@@ -95,25 +98,33 @@ is affected.
 
 ## 5. Audio binaries — Vox Array (optional)
 
-The **Vox Array** card's two tabs each need one external binary. Both follow the
-same rule: a copy in `metis_toolbox/bin/` **wins over** PATH (flash-drive-portable),
-and absence degrades cleanly — never a crash. All are gitignored, so a fresh clone
-won't have them: this is a per-machine setup step.
+The **Vox Array** card's three tabs need two external binaries between them (Echo
+and Orpheus share one). All follow the same rule: a copy in `metis_toolbox/bin/`
+**wins over** PATH (flash-drive-portable), and absence degrades cleanly — never a
+crash. All are gitignored, so a fresh clone won't have them: this is a per-machine
+setup step.
 
 - **Morpheus** (YouTube audio playback) — `mpv.exe` + `yt-dlp.exe`. Drop them in
   `metis_toolbox/bin/` or install to PATH. Missing → the MORPHEUS tab shows a
   placeholder with inert controls. *Caveat:* `yt-dlp` is the one churn-prone piece
   in the whole stack — it breaks when YouTube changes its internals; the fix is
   `yt-dlp -U`.
-- **Echo** (text → audio *file*) — `ffmpeg.exe`, **built with libopus** (the Opus
-  encoder Echo uses). A Windows build with libopus is the "release-essentials"
+- **Echo** (text → audio *file*) and **Orpheus** (play that file back) —
+  `ffmpeg.exe`, **built with libopus** (the Opus codec both use, Echo to encode
+  and Orpheus to decode). A Windows build with libopus is the "release-essentials"
   package at <https://www.gyan.dev/ffmpeg/builds/> — unzip and drop its
   `bin/ffmpeg.exe` into `metis_toolbox/bin/`. Missing, or built without libopus →
-  Echo returns a clean error and writes nothing. Echo's synthesis reuses Calliope's
-  kokoro model (§4), so it needs those binaries too.
+  ECHO returns a clean error and writes nothing, and ORPHEUS shows a placeholder
+  with an empty file list. Echo's synthesis reuses Calliope's kokoro model (§4),
+  so it needs those binaries too. Orpheus needs no model at all — it only decodes
+  what Echo already wrote.
 
 Echo's output `.opus` files land in `metis_toolbox/local_audio/` (gitignored,
-machine-local, no retention cap).
+machine-local, no retention cap) — the same folder Orpheus's ORPHEUS tab lists
+and plays from. Both Calliope's narration and Orpheus's playback go through
+**Harmonia** (`metis_toolbox/harmonia.py`), the one module that actually touches
+the audio device — no separate setup step, just the same working output device
+Calliope already needs.
 
 ## 6. Keys — seed your own (both optional, both degrade gracefully)
 

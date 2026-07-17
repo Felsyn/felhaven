@@ -30,7 +30,7 @@ Each sidebar row selects one view in the content area.
 | **Celestarium** | `panels/hypatia_panel.py` · `tools/hypatia.py` · `tools/kepler.py` · `hypatia_stars.json` · `hypatia_constellations.json` · `hypatia_lore.json` | Zenith star-map projection (naval-scope style, north up) with clickable, highlightable constellations and mythology blurbs — plus a **Show Constellations** toggle for a stars-only view — and the five classical naked-eye planets (Mercury–Saturn) as alchemical-glyph markers, click for altitude + compass direction; a latitude teaching-mode preset (Current / North Pole / Equator / South Pole) dims the panel and jumps the chart, planets included; an embedded **Observation Conditions** widget (cloud-cover clarity stars, cloud %, moon illumination %) rides Aura's existing weather payload — zero new network calls |
 | **Dynastic Vault** | `panels/midas_panel.py` · `tools/midas.py` · `tools/plutus.py` · `midas_watchlist.json` | Two-tab card: **PRICES** (live price + daily % change for a configurable equities watchlist via Finnhub `/quote`) and **LEDGER** (Plutus — a manual buy/sell holdings ledger) |
 | **Scriptorium** | `panels/pheme_panel.py` · `tools/pheme.py` · `pheme_rumormill.json` | Config-driven RSS/Atom news aggregator — one independently-scrollable tab per feed (Hacker News, Ars Technica, The Verge, The Register, BBC World, NPR, WV News) |
-| **Vox Array** | `panels/vox_array_panel.py` · `panels/morpheus_panel.py` · `panels/echo_panel.py` · `tools/morpheus.py` · `tools/echo.py` · `morpheus_playlists.json` | Two-tab audio card. **MORPHEUS**: YouTube **audio** player (no video, ever) — saved playlists, keyless search, transport controls (⏮ ⏯ ⏭ ⏹); drives a headless **mpv** over its JSON IPC named pipe + **yt-dlp** for keyless search. **ECHO**: text → audio *file* — paste Markdown, get one `.opus` via **ffmpeg**/libopus into `local_audio/` (reuses Calliope's loaded model). Three external binaries (mpv, yt-dlp, ffmpeg), zero new pip packages |
+| **Vox Array** | `panels/vox_array_panel.py` · `panels/morpheus_panel.py` · `panels/echo_panel.py` · `panels/orpheus_panel.py` · `tools/morpheus.py` · `tools/echo.py` · `tools/orpheus.py` · `harmonia.py` · `morpheus_playlists.json` | Three-tab audio card. **MORPHEUS**: YouTube **audio** player (no video, ever) — saved playlists, keyless search, transport controls (⏮ ⏯ ⏭ ⏹); drives a headless **mpv** over its JSON IPC named pipe + **yt-dlp** for keyless search. **ECHO**: text → audio *file* — paste Markdown, get one `.opus` via **ffmpeg**/libopus into `local_audio/` (reuses Calliope's loaded model); both fields clear themselves on a successful save (left alone on error, so a failed attempt stays editable for retry), and the text box + filename field both have a themed right-click Cut/Copy/Paste/Select All menu (the Pythia home-chat precedent). **ORPHEUS**: play back one of Echo's `.opus` files (▶/⏹ only — no pause, seek, or playlists), each listed with its **duration** (read from ffmpeg's own metadata, cached per file — no ffprobe dependency). All spoken/played sound (Calliope's narration, Orpheus's playback) now goes through **Harmonia** (`harmonia.py`, app root), the sole owner of the output device — it yields Morpheus (stops any music) before playing anything, so the two engines never fight over the same speaker. Four external binaries (mpv, yt-dlp, ffmpeg ×2 uses), zero new pip packages |
 | **Cogitator** | `panels/cogitator_panel.py` · `panels/scribe_panel.py` · `panels/zeno_panel.py` · `panels/eudoxus_panel.py` · `tools/zeno.py` · `tools/eudoxus.py` · `scribe.py` | Three-tab utility card: **SCRIBE** (tasks + notes), **ZENO** (safe arithmetic evaluator), and **EUDOXUS** (unit converter). Request-driven; no Kairos worker. |
 
 Five tools are embedded inside other views rather than getting their own row:
@@ -126,7 +126,7 @@ arrives. Off by default; the kokoro-onnx model loads lazily on the first spoken 
 | Brave Search API key | `brave_api_key` in the **Cerberus vault** — never `.env`, never an env var, never in the repo. Set via `python cerberus.py set <PIN> brave_api_key <key>`. Powers Callimachus (Pythia's web search). |
 | News feeds | `pheme_rumormill.json` (repo root — ordered `id` / `label` / `url` / `format` rows; tab order follows file order) |
 | Playlists (Morpheus) | `morpheus_playlists.json` (repo root — ordered `label` / `url` rows; PLAYLISTS-tab order follows file order). Adding a playlist is a JSON edit, never a code change |
-| Audio binaries (Vox Array) | `metis_toolbox/bin/mpv.exe` + `bin/yt-dlp.exe` (Morpheus) and `bin/ffmpeg.exe` (Echo — needs libopus), preferred over PATH. Gitignored. |
+| Audio binaries (Vox Array) | `metis_toolbox/bin/mpv.exe` + `bin/yt-dlp.exe` (Morpheus) and `bin/ffmpeg.exe` (Echo's encode + Orpheus's decode), preferred over PATH. Gitignored. |
 
 ---
 
@@ -139,6 +139,7 @@ kairos.py               ← central scheduler: one tick loop, all worker threads
 metis_logging.py        ← shared logging setup (rotating files → logs/)
 pythia.py               ← the LLM oracle (home chat): Ollama tool-calling loop
 calliope.py             ← the narrator: text → speech via kokoro-onnx (output-only TTS)
+harmonia.py             ← sole owner of the audio output device (Calliope + Orpheus hand it PCM; yields Morpheus first)
 __init__.py             ← empty package marker (the old voice-side registry was retired)
 scribe.py               ← tasks & notes persistence layer
 theme.py                ← color palette, fonts, Card base widget
@@ -160,7 +161,10 @@ panels/
     cogitator_panel.py  ← CogitatorPanel (SCRIBE / ZENO / EUDOXUS tabs)
     scribe_panel.py     ← ScribePanel (tasks + NotesWidget; SCRIBE tab body)
     pheme_panel.py      ← PhemePanel (one scrollable tab per configured feed)
+    vox_array_panel.py  ← VoxArrayPanel (thin tab host: MORPHEUS + ECHO + ORPHEUS)
     morpheus_panel.py   ← MorpheusPanel (transport row + PLAYLISTS + SEARCH tabs)
+    echo_panel.py       ← EchoPanel (paste-and-convert; ECHO tab body)
+    orpheus_panel.py    ← OrpheusPanel (local_audio/ file list + ▶/⏹ transport; ORPHEUS tab body)
     zeno_panel.py       ← ZenoPanel (calculator; ZENO tab body)
     eudoxus_panel.py    ← EudoxusPanel (unit converter; EUDOXUS tab body)
     emanon_panel.py     ← EmanonPanel (rolling log tail; EMANON tab body)
@@ -187,6 +191,7 @@ tools/
     argus_peek.py       ← standalone CLI diagnostic (hand-run; raw seed of argus.py, not wired into the dashboard)
     morpheus.py         ← YouTube audio: headless mpv over JSON IPC + yt-dlp search
     echo.py             ← text → audio file: kokoro synth + ffmpeg → .opus (reuses calliope)
+    orpheus.py          ← play back a local_audio/ file: ffmpeg decode → harmonia.play()
 bin/                    ← mpv.exe + yt-dlp.exe + ffmpeg.exe (i.e. metis_toolbox/bin/; or on PATH; gitignored)
 kokoro_models/          ← Calliope's kokoro-onnx model + voices binaries (gitignored)
 ```
@@ -206,6 +211,7 @@ The module-surface flavors (which modules expose `fetch()` / `handle()` / `TOOL_
 | `horai` | 1 s |
 | `emanon` | 2 s |
 | `morpheus` | 2 s |
+| `orpheus` | 2 s |
 | `metis` | 2 s |
 | `hephaestus` | 5 s |
 | `argus` | 5 s |
@@ -231,7 +237,7 @@ Logs rotate into `logs/<program>.log` (~1 MB × 3 backups). The `` | ``-delimite
 | `plutus_ledger.json` | Holdings ledger — append-only buy/sell events (written by `tools/plutus.py`). Gitignored: personal financial data. |
 | `timer_state.json` | Timer state — survives restarts |
 | `morpheus_watch_later/` | mpv saved playback positions for Morpheus resume (written by mpv via `--save-position-on-quit`). Gitignored: machine-local state. |
-| `local_audio/` | Echo's generated `.opus` audio files (text → audio). Gitignored: machine-local runtime output, no retention cap. |
+| `local_audio/` | Echo's generated `.opus` audio files (text → audio), played back by Orpheus. Gitignored: machine-local runtime output, no retention cap. |
 | `argus_timeline.json` | Connection open/close timeline — bounded rolling diff (`maxlen=300`), written on change by `tools/argus.py`. Gitignored: machine-local state. |
 | `logs/*.log` | Rotating log files (written by `metis_logging.py`, read by `emanon.py`) |
 

@@ -65,16 +65,27 @@ details worth knowing:
 then `terminate()`, then `kill()` — belt and suspenders. Felhaven calls it on
 window close.
 
-## The LLM tool
+## The LLM tools
 
-`handle()` / **`play_music`** — "play this song": searches YouTube's top hit and
-plays it. It **blocks for seconds** on the yt-dlp search, so it must be threaded;
-Pythia already runs tool calls on a worker thread. Playback controls stay
-panel-driven for now. Never raises — a missing binary, empty query, or no result
-degrades to an error dict.
+`TOOL_DEFINITIONS` (plural — the Callimachus precedent) exposes **two** tools,
+each a like-named function in place of the old singular `handle()`:
+
+- **`play_music`** — "play this song": searches YouTube's top hit and plays it.
+  **Blocks for seconds** on the yt-dlp search, so it must be threaded; Pythia
+  already runs tool calls on a worker thread. Never raises — a missing binary,
+  empty query, or no result degrades to an error dict.
+- **`resume_music`** — bring back whatever `play_music` (or the panel) last
+  started, after **Harmonia** interrupted it to let Calliope speak (see
+  [`Harmonia.md`](../Harmonia.md)). `play()` remembers the last URL it actually
+  loaded; resuming is just "load that URL again" — mpv's own watch-later file
+  (written by every `stop()`/`play()` via `_checkpoint()`) restores the position,
+  so Morpheus needs no new state of its own beyond the one remembered URL. Never
+  raises — nothing played yet, or a missing mpv binary, degrades to an error dict.
+
+Playback controls (pause/skip) stay panel-driven for now.
 
 *(The module docstring's old "NO handle(), NO TOOL_DEFINITION — out of LLM scope"
-line has been corrected — `play_music` now exists below it.)*
+line has been corrected — `play_music`/`resume_music` now exist below it.)*
 
 `search()` is likewise blocking (up to 20 s) and the panel calls it on a daemon
 thread, never the main thread.
@@ -89,7 +100,7 @@ position, not content**, so duplicate labels delete exactly the targeted row.
 
 | File | Committed? | Purpose |
 |---|---|---|
-| `tools/morpheus.py` | yes | Engine control, IPC, search, the `play_music` contract. |
+| `tools/morpheus.py` | yes | Engine control, IPC, search, the `play_music`/`resume_music` contract. |
 | `morpheus_playlists.json` | yes | Saved playlists (config). |
 | `bin/mpv.exe`, `bin/yt-dlp.exe` | **no** (large binaries) | The engines; PATH copies also work. |
 | `morpheus_watch_later/` | **no** (runtime) | mpv's resume checkpoints. |
@@ -100,7 +111,8 @@ position, not content**, so duplicate labels delete exactly the targeted row.
 **In the dashboard** — the **Vox Array** card: pick a playlist, search, play.
 
 **Ask Pythia** — *"play clair de lune"* / *"put on some lofi"* routes through
-`play_music`.
+`play_music`; *"resume the music"* after it gets interrupted routes through
+`resume_music`.
 
 **Standalone** (checks binaries + runs a sample search):
 

@@ -37,6 +37,7 @@ class Kairos:
         ("horai",         1, "tools.horai.fetch"),
         ("emanon",        2, "tools.emanon.fetch"),
         ("morpheus",      2, "tools.morpheus.fetch"),
+        ("orpheus",       2, "tools.orpheus.fetch"),
         ("hypatia",      60, "tools.hypatia.fetch"),
     ]
 

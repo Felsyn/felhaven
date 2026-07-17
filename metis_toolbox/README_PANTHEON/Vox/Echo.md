@@ -4,12 +4,14 @@
 
 Echo turns **text into an audio file**. You paste Markdown (or plain prose) and a
 filename; Echo hands you back one `.opus` file. That's the whole brief. It is the
-**ECHO** tab of the **Vox Array — audio** card, beside Morpheus.
+**ECHO** tab of the **Vox Array — audio** card, beside Morpheus and Orpheus.
 
-Echo is deliberately *not* the other two Vox jobs:
+Echo is deliberately *not* the other Vox jobs:
 
 - **Calliope** reads text aloud *live* (text → speech, played now).
 - **Morpheus** *controls an audio engine* (play/pause/skip a stream).
+- **Orpheus** *plays a file back* (disk → audio, nothing written — the mirror
+  image of Echo; see [`Orpheus.md`](Orpheus.md)).
 - **Echo** *writes a file* (text → audio on disk, nothing played).
 
 ## One model, one WAV writer — reuse, not a second copy
@@ -86,15 +88,30 @@ no-op. The "Send to Echo" button stays **inert until both fields are usable** (t
 non-blank *and* filename survives sanitisation), and any failure surfaces **loud
 and red** (the theme's alarm color).
 
+**On success, the form clears itself.** `_deliver()` wipes both the text box and
+the filename field the moment the status line reads `saved → ...` — otherwise
+every conversion would leave the last paste sitting there, forcing a manual
+delete before the next one. **On error, both fields are left alone** — a failed
+attempt (missing ffmpeg, a synthesis error, …) stays fully editable so the same
+text can be retried without retyping it.
+
+**Right-click context menu — the Pythia precedent, ported verbatim.** Both the
+text box and the filename entry get a themed popup menu
+(`panels/home_panel.py`'s `_themed_menu`/`_popup` pattern, copied per panel like
+`_ScrollFrame`): Cut / Copy / Paste / Select All, built fresh on every right-click
+so Cut/Copy's enabled state always reflects whatever is selected *right now*, not
+a stale snapshot. The text box gets the full menu because — unlike Pythia's
+read-only transcript, which only offers Copy — it's meant to be edited.
+
 ## Files
 
 | File | Committed? | Purpose |
 |---|---|---|
 | `tools/echo.py` | yes | `text_to_audio` + the Markdown stripper, chunking, ffmpeg encode. |
 | `panels/echo_panel.py` → `EchoPanel` | yes | The **ECHO** tab body. |
-| `panels/vox_array_panel.py` → `VoxArrayPanel` | yes | The host card (MORPHEUS/ECHO tabs). |
-| `bin/ffmpeg.exe` | **no** (large binary) | The Opus encoder; a PATH copy also works. |
-| `local_audio/` | **no** (runtime) | Generated `.opus` files. No retention cap. |
+| `panels/vox_array_panel.py` → `VoxArrayPanel` | yes | The host card (MORPHEUS/ECHO/ORPHEUS tabs). |
+| `bin/ffmpeg.exe` | **no** (large binary) | The Opus encoder — shared with [Orpheus](Orpheus.md)'s decoder; a PATH copy also works. |
+| `local_audio/` | **no** (runtime) | Generated `.opus` files, later played back by Orpheus. No retention cap. |
 
 ## Using it
 

@@ -11,6 +11,11 @@ Top to bottom inside self:
                       echo.sanitize_filename; runs the conversion off the UI thread.
     Status line     — normal-theme path on success, LOUD RED on any error.
 
+Both the text box and the filename entry get a themed right-click context menu
+(Cut/Copy/Paste/Select All) — the home_panel.py (Pythia) precedent, ported
+verbatim. The text box is editable (unlike Pythia's read-only transcript), so
+it gets the full entry-style menu rather than the transcript's Copy-only one.
+
 ─────────────────────────────────────────────────────────────────────────────
 CONVERSION THREADING + DRAIN — a documented, house-rule-aware pattern.
 
@@ -33,6 +38,7 @@ CONVERSION THREADING + DRAIN — a documented, house-rule-aware pattern.
 import queue
 import threading
 import tkinter as tk
+from typing import Any
 
 from theme import C, FONTS
 
@@ -75,6 +81,7 @@ class EchoPanel(tk.Frame):
         )
         self._text.pack(fill="both", expand=True)
         self._text.bind("<KeyRelease>", lambda e: self._refresh_gate())
+        self._text.bind("<Button-3>", self._show_text_menu)
 
         # ── Filename row ─────────────────────────────────────────────────────
         row = tk.Frame(self, bg=C["card"])
@@ -90,13 +97,14 @@ class EchoPanel(tk.Frame):
 
         self._fname_var = tk.StringVar()
         self._fname_var.trace_add("write", lambda *a: self._refresh_gate())
-        fname_entry = tk.Entry(
+        self._fname_entry = tk.Entry(
             row, textvariable=self._fname_var, font=FONTS["small"],
             bg=C["bar_bg"], fg=C["text1"], insertbackground=C["text1"],
             highlightthickness=1, highlightbackground=C["border"], bd=0,
         )
-        fname_entry.pack(fill="x", expand=True, side="left")
-        fname_entry.bind("<Return>", lambda e: self._on_send())
+        self._fname_entry.pack(fill="x", expand=True, side="left")
+        self._fname_entry.bind("<Return>", lambda e: self._on_send())
+        self._fname_entry.bind("<Button-3>", self._show_entry_menu)
 
         # ── Status line ──────────────────────────────────────────────────────
         self._status = tk.Label(self, text="", font=FONTS["small"], fg=C["text3"],
@@ -129,6 +137,52 @@ class EchoPanel(tk.Frame):
             self._send_btn.unbind("<Button-1>")
             self._send_btn.unbind("<Enter>")
             self._send_btn.unbind("<Leave>")
+
+    # ── Right-click context menus (Pythia home_panel precedent) ─────────────
+    # The text box is editable (unlike Pythia's read-only transcript), so it
+    # gets the full Cut/Copy/Paste/Select All set, same as the filename entry.
+
+    def _themed_menu(self) -> tk.Menu:
+        """One in-theme popup menu — built fresh per right-click so its item
+        states (e.g. Cut/Copy disabled with no selection) always reflect the
+        current selection rather than a stale snapshot."""
+        return tk.Menu(self, tearoff=0, bg=C["card"], fg=C["text1"],
+                       activebackground=C["border"], activeforeground=C["text1"],
+                       font=FONTS["small"], borderwidth=0)
+
+    @staticmethod
+    def _popup(menu: tk.Menu, event: "tk.Event[Any]") -> None:
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _show_text_menu(self, event: "tk.Event[Any]") -> None:
+        has_selection = bool(self._text.tag_ranges("sel"))
+        menu = self._themed_menu()
+        menu.add_command(label="Cut", command=lambda: self._text.event_generate("<<Cut>>"),
+                         state="normal" if has_selection else "disabled")
+        menu.add_command(label="Copy", command=lambda: self._text.event_generate("<<Copy>>"),
+                         state="normal" if has_selection else "disabled")
+        menu.add_command(label="Paste", command=lambda: self._text.event_generate("<<Paste>>"))
+        menu.add_separator()
+        menu.add_command(label="Select All", command=self._select_all_text)
+        self._popup(menu, event)
+
+    def _select_all_text(self) -> None:
+        self._text.tag_add("sel", "1.0", "end")
+
+    def _show_entry_menu(self, event: "tk.Event[Any]") -> None:
+        has_selection = self._fname_entry.selection_present()
+        menu = self._themed_menu()
+        menu.add_command(label="Cut", command=lambda: self._fname_entry.event_generate("<<Cut>>"),
+                         state="normal" if has_selection else "disabled")
+        menu.add_command(label="Copy", command=lambda: self._fname_entry.event_generate("<<Copy>>"),
+                         state="normal" if has_selection else "disabled")
+        menu.add_command(label="Paste", command=lambda: self._fname_entry.event_generate("<<Paste>>"))
+        menu.add_separator()
+        menu.add_command(label="Select All", command=lambda: self._fname_entry.select_range(0, "end"))
+        self._popup(menu, event)
 
     # ── Status helpers ──────────────────────────────────────────────────────
 
@@ -179,6 +233,11 @@ class EchoPanel(tk.Frame):
         self._converting = False
         if "path" in result:
             self._set_status(f"saved → {result['path']}")
+            # Clear both fields on success so the next paste starts fresh —
+            # otherwise every conversion needs a manual delete first. Left
+            # alone on error: a failed attempt should stay editable for retry.
+            self._text.delete("1.0", "end")
+            self._fname_var.set("")
         else:
             code = result.get("error", "echo_failed")
             self._set_status(_ERROR_TEXT.get(code, f"error: {code}"), error=True)

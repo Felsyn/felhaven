@@ -111,31 +111,74 @@ class TestMorpheusHandle(unittest.TestCase):
         with mock.patch("tools.morpheus.available", return_value=self._AVAIL), \
                 mock.patch("tools.morpheus.search", return_value=self._HIT), \
                 mock.patch("tools.morpheus.play") as play:
-            out = morpheus.handle(query="clair de lune")
+            out = morpheus.play_music(query="clair de lune")
         self.assertEqual(out["now_playing"], "Clair de Lune")
         play.assert_called_once_with("https://youtu.be/abc")   # actually played the hit
 
     def test_empty_query_degrades(self):
-        self.assertEqual(morpheus.handle("")["error"], "no_query")
+        self.assertEqual(morpheus.play_music("")["error"], "no_query")
 
     def test_missing_binaries_degrades(self):
         with mock.patch("tools.morpheus.available",
                         return_value={"mpv": None, "ytdlp": None}):
-            self.assertEqual(morpheus.handle("anything")["error"], "player_unavailable")
+            self.assertEqual(morpheus.play_music("anything")["error"], "player_unavailable")
 
     def test_no_results_degrades(self):
         with mock.patch("tools.morpheus.available", return_value=self._AVAIL), \
                 mock.patch("tools.morpheus.search",
                            return_value=[{"error": "search failed"}]), \
                 mock.patch("tools.morpheus.play") as play:
-            self.assertEqual(morpheus.handle("obscure")["error"], "no_results")
+            self.assertEqual(morpheus.play_music("obscure")["error"], "no_results")
             play.assert_not_called()               # never play when search fails
+
+
+class TestMorpheusResumeMusic(unittest.TestCase):
+    _AVAIL = {"mpv": "mpv.exe", "ytdlp": "yt-dlp.exe"}
+
+    def setUp(self):
+        self._saved_last_url = morpheus._last_url
+
+    def tearDown(self):
+        morpheus._last_url = self._saved_last_url
+
+    def test_nothing_played_yet_degrades(self):
+        morpheus._last_url = None
+        self.assertEqual(morpheus.resume_music()["error"], "nothing_to_resume")
+
+    def test_missing_mpv_degrades(self):
+        morpheus._last_url = "https://youtu.be/abc"
+        with mock.patch("tools.morpheus.available",
+                        return_value={"mpv": None, "ytdlp": "yt-dlp.exe"}):
+            self.assertEqual(morpheus.resume_music()["error"], "player_unavailable")
+
+    def test_resumes_last_played_url(self):
+        morpheus._last_url = "https://youtu.be/abc"
+        with mock.patch("tools.morpheus.available", return_value=self._AVAIL), \
+                mock.patch("tools.morpheus.play") as play:
+            out = morpheus.resume_music()
+        self.assertEqual(out, {"resumed_url": "https://youtu.be/abc"})
+        play.assert_called_once_with("https://youtu.be/abc")
+
+    def test_play_tracks_last_url(self):
+        morpheus._last_url = None
+        with mock.patch("tools.morpheus._ensure_mpv", return_value=True), \
+                mock.patch("tools.morpheus._checkpoint"), \
+                mock.patch("tools.morpheus._ipc"):
+            morpheus.play("https://youtu.be/xyz")
+        self.assertEqual(morpheus._last_url, "https://youtu.be/xyz")
+
+    def test_play_does_not_track_url_when_mpv_unavailable(self):
+        morpheus._last_url = "https://youtu.be/old"
+        with mock.patch("tools.morpheus._ensure_mpv", return_value=False):
+            morpheus.play("https://youtu.be/new")
+        self.assertEqual(morpheus._last_url, "https://youtu.be/old")
 
 
 class TestNewToolsRegisteredWithPythia(unittest.TestCase):
     def test_new_handles_reach_pythia(self):
         for name in ("get_network_summary", "get_sun_times", "get_sky_tonight",
-                     "get_moon_phase", "play_music", "search_web", "fetch_page"):
+                     "get_moon_phase", "play_music", "resume_music",
+                     "search_web", "fetch_page"):
             self.assertIn(name, pythia._DISPATCH)
 
     def test_tools_and_dispatch_stay_in_lockstep(self):

@@ -8,16 +8,19 @@ shape every other suite here uses. Run with the house runner:
     python -X utf8 -m unittest discover -s tests -p "test_*.py"
 
 Hermetic: no audio hardware, no model files, no network, and the background
-synth/play workers are never started (enqueue tests patch _ensure_workers, and
+synth/release workers are never started (enqueue tests patch _ensure_workers, and
 the coalescing logic is exercised via the pure _coalesce() helper). The
 kokoro-onnx model is replaced by a fake whose .create() returns canned PCM.
+Calliope no longer touches sounddevice at all — every test that used to assert
+against playback now mocks harmonia.play() / harmonia.stop() and asserts
+Calliope *calls* Harmonia (device-error degradation itself is covered by
+tests.test_harmonia, since sounddevice ownership moved there).
 """
 
 import json
 import os
 import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -27,6 +30,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import calliope
+import harmonia
 
 
 def _fake_model(pcm: np.ndarray) -> mock.Mock:
@@ -62,7 +66,7 @@ class _CalliopeBase(unittest.TestCase):
 
     @staticmethod
     def _drain():
-        for q in (calliope._text_queue, calliope._audio_queue):
+        for q in (calliope._text_queue, calliope._release_queue):
             while not q.empty():
                 q.get_nowait()
 
@@ -207,12 +211,14 @@ class TestSpeakEnqueues(_CalliopeBase):
 class TestStop(_CalliopeBase):
     def test_stop_drains_and_bumps_epoch(self):
         calliope._text_queue.put("pending sentence")
-        calliope._audio_queue.put((0, np.zeros(2, dtype=np.float32)))
+        calliope._release_queue.put((0, np.zeros(2, dtype=np.float32)))
         before = calliope._epoch
-        calliope.stop()                                  # must not raise
+        with mock.patch.object(harmonia, "stop") as hstop:
+            calliope.stop()                              # must not raise
         self.assertTrue(calliope._text_queue.empty())
-        self.assertTrue(calliope._audio_queue.empty())
+        self.assertTrue(calliope._release_queue.empty())
         self.assertEqual(calliope._epoch, before + 1)    # in-flight synth discarded
+        hstop.assert_called_once()                       # D4: Harmonia actually interrupts
 
 
 class TestPrewarm(_CalliopeBase):
@@ -271,24 +277,26 @@ class TestFillers(_CalliopeBase):
             calliope.generate_fillers()
         self.assertEqual(synth.call_count, len(phrases) - 1)      # the cached one skipped
 
-    def test_speak_filler_enqueues_cached_audio_and_arms_gate(self):
+    def test_speak_filler_plays_cached_audio_and_arms_gate(self):
         pcm = np.zeros(600, dtype=np.float32)
         phrase = calliope._CONFIG["fillers"][0]
         calliope._FILLER_DIR.mkdir(parents=True, exist_ok=True)
         calliope.save_wav(calliope._filler_path(phrase), pcm)
-        with mock.patch("calliope._ensure_workers"):
+        with mock.patch("calliope._ensure_workers"), \
+                mock.patch.object(harmonia, "play") as hplay:
             calliope.speak_filler()
-        self.assertEqual(calliope._audio_queue.qsize(), 1)
-        ep, audio, is_filler = calliope._audio_queue.get_nowait()
-        self.assertEqual(ep, calliope._epoch)
-        self.assertTrue(is_filler)                       # fillers bypass the gate
-        self.assertEqual(len(audio), 600)
-        self.assertTrue(calliope._filler_active)         # prebuffer gate armed
+        hplay.assert_called_once()
+        args, kwargs = hplay.call_args
+        self.assertEqual(len(args[0]), 600)                # the cached pcm
+        self.assertEqual(args[1], calliope.SAMPLE_RATE)     # explicit rate (D3)
+        self.assertEqual(kwargs.get("tag"), "filler")
+        self.assertTrue(calliope._filler_active)           # prebuffer gate armed
 
     def test_speak_filler_noop_when_none_cached(self):
-        with mock.patch("calliope._ensure_workers") as ew:
+        with mock.patch("calliope._ensure_workers") as ew, \
+                mock.patch.object(harmonia, "play") as hplay:
             calliope.speak_filler()                              # empty dir
-        self.assertTrue(calliope._audio_queue.empty())
+        hplay.assert_not_called()
         ew.assert_not_called()
 
     def test_speak_filler_skips_when_real_audio_already_queued(self):
@@ -298,9 +306,10 @@ class TestFillers(_CalliopeBase):
         calliope._FILLER_DIR.mkdir(parents=True, exist_ok=True)
         calliope.save_wav(calliope._filler_path(phrase), pcm)
         calliope._real_audio_queued = True
-        with mock.patch("calliope._ensure_workers"):
+        with mock.patch("calliope._ensure_workers"), \
+                mock.patch.object(harmonia, "play") as hplay:
             calliope.speak_filler()
-        self.assertTrue(calliope._audio_queue.empty())
+        hplay.assert_not_called()
 
     def test_filler_delay_from_config(self):
         self.assertEqual(calliope.filler_delay_ms(),
@@ -341,17 +350,6 @@ class TestPrebuffer(_CalliopeBase):
             calliope._answer_produced = calliope._PREBUFFER_CHUNKS
             calliope._cond.notify_all()
         self.assertTrue(done.wait(timeout=2))            # gate opened
-
-
-class TestPlayDegradation(_CalliopeBase):
-    def test_play_swallows_audio_device_error(self):
-        # Inject a stub 'sounddevice' whose play() raises (device busy / absent).
-        stub = types.ModuleType("sounddevice")
-        stub.play = mock.Mock(side_effect=OSError("no output device"))
-        stub.wait = mock.Mock()
-        with mock.patch.dict(sys.modules, {"sounddevice": stub}):
-            calliope._play(np.zeros(4, dtype=np.float32))   # must not raise
-        stub.play.assert_called_once()
 
 
 class TestAutoSpeak(_CalliopeBase):

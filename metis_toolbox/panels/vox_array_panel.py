@@ -1,6 +1,6 @@
 """
-panels/vox_array_panel.py — Vox Array host (Morpheus + Echo tabs)
-=================================================================
+panels/vox_array_panel.py — Vox Array host (Morpheus + Echo + Orpheus tabs)
+============================================================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
 Job:         Host the audio tabs and switch between them. Build the tab bar; pack
@@ -8,14 +8,15 @@ Job:         Host the audio tabs and switch between them. Build the tab bar; pac
 
 Tabs:        MORPHEUS — YouTube audio player (transport, playlists, search)
              ECHO     — text → audio file (paste-and-convert)
-             (ORPHEUS later — add a tab in one line.)
+             ORPHEUS  — play back an audio file from local_audio/
 
-Why a host with no update(): MorpheusPanel keeps its own update() and stays
-registered with Kairos directly under the "morpheus" worker name (felhaven.py
-reaches through this host to self.morpheus, the Moderati precedent). Echo is
-request-driven and not polled at all. So this host never sees a Kairos tick —
-do NOT register it: Card (a tk.Frame) has a built-in update() that takes no data
-arg, so a Kairos dispatch against the host would TypeError.
+Why a host with no update(): MorpheusPanel and OrpheusPanel each keep their own
+update() and stay registered with Kairos directly under their own worker name
+(felhaven.py reaches through this host to self.morpheus / self.orpheus, the
+Moderati precedent). Echo is request-driven and not polled at all. So this
+host never sees a Kairos tick — do NOT register it: Card (a tk.Frame) has a
+built-in update() that takes no data arg, so a Kairos dispatch against the
+host would TypeError.
 """
 
 import tkinter as tk
@@ -24,6 +25,7 @@ from theme import C, FONTS, Card
 
 from panels.morpheus_panel import MorpheusPanel
 from panels.echo_panel     import EchoPanel
+from panels.orpheus_panel  import OrpheusPanel
 
 
 class VoxArrayPanel(Card):
@@ -33,24 +35,27 @@ class VoxArrayPanel(Card):
         super().__init__(parent, "Vox Array — audio", C["purple"])
 
         # ── Tab bodies (each IS its own tab — no wrapper frame) ──────────────
-        # felhaven.py registers self.morpheus under the existing "morpheus"
-        # Kairos worker name; Echo is not polled, so it registers nothing.
+        # felhaven.py registers self.morpheus / self.orpheus under their own
+        # Kairos worker names; Echo is not polled, so it registers nothing.
         self.morpheus = MorpheusPanel(self.body)
         self.echo     = EchoPanel(self.body)
+        self.orpheus  = OrpheusPanel(self.body)
 
         # key -> (body widget, accent color for the active underline).
         self._bodies = {
             "morpheus": (self.morpheus, C["purple"]),
             "echo":     (self.echo,     C["blue"]),
+            "orpheus":  (self.orpheus,  C["teal"]),
         }
 
-        # ── Tab bar (loop over (key, label) — add ORPHEUS in one line) ───────
+        # ── Tab bar (loop over (key, label)) ─────────────────────────────────
         tab_row = tk.Frame(self.body, bg=C["card"])
         tab_row.pack(fill="x", pady=(6, 0))
 
         self._tabs:  dict[str, tk.Label] = {}
         self._lines: dict[str, tk.Frame] = {}
-        for key, text in (("morpheus", "MORPHEUS"), ("echo", "ECHO")):
+        for key, text in (("morpheus", "MORPHEUS"), ("echo", "ECHO"),
+                          ("orpheus", "ORPHEUS")):
             wrap = tk.Frame(tab_row, bg=C["card"])
             wrap.pack(side="left", padx=(0, 14))
             lbl = tk.Label(wrap, text=text, font=FONTS["card_header"],

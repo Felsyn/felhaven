@@ -80,9 +80,10 @@ it exactly; the surface is the contract Kairos and the brain rely on.
 | **Polled + brain tool** | yes (raises on failure) | yes | `horai`, `hephaestus`, `aura`, `midas`, `aether`, `pheme` |
 | **Request-driven brain tool** | no | yes | `zeno`, `eudoxus` |
 | **Dashboard-only watcher** | yes | no | `emanon`, `argus` |
-| **Polled status + UI-driven mutations** *(hybrid)* | yes (never raises) | no | `morpheus`, `metis` |
+| **Polled status + UI-driven mutations** *(hybrid)* | yes (never raises) | some do — `morpheus` (`play_music`/`resume_music`), `orpheus` (none) | `morpheus`, `orpheus` |
 | **Local-only ledger / persistence** | no | no (plain functions) | `plutus`, `scribe` |
 | **Pure display-logic helper** | no | no (pure functions) | `helios`, `selene` |
+| **Device / infrastructure authority** | no | no | `kairos.py` (the clock), `harmonia.py` (the audio device) |
 
 Rules that fall out of the table:
 
@@ -101,11 +102,14 @@ Rules that fall out of the table:
   still raises on a wholesale `psutil.net_connections()` failure — see
   `specs/argus.md`. If your `fetch()` doesn't raise, say *why* in the docstring.
 - **Out-of-LLM-scope is a real, intentional category.** `plutus` (mutates a
-  real-money ledger), `morpheus` (controls an audio engine),
-  `emanon`/`argus` (read-only watchers),
+  real-money ledger), `orpheus` (a panel action, not yet worth asking for — the
+  Echo precedent), `emanon`/`argus` (read-only watchers),
   `helios`/`selene` (pure formatters) all deliberately omit `TOOL_DEFINITION` so a
   tool call can never reach them. Document the *why* — "out of LLM scope because
-  …" — so nobody later "fixes" it by adding a brain tool.
+  …" — so nobody later "fixes" it by adding a brain tool. (`morpheus` used to be
+  the example here for "controls an audio engine, but a safe one" — it moved into
+  the brain-tool column once `play_music` landed, and now `resume_music` alongside
+  it; see the decisions log.)
 
 ---
 
@@ -522,3 +526,54 @@ readers know they were intentional. Append, don't rewrite.
   Remove it and there's nothing to route or guard, so the three-registry design
   collapsed to Pythia's one. Also dropped torch/faster-whisper from the stack.
   *(Added 2026-07-10.)*
+- **Harmonia — one owner for the audio output device — and Orpheus, a third Vox
+  job.** After Echo, three things wanted to make sound (Calliope, Echo's future
+  sibling Orpheus, and Morpheus), and nothing owned the device — Calliope's
+  module-local `_play_lock` protected only Calliope, and a lock across all three
+  **cannot work**: a Python mutex serializes *commands*, not *audio*, and mpv
+  holds its own device handle in a separate process regardless. New app-root
+  module **`harmonia.py`** (beside `kairos.py` — no `fetch()`/`handle()`, the new
+  **"Device / infrastructure authority"** flavor in §2's table) is now the *sole*
+  caller of `sounddevice`: `play(pcm, sample_rate, tag="")` (calls
+  `morpheus.stop()` first, then enqueues — one direction only, Morpheus never
+  learns Harmonia exists), `stop()` (global, no channels — `sd.stop()` + drain +
+  epoch bump), `is_playing()`, `shutdown()`. **Calliope was refactored onto it**:
+  `_play`/`_play_lock`/the play-worker-that-called-`sd.play` are gone from
+  `calliope.py`; its synth pipeline now hands each chunk to `harmonia.play()`
+  instead, with the prebuffer gate kept **Calliope-side** (deciding *when* to call
+  `harmonia.play()`, not *how* to drain a device queue — Harmonia must never learn
+  what a filler is). **Deliberate behavior change:** Calliope's `stop()` used to
+  only bump an epoch (barge-in latency was one ~70-char chunk, unnoticeable);
+  `harmonia.stop()` calls `sd.stop()`, which actually interrupts an in-flight
+  `sd.wait()`, so barge-in is now instant — and, because Harmonia has no channels,
+  a new Pythia question now also silences an in-progress Orpheus briefing (the
+  intended cost of one stream, one truth). **`tools/orpheus.py`** (+
+  `panels/orpheus_panel.py`, the **ORPHEUS** tab in `VoxArrayPanel`) is the third
+  Vox job: play back one `.opus` file from `local_audio/` (Echo's output folder)
+  — play/stop only, no pause/seek/playlists. Whole-file ffmpeg decode into RAM
+  (`-f f32le -ar 48000 -ac 2`, ~70 MB for a 3-minute briefing — a stated limit,
+  not a bug) handed to `harmonia.play()` at the **explicit** 48 kHz rate Harmonia
+  requires (kokoro is 24 kHz; get this wrong and a briefing plays at half speed —
+  the actual reason `harmonia.play()`'s signature takes a rate at all). IS a
+  Kairos worker (`orpheus`, 2 s) unlike Echo — `fetch()` doubles as the
+  file-list refresh *and* the playback-finished signal (`harmonia.is_playing()`),
+  since `sd.wait()` blocks inside Harmonia's own thread and nothing else can see
+  completion directly; out of LLM scope for v1 (no `handle()` — the Echo
+  precedent). **`tools/morpheus.py`** converted to the plural `TOOL_DEFINITIONS`
+  (the Callimachus precedent — its first use *inside* an already-partially-LLM
+  module, not just a new one): `handle()` → **`play_music`**, plus a new
+  **`resume_music`** (replay the last URL `play()` loaded — mpv's own
+  watch-later checkpoint, written by every existing `stop()`/`play()`, restores
+  the position, so Morpheus needed **zero** new persistence, just one remembered
+  URL). **Findings flagged, not fixed:** (1) `morpheus.stop()`/`play()` are now
+  also called from Harmonia's background play thread, not only from UI action —
+  the module docstring's "mutations fire only from deliberate UI action" line is
+  no longer literally true; left as-is pending a house-style wording call. (2)
+  Clicking ▶ on Morpheus while Orpheus has a briefing playing starts both at
+  once — Harmonia's yield only runs one direction. New hermetic
+  `tests/test_harmonia.py`, `tests/test_orpheus.py`,
+  `tests/test_orpheus_panel_smoke.py`; `tests/test_calliope.py` updated so its
+  playback-degradation coverage now lives with Harmonia instead, and its own
+  tests assert Calliope *calls* Harmonia rather than touching `sounddevice`
+  itself. Full suite green (453 tests), `mypy --strict --explicit-package-bases
+  tools/` green. *(Added 2026-07-16.)*

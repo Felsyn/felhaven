@@ -45,6 +45,11 @@ already-generated, fully-trusted answer text aloud on demand** (kokoro-onnx TTS)
 Calliope invokes no tools, judges nothing, and is in **neither** registry: it is
 handed a string and turns it into sound. See [Calliope](Calliope.md).
 
+A second piece of shared infrastructure sits beside Kairos: [**Harmonia**](Harmonia.md)
+(`harmonia.py`, app root) is the sole owner of the audio output device — Calliope
+and Orpheus both hand it PCM instead of calling `sounddevice` themselves. Like
+Kairos, it is in **neither** registry (no `fetch()`, no `handle()`).
+
 ### Kairos, the shared clock
 
 [Kairos](../kairos.py) is the one piece of infrastructure both the GUI and its
@@ -68,7 +73,7 @@ Each panel's card title is shown; its folder is the short name in the link.
 | [**Hypatia**](Hypatia) | [Hypatia](Hypatia/Hypatia.md) · [Kepler](Hypatia/Kepler.md) | `get_sky_tonight` · — |
 | [**Dynastic Vault**](Vault) | [Midas](Vault/Midas.md) · [Plutus](Vault/Plutus.md) | `get_market_prices` · — |
 | [**Scriptorium**](Scriptorium) | [Pheme](Scriptorium/Pheme.md) | `get_news_stories` |
-| [**Vox Array**](Vox) | [Morpheus](Vox/Morpheus.md) | `play_music` |
+| [**Vox Array**](Vox) | [Morpheus](Vox/Morpheus.md) · [Echo](Vox/Echo.md) · [Orpheus](Vox/Orpheus.md) | `play_music` · `resume_music` · — · — |
 | [**Cogitator**](Cogitator) | [Scribe](Cogitator/Scribe.md) · [Zeno](Cogitator/Zeno.md) · [Eudoxus](Cogitator/Eudoxus.md) · [Callimachus](Cogitator/Callimachus.md)&nbsp;† · [Herodotus](Cogitator/Herodotus.md)&nbsp;† | — · `calculate` · `convert_unit` · `search_web`/`fetch_page` · `list_documents`/`search_documents`/`read_document`/`write_document`/`edit_document` |
 
 **†** [Callimachus](Cogitator/Callimachus.md) (web search) and

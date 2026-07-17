@@ -17,11 +17,13 @@ Contract:    A hybrid flavor, new to the stack — document it here so future-yo
                - mutations: play / toggle_pause / next_track / prev_track /
                             stop fire only from deliberate UI action in
                             MorpheusPanel.
-             handle() + TOOL_DEFINITION expose play_music — "play this song"
-             searches YouTube's top hit and plays it (it mutates audio, not
-             records, so it's a safe LLM tool). Playback controls
-             (pause/stop/skip) stay panel-driven for now; a companion tool can
-             be added later if wanted.
+             TOOL_DEFINITIONS (plural — see CONVENTIONS §3/§8) exposes two
+             tools: play_music — "play this song" searches YouTube's top hit
+             and plays it (it mutates audio, not records, so it's a safe LLM
+             tool) — and resume_music — bring back whatever play_music (or
+             the panel) last started, after it was interrupted. Other
+             playback controls (pause/skip) stay panel-driven for now; a
+             companion tool can be added later if wanted.
 
 Source:      Two external binaries, zero new pip packages, stdlib-only Python.
                - mpv     : headless audio engine, driven over its JSON IPC
@@ -96,6 +98,7 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # ── Module state ──────────────────────────────────────────────────────────────
 _proc: "subprocess.Popen[bytes] | None" = None   # the headless mpv process, or None
 _request_id = 0                            # IPC request id counter (see _ipc)
+_last_url: "str | None" = None             # last URL play() actually loaded (resume_music)
 
 
 # ── Binary resolution ─────────────────────────────────────────────────────────
@@ -380,11 +383,15 @@ def _checkpoint() -> None:
 def play(url: str) -> None:
     """Load (and start) a URL, replacing whatever was playing. Starts mpv if
     needed. mpv natively queues a full playlist URL; next/prev then walk it.
-    Bookmarks the outgoing track first so switching videos keeps its place."""
+    Bookmarks the outgoing track first so switching videos keeps its place.
+    Remembers `url` as the resume target (resume_music) once actually loaded —
+    not on an early return, so a failed mpv start never overwrites a good one."""
+    global _last_url
     if not _ensure_mpv():
         return
     _checkpoint()                      # bookmark the outgoing track, if any
     _ipc(["loadfile", url, "replace"])
+    _last_url = url
 
 
 def toggle_pause() -> None:
@@ -574,35 +581,55 @@ def remove_playlist(index: int) -> bool:
 
 
 # ── LLM tool contract ─────────────────────────────────────────────────────────
-# The docstring's "safe future Metis voice tool" — "play this song" and it does.
-# One tool: search the top YouTube hit and play it. Playback controls
-# (pause/stop/skip) stay panel-driven for now; a companion tool can be added
-# later if wanted.
+# TOOL_DEFINITIONS (plural — the Callimachus precedent, CONVENTIONS §3/§8):
+# two tightly-coupled calls on one job (play music / bring it back), each with
+# a like-named function replacing the old singular handle(). play_music
+# searches the top YouTube hit and plays it. resume_music replays the last URL
+# play() actually loaded — mpv's own watch-later file (written by every
+# stop()/play() via _checkpoint()) resumes the position, so this is just
+# "load the same URL again," nothing more. Other playback controls
+# (pause/skip) stay panel-driven for now; a companion tool can be added later
+# if wanted.
 
-TOOL_DEFINITION = {
-    "type": "function",
-    "function": {
-        "name": "play_music",
-        "description": (
-            "Search YouTube for a song, artist, or any audio and play the top "
-            "result through the local audio engine (mpv). Call whenever the user "
-            "asks to play, put on, or listen to music or a specific track."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "What to play — a song title, artist, or search terms.",
+TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "play_music",
+            "description": (
+                "Search YouTube for a song, artist, or any audio and play the top "
+                "result through the local audio engine (mpv). Call whenever the user "
+                "asks to play, put on, or listen to music or a specific track."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What to play — a song title, artist, or search terms.",
+                    },
                 },
+                "required": ["query"],
             },
-            "required": ["query"],
         },
     },
-}
+    {
+        "type": "function",
+        "function": {
+            "name": "resume_music",
+            "description": (
+                "Resume the most recently played song or audio from where it left "
+                "off, after it was interrupted (e.g. by a spoken answer). Call when "
+                "the user asks to resume, continue, or pick the music back up — not "
+                "for starting a new song (use play_music for that)."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+]
 
 
-def handle(query: str = "") -> dict[str, Any]:
+def play_music(query: str = "") -> dict[str, Any]:
     """Toolbox entry: search + play the top hit. BLOCKS for a few seconds on the
     yt-dlp search, so the caller must thread it — Pythia already runs tool calls
     on a worker thread. Never raises: a missing binary, empty query, or no
@@ -628,6 +655,21 @@ def handle(query: str = "") -> dict[str, Any]:
         "channel":     top.get("channel", ""),
         "url":         top["url"],
     }
+
+
+def resume_music() -> dict[str, Any]:
+    """Toolbox entry: replay the last URL play() actually loaded. Never
+    raises: nothing played yet, or a missing mpv binary, degrades to an
+    error dict the model can relay."""
+    if _last_url is None:
+        return {"error": "nothing_to_resume", "detail": "Nothing has been played yet."}
+
+    bins = available()
+    if not bins["mpv"]:
+        return {"error": "player_unavailable", "detail": "mpv binary not found."}
+
+    play(_last_url)
+    return {"resumed_url": _last_url}
 
 
 # ── Standalone test ───────────────────────────────────────────────────────────

@@ -32,7 +32,20 @@ Shared seam:  synthesize(), take_chunk(), save_wav(), load_wav() and SAMPLE_RATE
                  the first spoken line isn't delayed by the one-time model load.
              stop() -> None
                  Drop any queued sentences and halt current playback (barge-in,
-                 e.g. when a new question is asked).
+                 e.g. when a new question is asked). Barge-in is INSTANT now —
+                 stop() calls harmonia.stop(), which interrupts an in-flight
+                 sd.wait() rather than merely discarding what's still queued
+                 (a behavior change from the old module-local _play_lock design;
+                 see harmonia.py's docstring, decision D4).
+
+Device:      Calliope does not touch sounddevice or own an audio queue anymore.
+             Every synthesized chunk (and every filler) is handed to
+             harmonia.play(pcm, SAMPLE_RATE, tag=...) — Harmonia owns the
+             output device, the play thread, and barge-in interruption.
+             Calliope keeps exactly one thing Harmonia must never know about:
+             the PREBUFFER GATE (see "Two-stage playback pipeline" below) —
+             deciding WHEN to call harmonia.play() for the first chunk of a
+             turn is a speech concern, not a device concern.
 
 Auto-speak:  Calliope also owns the single source of truth for the "read every
              answer aloud" toggle (auto_speak_enabled / set_auto_speak /
@@ -51,9 +64,10 @@ Model files: kokoro-onnx needs two binaries (a *.onnx voice model and
 
 Upstream:    panels/home_panel.py (per-response speak button + auto-speak),
              panels/narrator_panel.py (the header toggle)
-Downstream:  kokoro-onnx (synthesis) → sounddevice (playback)
+Downstream:  kokoro-onnx (synthesis) → harmonia.py (playback ownership)
 
-Requires:    kokoro-onnx, sounddevice, numpy. Stdlib otherwise.
+Requires:    kokoro-onnx, numpy. Stdlib otherwise. (sounddevice is Harmonia's
+             dependency now, not Calliope's.)
 """
 
 import hashlib
@@ -69,6 +83,8 @@ from pathlib import Path
 from typing import Any, Optional, cast
 
 import numpy as np
+
+import harmonia
 
 log = logging.getLogger("METIS.calliope")
 
@@ -216,27 +232,12 @@ def synthesize(text: str) -> Optional[np.ndarray]:
         return None
 
 
-# ── Playback (serialized; one utterance at a time) ────────────────────────────
-
-SAMPLE_RATE = 24000           # kokoro-onnx emits 24 kHz natively
-_play_lock = threading.Lock()
-
-
-def _play(audio: np.ndarray) -> None:
-    """Play PCM through the default output device. Never raises: a busy or
-    absent device degrades to a logged no-op. sounddevice is imported lazily so
-    the pure synthesize() path (and its test) never needs an audio backend."""
-    try:
-        import sounddevice as sd  # type: ignore[import-untyped]
-    except Exception as e:  # noqa: BLE001
-        log.error("Calliope: sounddevice unavailable (%s) — cannot play.", e)
-        return
-    with _play_lock:            # never overlap two utterances on one device
-        try:
-            sd.play(audio, SAMPLE_RATE)
-            sd.wait()
-        except Exception as e:  # noqa: BLE001 — device busy / no output device
-            log.error("Calliope: playback failed: %s", e)
+# ── kokoro sample rate ─────────────────────────────────────────────────────────
+# 24 kHz is a fact about kokoro's output, not about playback — save_wav/
+# load_wav (the shared WAV seam Echo reuses) need it for the file format
+# regardless of who owns the device. Every call to harmonia.play() below
+# passes it explicitly (harmonia.py itself assumes no rate — see its D3).
+SAMPLE_RATE = 24000
 
 
 # ── Sentence chunking ─────────────────────────────────────────────────────────
@@ -260,15 +261,21 @@ def _split_sentences(text: str) -> list[str]:
 # repeat" stalls for a whole synth before every sentence. Instead:
 #   • a SYNTH worker keeps a text buffer, COALESCES whatever has piled up, and
 #     takes a chunk (split at a natural boundary) to synthesize into ONE
-#     create() call — amortizing the per-call overhead — then pushes the PCM
-#     onto a small audio buffer, so synthesis runs AHEAD of playback;
-#   • a PLAY worker drains that buffer back-to-back, so once audio exists it
-#     plays with no synth gap between chunks.
+#     create() call — amortizing the per-call overhead — then hands the PCM to
+#     a small RELEASE queue, so synthesis runs AHEAD of playback;
+#   • a RELEASE worker drains that queue in order and forwards each chunk to
+#     harmonia.play() — Harmonia's own queue provides the actual back-to-back
+#     device playback now. The release worker's only remaining job is deciding
+#     WHEN to make that first call (the prebuffer gate, below); Harmonia is not
+#     told about turns, fillers, or gates at all.
 # The FIRST chunk of a turn is capped SMALL (_FIRST_CHUNK_MAX_CHARS) and split at
 # a clause boundary, so a long opening sentence doesn't make you wait its whole
 # synth before the first word — speech starts in a couple of seconds. Later
 # chunks grow to _CHUNK_MAX_CHARS. An epoch counter gives clean barge-in: stop()
-# bumps it, and any synth already in flight (or buffered text) is discarded.
+# bumps THIS (text-side) epoch, so any synth already in flight (or buffered
+# text, or a chunk sitting in the release queue) is discarded. This epoch is
+# deliberately separate from Harmonia's own (PCM-side) epoch — different scopes,
+# not a dual source of truth. Do not collapse them.
 
 _FIRST_CHUNK_MAX_CHARS = int(_CONFIG.get("first_chunk_max_chars", _DEFAULTS["first_chunk_max_chars"]))
 _CHUNK_MAX_CHARS = int(_CONFIG.get("chunk_max_chars", _DEFAULTS["chunk_max_chars"]))
@@ -279,11 +286,13 @@ _CHUNK_MAX_CHARS = int(_CONFIG.get("chunk_max_chars", _DEFAULTS["chunk_max_chars
 # turns (a filler is playing); the manual speak button plays immediately.
 _PREBUFFER_CHUNKS = int(_CONFIG.get("prebuffer_chunks", _DEFAULTS["prebuffer_chunks"]))
 _PREBUFFER_TIMEOUT = 6.0       # s — safety cap so prebuffer can never hang
-_AUDIO_BUFFER = 16             # max synthesized chunks held ahead of playback
+_RELEASE_BUFFER = 16           # max synthesized chunks held ahead of release
 
 _text_queue: "queue.Queue[str]" = queue.Queue()
-# Audio items are (epoch, pcm, is_filler); fillers bypass the prebuffer gate.
-_audio_queue: "queue.Queue[tuple[int, np.ndarray, bool]]" = queue.Queue(maxsize=_AUDIO_BUFFER)
+# Release items are (epoch, pcm) — real answer chunks awaiting the prebuffer
+# gate. Fillers never touch this queue: they bypass the gate entirely and go
+# straight to harmonia.play() from speak_filler().
+_release_queue: "queue.Queue[tuple[int, np.ndarray]]" = queue.Queue(maxsize=_RELEASE_BUFFER)
 _workers_started = False
 _workers_lock = threading.Lock()
 _epoch = 0
@@ -365,29 +374,32 @@ def _synth_worker() -> None:
                 _real_audio_queued = True     # real answer audio has begun this turn
         if stale:
             continue
-        _audio_queue.put((worker_epoch, audio, False))    # blocks if full (backpressure)
+        _release_queue.put((worker_epoch, audio))    # blocks if full (backpressure)
         with _cond:                           # release the prebuffer gate as the lead builds
             global _answer_produced
             _answer_produced += 1
             _cond.notify_all()
 
 
-def _play_worker() -> None:
-    """Drain the audio buffer, playing each chunk back-to-back. Fillers play at
-    once; the FIRST answer chunk of a turn waits for a prebuffered lead (while the
-    filler covers the silence), after which RTF < 1 keeps the buffer ahead. Skips
-    chunks left over from a barged-in turn (epoch mismatch)."""
+def _release_worker() -> None:
+    """Pull synthesized chunks in order and hand each to harmonia.play(). The
+    FIRST answer chunk of a turn waits for a prebuffered lead (while a filler
+    covers the silence via speak_filler()'s direct harmonia.play() call);
+    later chunks in the same turn forward immediately, so once the lead
+    exists Harmonia's own queue plays them back-to-back with no gap. Skips
+    chunks left over from a barged-in turn (epoch mismatch) instead of
+    forwarding them."""
     started_epoch = -1
     while True:
-        ep, audio, is_filler = _audio_queue.get()
+        ep, audio = _release_queue.get()
         if ep != _epoch:                      # stale (barged-in) — drop it
             continue
-        if not is_filler and started_epoch != ep:
+        if started_epoch != ep:
             _await_prebuffer(ep)              # build a lead before the first word
             if ep != _epoch:                  # barged in while we waited
                 continue
             started_epoch = ep
-        _play(audio)
+        harmonia.play(audio, SAMPLE_RATE, tag="speech")
 
 
 def _await_prebuffer(ep: int) -> None:
@@ -404,13 +416,15 @@ def _await_prebuffer(ep: int) -> None:
 
 
 def _ensure_workers() -> None:
-    """Start the synth + play workers on first use (daemons; live for the app)."""
+    """Start the synth + release workers on first use (daemons; live for the
+    app). Neither one touches an audio device — the release worker's only
+    job is deciding when to call harmonia.play()."""
     global _workers_started
     with _workers_lock:
         if not _workers_started:
             threading.Thread(target=_synth_worker, name="calliope-synth",
                              daemon=True).start()
-            threading.Thread(target=_play_worker, name="calliope-play",
+            threading.Thread(target=_release_worker, name="calliope-release",
                              daemon=True).start()
             _workers_started = True
 
@@ -440,9 +454,16 @@ def _drain(q: "queue.Queue[Any]") -> None:
 
 
 def stop() -> None:
-    """Barge-in: bump the epoch (so in-flight synthesis is discarded), drop
-    everything queued, and halt the current utterance. Used when a new question
-    is asked so stale narration doesn't pile up. Never raises."""
+    """Barge-in: bump the (text-side) epoch so in-flight synthesis and any
+    buffered text/release-queue chunk are discarded, then hand off to
+    harmonia.stop() to actually interrupt whatever is mid-playback. Used when
+    a new question is asked so stale narration doesn't pile up. Never raises.
+
+    Barge-in is now INSTANT: harmonia.stop() calls sd.stop(), which cuts off
+    an in-flight sd.wait() — unlike the old module-local design, which could
+    only discard what was still queued and had to wait out the current
+    chunk. Side effect: because Harmonia has no channels, this also stops a
+    briefing Orpheus has playing (see harmonia.py's decisions log)."""
     global _epoch, _real_audio_queued, _answer_produced, _turn_ended, _filler_active
     with _epoch_lock:
         _epoch += 1
@@ -453,12 +474,8 @@ def stop() -> None:
         _filler_active = False
         _cond.notify_all()
     _drain(_text_queue)
-    _drain(_audio_queue)
-    try:
-        import sounddevice as sd
-        sd.stop()
-    except Exception as e:  # noqa: BLE001 — nothing playing / no backend
-        log.debug("Calliope: stop() no-op (%s)", e)
+    _drain(_release_queue)
+    harmonia.stop()
 
 
 # ── Filler audio ──────────────────────────────────────────────────────────────
@@ -531,7 +548,11 @@ def speak_filler() -> None:
     the wait while the real answer generates. No-op if no filler is cached yet, or
     if the real answer's audio has already begun (a fast answer beat us to it — a
     late filler must never jump ahead of real speech). NON-BLOCKING and never
-    raises — safe to call from the UI thread."""
+    raises — safe to call from the UI thread. Bypasses the prebuffer gate and the
+    release queue entirely: it goes straight to harmonia.play(), so it is already
+    "ahead" of the real answer's first chunk (which is still waiting on the gate)
+    and Harmonia's FIFO keeps the order right without Calliope tracking an epoch
+    for it."""
     with _epoch_lock:
         if _real_audio_queued:
             return
@@ -548,12 +569,7 @@ def speak_filler() -> None:
     with _cond:
         global _filler_active
         _filler_active = True                 # arms the prebuffer gate to mask the wait
-    with _epoch_lock:
-        ep = _epoch
-    try:
-        _audio_queue.put_nowait((ep, pcm, True))   # is_filler=True: plays immediately
-    except queue.Full:
-        pass
+    harmonia.play(pcm, SAMPLE_RATE, tag="filler")
 
 
 def end_turn() -> None:
@@ -594,7 +610,8 @@ if __name__ == "__main__":
     print("[Calliope] speaking a two-sentence line (chunked)...")
     speak("Ex tenebris surgit lumen posteris. Calliope is online.")
     time.sleep(0.2)
-    while not (_text_queue.empty() and _audio_queue.empty()):
+    while not (_text_queue.empty() and _release_queue.empty()):
         time.sleep(0.2)          # let the pipeline drain (demo only; speak() doesn't block)
-    time.sleep(3)                # let the final chunk finish playing
+    while harmonia.is_playing():
+        time.sleep(0.2)          # let the final chunk finish playing
     print("[Calliope] done.")

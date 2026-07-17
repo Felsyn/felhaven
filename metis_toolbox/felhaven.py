@@ -22,6 +22,7 @@ import tkinter as tk
 from datetime import datetime
 
 import calliope
+import harmonia
 import pythia
 import scribe
 import themis
@@ -161,9 +162,10 @@ class FelhavenApp:
         self.kairos.register_panel("hypatia",    self._views["hypatia"])
         self.kairos.register_panel("midas",      self._views["midas"])
         self.kairos.register_panel("pheme",      self._views["pheme"])
-        # Reach through the Vox Array host to the Morpheus tab body — the
-        # Moderati precedent (register_panel("hephaestus", …moderati.hephaestus)).
+        # Reach through the Vox Array host to the Morpheus/Orpheus tab bodies —
+        # the Moderati precedent (register_panel("hephaestus", …moderati.hephaestus)).
         self.kairos.register_panel("morpheus",   self._views["morpheus"].morpheus)
+        self.kairos.register_panel("orpheus",    self._views["morpheus"].orpheus)
         self.kairos.start()
 
         # Let the Settings tab nudge the location/time workers on Save so a
@@ -225,7 +227,8 @@ class FelhavenApp:
         if self._save_timer:
             self.root.after_cancel(self._save_timer)
             self._flush_save()
-        morpheus.shutdown()   # best-effort: no orphan mpv.exe after close
+        harmonia.shutdown()    # stop the play thread before Morpheus, its yield target
+        morpheus.shutdown()    # best-effort: no orphan mpv.exe after close
         self.kairos.stop()
         self.root.destroy()
 
