@@ -597,3 +597,27 @@ readers know they were intentional. Append, don't rewrite.
   `harmonia.py`'s docstring (which repeated the same wrong number, so it
   couldn't have caught the bug) corrected in lockstep. Caught in code review
   before shipping to any real deployment. *(Added 2026-07-17.)*
+- **Finnhub joins the Cerberus-Vault-only pattern; Cerberus's session becomes
+  shared across tabs.** `tools/midas.py`'s Finnhub key moves off `.env`/env
+  entirely onto `cerberus.vault_get('finnhub_api_key')` at call time — the
+  same `_brave_key()` shape Callimachus already established, no fallback kept
+  deliberately. That forced Midas's PIN gate off `cerberus.verify()` (a bare
+  hash check) onto `cerberus.unlock()` (opens a real session, required for
+  `vault_get()` to work at all) — and because `_SESSION_KEY` is module-level,
+  **this makes the Cerberus session shared across every consumer**, not just
+  the RAM attempt counter Midas and Cerberus previously shared. Unlocking
+  either the Midas gate or the Cerberus tab now opens both; locking either
+  clears both. Judged "one guardian, one session" is more consistent with
+  Cerberus's stated role as *sole* secrets authority than the split it
+  replaces, but it is a real behavior change for future consumers to design
+  around: any future Vault-reading module's PIN gate must call `unlock()`,
+  not `verify()`, and must add a liveness check (`cerberus.is_unlocked()`) on
+  its own poll/tick to re-seal if the session dies elsewhere — `MidasPanel`'s
+  new `_reseal()` is the reference implementation. The Vault also gained its
+  first write UI: `panels/cerberus_panel.py`'s generic add/update form
+  (name + masked value + SAVE, silent overwrite, no per-row inline editing)
+  is the pattern any future Vault-writing UI should copy rather than
+  reinventing. `cerberus.vault_set()` now logs a Ledger write per call,
+  deliberately **never deduped** (unlike reads) — a write is a distinct event
+  every time, including a silent overwrite. *(Added 2026-07-17 with the
+  Finnhub migration.)*

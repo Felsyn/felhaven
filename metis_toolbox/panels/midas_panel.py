@@ -5,8 +5,13 @@ Cerberus gate: the whole panel is sealed behind the Cerberus PIN (Midas is the
 guardian's first real consumer — see the Cerberus brief, locked decision #2).
 Until the PIN is entered the body shows an alarm-red-on-black gate; the tabs are
 built lazily on unlock and Kairos ticks are buffered until then. This is a
-UI-only wrapper — midas.py (the tool) is untouched, and the gate uses
-cerberus.verify() (a PIN check), not the Vault's encryption.
+UI-only wrapper — midas.py (the tool) is untouched. The gate calls
+cerberus.unlock() (not verify()) — midas.py reads the Finnhub key from the
+Vault at fetch-time, so the gate must open the same session that vault_get()
+reads from. Since Cerberus's session is module-level, unlocking here also
+unlocks the Cerberus tab (and vice versa) — "one guardian, one session". A
+liveness check in update() re-seals this panel within one tick if that shared
+session gets locked from the Cerberus tab instead of from here.
 
 MidasPanel hosts two tabs:
     PRICES — one row per ticker in midas_watchlist.json, current price + daily %
@@ -114,7 +119,7 @@ class MidasPanel(Card):
         pin = self._gate_entry.get()
         self._gate_entry.delete(0, "end")
         try:
-            ok = cerberus.verify(pin)
+            ok = cerberus.unlock(pin)
         except cerberus.HashFileError:
             self._gate_status.config(text="Cerberus's hash file vanished.")
             return
@@ -139,6 +144,17 @@ class MidasPanel(Card):
         if self._pending is not None:      # apply the tick that arrived while sealed
             self.update(self._pending)
             self._pending = None
+
+    def _reseal(self) -> None:
+        """The shared Cerberus session was locked from elsewhere (the Cerberus
+        tab, not this gate). Swap back to the alarm-red gate without touching
+        cerberus.lock() again — it's already locked."""
+        self._unlocked = False
+        self._content.pack_forget()
+        self._gate_entry.config(state="normal")
+        self._gate_status.config(
+            text="Sealed by Cerberus elsewhere. Enter the PIN again.")
+        self._gate.pack(fill="both", expand=True)
 
     def _build_content(self) -> None:
         if self._content_built:
@@ -231,6 +247,11 @@ class MidasPanel(Card):
 
     def update(self, data: dict) -> None:
         """Called by the `midas` Kairos worker (60 s) on the main thread."""
+        if self._unlocked and not cerberus.is_unlocked():
+            # The shared Cerberus session was locked elsewhere (the Cerberus
+            # tab) — re-seal within one tick rather than showing stale
+            # unlocked UI against a session that's actually gone.
+            self._reseal()
         if data is None:
             return
         if not self._unlocked:

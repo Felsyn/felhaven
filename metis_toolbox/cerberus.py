@@ -47,6 +47,10 @@ Session:     unlock(pin) verifies, then caches the PIN-derived key in RAM for
              the session so PBKDF2 runs once, not per read. lock() clears it.
              Vault reads are deduped to one ledger entry per key per unlock
              session (with a read-count); a fresh unlock starts a fresh entry.
+             Vault WRITES are never deduped — each vault_set() call logs its
+             own Ledger entry (name + action="write", never the value), since
+             a write is a distinct, deliberate event rather than a repeated
+             glance at the same secret.
 
 Contract:    preflight()              — validate cerberus_data.json loads.
              verify(pin) -> bool      — Sphynx-pattern salted-hash check +
@@ -55,7 +59,9 @@ Contract:    preflight()              — validate cerberus_data.json loads.
              unlock(pin) / lock() / is_unlocked()
              vault_set(name, value)   — encrypt + store (the explicit setup
                                          step; creates the kdf-salt on first
-                                         use). Requires unlock.
+                                         use). Requires unlock. Silent
+                                         overwrite of an existing name;
+                                         ledgers a (never-deduped) write.
              vault_get(name) -> str   — decrypt + ledger a (deduped) read.
              vault_names() -> list    — key names only, never values.
              manifest_configs()       — Custody rows (file/desc/exists).
@@ -323,7 +329,11 @@ def vault_names() -> list[str]:
 def vault_set(name: str, value: str) -> None:
     """Encrypt `value` under the session key and store it under `name`. This is
     the explicit setup step (R3): on the very first call it mints the kdf-salt.
-    Requires an open session (unlock). Overwrites an existing name."""
+    Requires an open session (unlock). Overwrites an existing name silently —
+    matches this function's own contract, so callers (CLI, panel) don't need
+    to add a confirmation layer on top. Records a Ledger write (name + action,
+    never the value); unlike reads, writes are NOT deduped — each call is a
+    distinct event."""
     if not is_unlocked():
         raise VaultError("vault is locked — call unlock(pin) first")
     vault = _vault_load()
@@ -335,6 +345,7 @@ def vault_set(name: str, value: str) -> None:
     vault["entries"][name] = _encrypt(key, value)
     _vault_write(vault)
     log.info("cerberus vault: stored key %r", name)
+    _ledger_add_write(name)
 
 
 def vault_get(name: str) -> str:
@@ -398,6 +409,15 @@ def _ledger_add_read(name: str) -> None:
     entries.append({"id": eid, "ts": _now(), "head": "vault",
                     "action": "read", "target": name, "count": 1})
     _SESSION_READS[name] = eid
+    _ledger_write(entries)
+
+
+def _ledger_add_write(name: str) -> None:
+    """Record a Vault write. Never deduped (unlike reads) — each vault_set call
+    is a distinct event, whether it's a fresh key or a silent overwrite."""
+    entries = _ledger_load()
+    entries.append({"id": secrets.token_hex(8), "ts": _now(), "head": "vault",
+                    "action": "write", "target": name, "count": 1})
     _ledger_write(entries)
 
 

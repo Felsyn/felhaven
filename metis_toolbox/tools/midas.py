@@ -13,26 +13,47 @@ Source:      Finnhub REST /quote (US equities, free tier). Plain `requests` —
              no SDK. Watchlist lives in midas_watchlist.json at the repo root
              (also the source for Plutus's ticker dropdown).
 
-Key:         FINNHUB_API_KEY, read once at module load from the OS environment
-             or a .env file at the app root (a real env var wins if both set).
-             Missing key -> every ticker returns ERR_NO_KEY (panel shows a
-             placeholder, never crashes). Never commit the key or the .env.
+Key:         The Finnhub key lives ONLY in the Cerberus Vault (the sole
+             secrets authority) under the entry name 'finnhub_api_key' —
+             mirrors Callimachus's Brave-key pattern exactly. Read at
+             call-time via cerberus.vault_get(), never cached to disk or
+             across the module lifetime (the session can lock/unlock
+             repeatedly). No .env/env fallback: seed it once with
+             `python cerberus.py set <PIN> finnhub_api_key <key>`.
+             Because vault_get() needs an unlocked session, a locked vault
+             degrades a fetch to ERR_VAULT_LOCKED (distinct from a vault
+             that's unlocked but simply has no key stored, ERR_NO_KEY) —
+             the panel shows a placeholder either way, never crashes.
 
 Upstream:    metis_toolbox/__init__.py (registration + dispatch)
-Downstream:  metis_brain.py (via toolbox) | felhaven.py (direct import)
+Downstream:  cerberus.py (vault_get for the key) | metis_brain.py (via
+             toolbox) | felhaven.py (direct import)
 
 Requires:    requests (already in Felhaven stack)
-             os, json, time, concurrent.futures (stdlib)
+             os, sys, json, time, concurrent.futures (stdlib)
+             Plus cerberus (app-root sibling) for the key.
 """
 
 import json
 import logging
 import os
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import requests
+
+# Midas is a tool module that reaches UP to an app-root sibling (cerberus.py),
+# not just a tools/ sibling. Normal operation (Pythia, tests, felhaven) already
+# runs with the app root on sys.path; only a bare `python tools/midas.py`
+# standalone run needs it added first. This block must precede `import
+# cerberus` so it runs before the import resolves — the same top-of-module
+# placement callimachus.py uses.
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import cerberus
 
 log = logging.getLogger("METIS.midas")
 
@@ -42,54 +63,36 @@ log = logging.getLogger("METIS.midas")
 #                   (invalid symbol, market never traded)
 #   FETCH_FAILED  — network error, timeout, 429 rate limit, unexpected exception
 #   STALE_CACHE   — cache hit, but older than CACHE_TTL (informational, usable)
-#   NO_KEY        — FINNHUB_API_KEY not set in the environment
+#   NO_KEY        — vault is unlocked but holds no 'finnhub_api_key' entry
+#   VAULT_LOCKED  — Cerberus session isn't open, so the Vault can't be read
 
 ERR_NO_DATA      = "no_data"
 ERR_FETCH_FAILED = "fetch_failed"
 ERR_STALE_CACHE  = "stale_cache"
 ERR_NO_KEY       = "no_key"
+ERR_VAULT_LOCKED = "vault_locked"
+
+# The one vault entry name Midas reads. See the Key: section above.
+_VAULT_KEY_NAME = "finnhub_api_key"
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-# App root = one dir up from tools/ (next to felhaven.py). The watchlist and the
-# optional .env both live here. Anchored to __file__, so cwd never matters.
+# App root = one dir up from tools/ (next to felhaven.py). The watchlist lives
+# here. Anchored to __file__, so cwd never matters.
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-def _load_dotenv() -> None:
-    """
-    Minimal .env loader — no python-dotenv dependency, so the stack stays
-    flash-drive-portable. Reads KEY=VALUE lines from <app root>/.env into
-    os.environ, but only for keys not already set, so a real OS environment
-    variable (e.g. one set via `setx`) always wins over the file. Blank lines
-    and '#' comments are ignored; surrounding quotes are stripped. Silent if
-    the file is absent.
-    """
-    env_path = os.path.join(_APP_ROOT, ".env")
-    try:
-        with open(env_path, "r", encoding="utf-8") as f:
-            for raw in f:
-                line = raw.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                if key and key not in os.environ:
-                    os.environ[key] = value
-    except FileNotFoundError:
-        pass
-    except Exception as e:
-        log.warning(f"Midas: failed to read .env: {e}")
-
-
-_load_dotenv()
-FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY", "")
 
 _QUOTE_URL = "https://finnhub.io/api/v1/quote"
 _HTTP_TIMEOUT = 6
 
-# Watchlist config lives at the app root, next to felhaven.py and .env.
+
+def _finnhub_key() -> str:
+    """Return the Finnhub API key from the Cerberus Vault. Requires an
+    unlocked session; raises cerberus.VaultError if the vault is locked or the
+    key is absent. Never cached to disk (mirrors callimachus._brave_key)."""
+    return cerberus.vault_get(_VAULT_KEY_NAME)
+
+
+# Watchlist config lives at the app root, next to felhaven.py.
 _WATCHLIST_PATH = os.path.join(_APP_ROOT, "config", "midas_watchlist.json")
 
 
@@ -120,13 +123,17 @@ def _fmt_price(price: float) -> str:
 
 def _fetch_one(symbol: str) -> dict[str, Any]:
     """Fetch a single ticker from Finnhub /quote. Returns a result dict — never raises."""
-    if not FINNHUB_API_KEY:
+    if not cerberus.is_unlocked():
+        return {"symbol": symbol, "error": ERR_VAULT_LOCKED}
+    try:
+        key = _finnhub_key()
+    except cerberus.VaultError:
         return {"symbol": symbol, "error": ERR_NO_KEY}
 
     try:
         resp = requests.get(
             _QUOTE_URL,
-            params={"symbol": symbol, "token": FINNHUB_API_KEY},
+            params={"symbol": symbol, "token": key},
             timeout=_HTTP_TIMEOUT,
         )
         resp.raise_for_status()
@@ -251,6 +258,16 @@ def fetch() -> dict[str, Any]:
 # ── Standalone test ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # Live prices only work if Cerberus is unlocked and holds the Finnhub key.
+    # Unlock here from an env PIN purely for a manual smoke test; normal
+    # callers never do this — the panel relies on an already-unlocked session.
+    pin = os.environ.get("CERBERUS_PIN")
+    if pin and not cerberus.unlock(pin):
+        print("[Midas] CERBERUS_PIN set but wrong — running locked (ERR_VAULT_LOCKED).")
+    elif not pin:
+        print("[Midas] set CERBERUS_PIN (and seed 'finnhub_api_key' in the "
+              "vault) to smoke-test live prices; running locked otherwise.")
+
     results = query_all()
     for r in results:
         if "error" in r:

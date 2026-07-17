@@ -5,11 +5,13 @@ Metis Toolbox | Anti-Legion: ONE JOB
 
 Job:         Draw Cerberus's UI: a PIN gate, and once unlocked, three
              collapsible sections — Vault (masked secrets with reveal-on-
-             demand), Custody (manifest-driven config list that hands editing
-             to the OS), and Ledger (access log, newest-first). All logic —
-             PIN verify, encryption, ledger, manifest — lives in cerberus.py;
-             this module never computes a hash, derives a key, or touches the
-             attempt counter directly. It only draws and hands off.
+             demand, plus a generic add/update form for writing new or
+             changed secrets), Custody (manifest-driven config list that
+             hands editing to the OS), and Ledger (access log, newest-first).
+             All logic — PIN verify, encryption, ledger, manifest — lives in
+             cerberus.py; this module never computes a hash, derives a key,
+             or touches the attempt counter directly. It only draws and
+             hands off.
 
 Placement:   A bare tk.Frame tab body inside ModeratiPanel (the CERBERUS tab),
              the same shape as ArgusPanel / EmanonPanel. NOT a Card, NOT
@@ -378,10 +380,7 @@ class CerberusPanel(tk.Frame):
     def _render_vault(self, parent: tk.Frame) -> None:
         names = cerberus.vault_names()
         if not names:
-            self._empty(parent,
-                        "vault empty — add secrets with "
-                        "`python cerberus.py set <pin> <name> <value>`")
-            return
+            self._empty(parent, "vault empty — add one below.")
         for name in names:
             row = tk.Frame(parent, bg=C["card"])
             row.pack(fill="x", pady=1)
@@ -406,7 +405,71 @@ class CerberusPanel(tk.Frame):
             if shown:                       # keep a revealed row shown across a refresh
                 self._show_value(name, val_lbl)
 
-        self._note(parent, "values decrypt only on reveal — each reveal is logged.")
+        self._build_vault_form(parent)
+        self._note(parent, "values decrypt only on reveal — each reveal and "
+                            "each save is logged.")
+
+    def _build_vault_form(self, parent: tk.Frame) -> None:
+        """Generic add/update form: one name field, one masked value field, one
+        submit action. Works for any key — present or new, Finnhub, Brave, or
+        anything else — not a per-row inline edit. Overwriting an existing
+        name is silent (matches the CLI `set` command's own behavior)."""
+        tk.Frame(parent, bg=C["border"], height=1).pack(fill="x", pady=(8, 6))
+
+        name_row = tk.Frame(parent, bg=C["card"])
+        name_row.pack(fill="x", pady=(0, 4))
+        tk.Label(name_row, text="name ▸", font=FONTS["tiny"], fg=C["text3"],
+                 bg=C["card"]).pack(side="left", padx=(0, 4))
+        name_entry = tk.Entry(
+            name_row, font=FONTS["small"],
+            bg=C["bar_bg"], fg=C["text1"], insertbackground=C["text1"],
+            highlightbackground=C["border"], highlightcolor=C["purple"],
+            highlightthickness=1, borderwidth=0,
+        )
+        name_entry.pack(side="left", fill="x", expand=True)
+
+        value_row = tk.Frame(parent, bg=C["card"])
+        value_row.pack(fill="x")
+        tk.Label(value_row, text="value ▸", font=FONTS["tiny"], fg=C["text3"],
+                 bg=C["card"]).pack(side="left", padx=(0, 4))
+        value_entry = tk.Entry(
+            value_row, show="•", font=FONTS["small"],
+            bg=C["bar_bg"], fg=C["text1"], insertbackground=C["text1"],
+            highlightbackground=C["border"], highlightcolor=C["purple"],
+            highlightthickness=1, borderwidth=0,
+        )
+        value_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        save_btn = tk.Label(value_row, text="SAVE", font=FONTS["small_bold"],
+                            fg=C["purple"], bg=C["card"], cursor="hand2")
+        save_btn.pack(side="left")
+        save_btn.bind("<Enter>", lambda e: save_btn.config(fg=C["amber"]))
+        save_btn.bind("<Leave>", lambda e: save_btn.config(fg=C["purple"]))
+
+        def _submit(_event=None) -> None:
+            self._on_vault_submit(name_entry, value_entry)
+
+        save_btn.bind("<Button-1>", _submit)
+        value_entry.bind("<Return>", _submit)
+        name_entry.bind("<Return>", lambda e: value_entry.focus_set())
+
+    def _on_vault_submit(self, name_entry: tk.Entry, value_entry: tk.Entry) -> None:
+        name = name_entry.get().strip()
+        value = value_entry.get()
+        if not name:
+            self._status.config(text="name a secret first.", fg=C["red"])
+            return
+        if not value:
+            self._status.config(text="value can't be empty.", fg=C["red"])
+            return
+        try:
+            cerberus.vault_set(name, value)
+        except cerberus.VaultError as e:
+            self._status.config(text=str(e), fg=C["red"])
+            return
+        self._status.config(text=f"saved {name!r} to the vault.", fg=C["text3"])
+        self._render_section("vault")     # the new/updated row shows immediately
+        self._refresh_if_open("ledger")
 
     def _toggle_reveal(self, name: str, val_lbl: tk.Label, btn: tk.Label) -> None:
         if self._revealed.get(name):

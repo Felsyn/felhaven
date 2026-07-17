@@ -11,22 +11,23 @@ bookkeeping half is [Plutus](Plutus.md)). Prices in, no opinions, no advice.
 - **Finnhub REST `/quote`** (US equities, free tier), plain `requests`, no SDK.
 - Watchlist is `midas_watchlist.json` at the app root (also feeds Plutus's ticker
   dropdown — one list, two readers).
-- **`FINNHUB_API_KEY`** is read once at import from the OS environment *or* a
-  `.env` at the app root, via a tiny hand-rolled `.env` loader (no
-  `python-dotenv` — the stack stays flash-drive-portable). A real OS env var
-  wins over the file if both are set. **Never commit the key or the `.env`.**
+- The Finnhub key lives **only in the Cerberus Vault**, under the entry name
+  `finnhub_api_key` — the same pattern Callimachus uses for its Brave key.
+  Read at call-time via `cerberus.vault_get()`, never cached to disk or across
+  the module lifetime. Seed it once with:
+  `python cerberus.py set <PIN> finnhub_api_key <key>`. There is no `.env`/env
+  fallback — a locked Vault or a missing key both degrade to a placeholder,
+  never a crash.
 
-Missing key → every ticker returns `ERR_NO_KEY` and the panel shows a
-placeholder. It never crashes for lack of a key.
-
-## Four honest error states
+## Five honest error states
 
 Distinct codes so the panel can render each differently rather than a generic
 "error":
 
 | Code | Meaning |
 |---|---|
-| `no_key` | `FINNHUB_API_KEY` not set |
+| `vault_locked` | Cerberus session isn't open, so the Vault can't be read |
+| `no_key` | vault is unlocked but holds no `finnhub_api_key` entry |
 | `no_data` | ticker exists but Finnhub returned all-zero fields (bad symbol) |
 | `fetch_failed` | network error, timeout, or 429 rate limit |
 | `stale_cache` | a cached value served past its TTL — usable, just old |
@@ -62,9 +63,13 @@ things when the feed breaks.
 
 The Dynastic Vault panel is the first consumer to sit **entirely behind the
 [Cerberus](../Moderati/Cerberus.md) PIN** (the alarm-red gate) — the proof that
-"everyone defers to Cerberus" for secrets. Midas's own Finnhub key, though, still
-comes from `.env`/env, not the Vault (that migration is a future step noted in
-Cerberus's README).
+"everyone defers to Cerberus" for secrets. The gate itself calls
+`cerberus.unlock()`, not just a PIN check, because Midas's own Finnhub key now
+lives in that same Vault: opening the Dynastic Vault opens the one shared
+Cerberus session (the Cerberus tab and this gate are interchangeable — unlock
+either, and both are open; lock either, and both seal). A liveness check
+re-seals this panel within one Kairos tick if the session gets locked from the
+Cerberus tab instead of from here.
 
 ## Files
 
@@ -72,7 +77,6 @@ Cerberus's README).
 |---|---|---|
 | `tools/midas.py` | yes | The Finnhub fetch, cache, contract. |
 | `midas_watchlist.json` | yes | The ticker list (shared with Plutus). |
-| `.env` | **no** (gitignored) | Holds `FINNHUB_API_KEY`. |
 | `panels/midas_panel.py` → `MidasPanel` | yes | The **Dynastic Vault** card (hosts the Plutus ledger UI). |
 
 ## Using it

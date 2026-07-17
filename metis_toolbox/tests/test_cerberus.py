@@ -237,7 +237,7 @@ class TestLedger(_Base):
         cerberus.vault_get("k")
         cerberus.vault_get("k")
         reads = [e for e in cerberus.ledger_entries()
-                 if e["head"] == "vault" and e["target"] == "k"]
+                 if e["head"] == "vault" and e["action"] == "read" and e["target"] == "k"]
         self.assertEqual(len(reads), 1)
         self.assertEqual(reads[0]["count"], 3)
 
@@ -248,7 +248,7 @@ class TestLedger(_Base):
         cerberus.vault_get("a")
         cerberus.vault_get("b")
         targets = sorted(e["target"] for e in cerberus.ledger_entries()
-                         if e["head"] == "vault")
+                         if e["head"] == "vault" and e["action"] == "read")
         self.assertEqual(targets, ["a", "b"])
 
     def test_new_session_starts_new_entry(self):
@@ -259,8 +259,34 @@ class TestLedger(_Base):
         cerberus.unlock(_TEST_PIN)
         cerberus.vault_get("k")
         reads = [e for e in cerberus.ledger_entries()
-                 if e["head"] == "vault" and e["target"] == "k"]
+                 if e["head"] == "vault" and e["action"] == "read" and e["target"] == "k"]
         self.assertEqual(len(reads), 2)       # one per session, not deduped across
+
+    def test_vault_write_is_logged(self):
+        cerberus.unlock(_TEST_PIN)
+        cerberus.vault_set("k", "v")
+        writes = [e for e in cerberus.ledger_entries()
+                  if e["head"] == "vault" and e["action"] == "write"]
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(writes[0]["target"], "k")
+
+    def test_vault_writes_are_never_deduped(self):
+        # Unlike reads, each vault_set call — including a silent overwrite of
+        # the same name — is its own Ledger entry, not a bumped count.
+        cerberus.unlock(_TEST_PIN)
+        cerberus.vault_set("k", "v1")
+        cerberus.vault_set("k", "v2")
+        cerberus.vault_set("k", "v3")
+        writes = [e for e in cerberus.ledger_entries()
+                  if e["head"] == "vault" and e["action"] == "write"
+                  and e["target"] == "k"]
+        self.assertEqual(len(writes), 3)
+
+    def test_vault_write_never_logs_the_value(self):
+        cerberus.unlock(_TEST_PIN)
+        cerberus.vault_set("k", "top-secret-value")
+        for e in cerberus.ledger_entries():
+            self.assertNotIn("top-secret-value", json.dumps(e))
 
     def test_custody_logs_full_fidelity(self):
         cerberus.ledger_log_custody("midas_watchlist.json", "open")

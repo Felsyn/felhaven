@@ -131,11 +131,13 @@ Calliope already needs.
 These are **your** keys; none are shipped in the repo.
 
 - **Finnhub** — Midas market prices (PRICES tab). Get a free key at
-  <https://finnhub.io/register>, then in `metis_toolbox/`:
+  <https://finnhub.io/register>, then seed it into the Cerberus vault, in
+  `metis_toolbox/`:
   ```
-  copy .env.example .env      # then edit .env: FINNHUB_API_KEY=your-key
+  python cerberus.py set <PIN> finnhub_api_key <your-finnhub-key>
   ```
-  `.env` is gitignored — never commit it. No key → PRICES shows a placeholder;
+  (`<PIN>` is your Cerberus PIN — see §7.) The key lives only in the vault,
+  never in a file. No key, or a locked vault → PRICES shows a placeholder;
   the LEDGER tab (local bookkeeping) works regardless.
 - **Brave Search** — Callimachus web search (a Pythia tool). The key lives only in
   the Cerberus vault, never in a file:
@@ -164,8 +166,8 @@ setting your own** instead of inheriting the author's:
   choice is remembered). Later launches pose your riddle and take your PIN; three
   wrong tries close the window (relaunch for a fresh three — nothing is ever
   locked on disk).
-- **Cerberus** — the *real* secrets gate (guards the vault where the Brave key
-  lives). On first launch the **CERBERUS** tab (under **Moderati**) shows a **set
+- **Cerberus** — the *real* secrets gate (guards the vault where the Finnhub
+  and Brave keys live). On first launch the **CERBERUS** tab (under **Moderati**) shows a **set
   a PIN** prompt when `cerberus_data.json` is absent; choose one and confirm and
   it opens straight into your (empty) vault. You can still do it from the CLI if
   you prefer: `python cerberus.py setpin <new-pin>`.

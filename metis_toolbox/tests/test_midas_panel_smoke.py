@@ -45,8 +45,17 @@ class _Base(unittest.TestCase):
 
     def setUp(self):
         self._dir = tempfile.mkdtemp()
-        self._orig = {k: getattr(cerberus, k) for k in ("_DATA_PATH", "_KDF_ITERS")}
-        cerberus._DATA_PATH = os.path.join(self._dir, "cerberus_data.json")
+        # The gate now calls cerberus.unlock() (not just verify()), which also
+        # touches the Vault and Ledger — every path constant must be
+        # redirected, not just _DATA_PATH, or these tests would read/write the
+        # real cerberus_vault.json / cerberus_ledger.json.
+        self._orig = {k: getattr(cerberus, k) for k in
+                      ("_DATA_PATH", "_VAULT_PATH", "_MANIFEST_PATH",
+                       "_LEDGER_PATH", "_KDF_ITERS")}
+        cerberus._DATA_PATH     = os.path.join(self._dir, "cerberus_data.json")
+        cerberus._VAULT_PATH    = os.path.join(self._dir, "cerberus_vault.json")
+        cerberus._MANIFEST_PATH = os.path.join(self._dir, "cerberus_manifest.json")
+        cerberus._LEDGER_PATH   = os.path.join(self._dir, "cerberus_ledger.json")
         cerberus._KDF_ITERS = 1000
         cerberus._ATTEMPTS_REMAINING = 3
         cerberus.lock()
@@ -127,6 +136,33 @@ class TestMidasGate(_Base):
         self.root.update_idletasks()
         self.assertEqual(str(panel._gate_entry.cget("state")), "disabled")
         panel.destroy()
+
+    def test_gate_uses_cerberus_session_not_just_verify(self):
+        # The gate opens a real Cerberus session (unlock), not just a PIN
+        # check — is_unlocked() must be true afterward, the same shared
+        # session the Cerberus tab would see.
+        self._unlock()
+        self.assertTrue(cerberus.is_unlocked())
+
+    def test_reseals_when_session_locked_elsewhere(self):
+        # Simulates the Cerberus tab locking the shared session: Midas must
+        # re-seal on its next tick rather than showing stale unlocked UI.
+        self._unlock()
+        self.assertTrue(self.panel._unlocked)
+        cerberus.lock()
+        self.panel.update(None)
+        self.root.update_idletasks()
+        self.assertFalse(self.panel._unlocked)
+        self.assertEqual(str(self.panel._gate_entry.cget("state")), "normal")
+
+    def test_reseal_then_reunlock_works(self):
+        self._unlock()
+        cerberus.lock()
+        self.panel.update(None)
+        self.root.update_idletasks()
+        self._unlock()
+        self.assertTrue(self.panel._unlocked)
+        self.assertTrue(cerberus.is_unlocked())
 
 
 if __name__ == "__main__":

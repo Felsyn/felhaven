@@ -73,16 +73,26 @@ python cerberus.py status
 ```
 
 **In the dashboard** — open the **CERBERUS** tab (4th tab in Moderati), enter the
-PIN, and the three sections unfold: Vault (values masked, reveal on demand),
-Custody (click a config to edit it in your OS editor + Open Folder), Ledger
-(access log, newest first).
+PIN, and the three sections unfold: Vault (values masked, reveal on demand,
+plus a generic add/update form to write a new or changed secret), Custody
+(click a config to edit it in your OS editor + Open Folder), Ledger (access
+log, newest first).
+
+The Vault's add/update form is one name field + one masked value field + a
+SAVE action — not per-row inline editing, and it works for any key, present
+or new. Submitting an existing name overwrites it silently, same as the CLI
+`set` command; each write (name + action, never the value) is logged to the
+Ledger, and unlike reads, writes are never deduped.
 
 ## Consumers
 
-- **Dynastic Vault (Midas)** — the whole panel is sealed behind the Cerberus PIN
-  (alarm-red-on-black gate). First proof that "everyone defers to Cerberus."
-- **Future** — Sibyl (cloud-LLM gateway) and Midas secure-notes will call into
-  `cerberus.py` for their crypto, never their own.
+- **Dynastic Vault (Midas)** — the whole panel is sealed behind the Cerberus PIN,
+  and its gate calls `cerberus.unlock()` (not just a PIN check), because
+  Midas reads its Finnhub key from this same Vault (`finnhub_api_key`).
+  Because Cerberus's session is module-level, unlocking Midas's gate also
+  unlocks the Cerberus tab, and vice versa — "one guardian, one session."
+- **Future** — Sibyl (cloud-LLM gateway) will call into `cerberus.py` for its
+  crypto too, never its own.
 
 ## Tests
 

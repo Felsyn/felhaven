@@ -87,11 +87,12 @@ whole runtime. **No database. No server.**
 
 **Two** API keys exist in the whole stack — **Finnhub** (Midas prices) and
 **Brave Search** (Callimachus web search) — and both are optional; every other
-network call uses a keyless public endpoint. They're stored differently on
-purpose: Finnhub's sits in `.env`, while Brave's lives **only** in the encrypted
-Cerberus vault. The optional extras degrade gracefully — without the narration
-models or the `mpv`/`yt-dlp`/`ffmpeg` binaries, that feature shows a placeholder
-or returns a clean error, never a crash.
+network call uses a keyless public endpoint. Both live **only** in the
+encrypted Cerberus vault — never `.env`, never an env var, never in the repo —
+and are read at call time by whichever tool needs them, so a locked vault or a
+missing key degrades to a placeholder or a clean error, never a crash. The
+optional extras (narration models, the `mpv`/`yt-dlp`/`ffmpeg` binaries)
+degrade the same way.
 
 > **Installing on a fresh machine?** [`SETUP.md`](SETUP.md) is the single source
 > of truth: prerequisites, venv, Ollama for Pythia, the narration and audio
@@ -122,7 +123,7 @@ arrives. Off by default; the kokoro-onnx model loads lazily on the first spoken 
 | Weather location | `AURA_LOCATION` in `tools/aura.py` |
 | Star map location | `HYPATIA_LAT` / `HYPATIA_LON` in `tools/hypatia.py` (keep in sync with `AURA_LOCATION` — same place, two representations) |
 | Market watchlist | `midas_watchlist.json` (repo root — `{"tickers": [...]}`, US equities only). Shared seam: Plutus's LEDGER ticker dropdown reads the same file. |
-| Finnhub API key | `FINNHUB_API_KEY` — setup steps are in [`SETUP.md`](SETUP.md) §6. Never committed (`.env` is gitignored). |
+| Finnhub API key | `finnhub_api_key` in the **Cerberus vault** — never `.env`, never an env var, never in the repo. Set via `python cerberus.py set <PIN> finnhub_api_key <key>`. Powers Midas (PRICES tab). |
 | Brave Search API key | `brave_api_key` in the **Cerberus vault** — never `.env`, never an env var, never in the repo. Set via `python cerberus.py set <PIN> brave_api_key <key>`. Powers Callimachus (Pythia's web search). |
 | News feeds | `pheme_rumormill.json` (repo root — ordered `id` / `label` / `url` / `format` rows; tab order follows file order) |
 | Playlists (Morpheus) | `morpheus_playlists.json` (repo root — ordered `label` / `url` rows; PLAYLISTS-tab order follows file order). Adding a playlist is a JSON edit, never a code change |
@@ -148,7 +149,7 @@ pheme_rumormill.json    ← Pheme feed config (ordered id/label/url/format rows)
 morpheus_playlists.json ← Morpheus playlist config (ordered label/url rows)
 midas_watchlist.json    ← Midas watchlist + Plutus ticker source ({"tickers":[…]})
 plutus_ledger.json      ← Plutus holdings ledger (append-only buy/sell events; gitignored)
-.env / .env.example     ← API keys (FINNHUB_API_KEY); .env gitignored, .example committed
+.env.example            ← template for local overrides; no live API keys route through it (both keys live in the Cerberus vault — see Configuration)
 panels/
     sidebar.py          ← Sidebar + SidebarRow (left-hand navigation)
     home_panel.py       ← HomePanel (landing view)

@@ -175,7 +175,8 @@ class TestUnlockedSections(_PanelBase):
         self.assertEqual(val_lbl.cget("text"), "sk-secret")
         self.assertEqual(btn.cget("text"), "hide")
         reads = [e for e in cerberus.ledger_entries()
-                 if e["head"] == "vault" and e["target"] == "openai_key"]
+                 if e["head"] == "vault" and e["action"] == "read"
+                 and e["target"] == "openai_key"]
         self.assertEqual(len(reads), 1)
         # Toggle back re-masks without another decrypt.
         self.panel._toggle_reveal("openai_key", val_lbl, btn)
@@ -208,6 +209,68 @@ class TestUnlockedSections(_PanelBase):
         self._unlock()
         self.panel._refresh_open()
         self.root.update_idletasks()
+
+
+class TestVaultForm(_PanelBase):
+    """The generic add/update form at the bottom of the Vault section."""
+
+    def _submit(self, name: str, value: str) -> None:
+        name_entry = tk.Entry(self.panel)
+        value_entry = tk.Entry(self.panel)
+        name_entry.insert(0, name)
+        value_entry.insert(0, value)
+        self.panel._on_vault_submit(name_entry, value_entry)
+        self.root.update_idletasks()
+
+    def test_submit_adds_new_key(self):
+        self._unlock()
+        self._submit("finnhub_api_key", "fh-secret-456")
+        self.assertIn("finnhub_api_key", cerberus.vault_names())
+        self.assertEqual(cerberus.vault_get("finnhub_api_key"), "fh-secret-456")
+
+    def test_submit_renders_new_row_without_manual_refresh(self):
+        self._unlock()
+        self._submit("brave_api_key", "bv-secret")
+        rendered = [w.cget("text") for w in
+                    self.panel._sections["vault"].content.winfo_children()
+                    if isinstance(w, tk.Frame)
+                    for w in w.winfo_children() if isinstance(w, tk.Label)]
+        self.assertIn("brave_api_key", rendered)
+
+    def test_submit_overwrite_is_silent_and_not_deduped(self):
+        # Overwriting an existing name (openai_key, seeded in setUp) must not
+        # raise, prompt, or dedupe the Ledger write — matches the CLI `set`
+        # command's own silent-overwrite behavior.
+        self._unlock()
+        self._submit("openai_key", "sk-new-value")
+        self.assertEqual(cerberus.vault_get("openai_key"), "sk-new-value")
+        writes = [e for e in cerberus.ledger_entries()
+                  if e["head"] == "vault" and e["action"] == "write"
+                  and e["target"] == "openai_key"]
+        # setUp's seed write + this overwrite: two distinct entries, not one
+        # deduped/bumped entry (writes are never deduped, unlike reads).
+        self.assertEqual(len(writes), 2)
+
+    def test_submit_logs_write_without_value(self):
+        self._unlock()
+        self._submit("new_key", "top-secret-value")
+        import json as _json
+        for e in cerberus.ledger_entries():
+            self.assertNotIn("top-secret-value", _json.dumps(e))
+
+    def test_submit_empty_name_rejected(self):
+        self._unlock()
+        before = cerberus.vault_names()
+        self._submit("", "some-value")
+        self.assertEqual(cerberus.vault_names(), before)
+        self.assertIn("name", self.panel._status.cget("text").lower())
+
+    def test_submit_empty_value_rejected(self):
+        self._unlock()
+        before = cerberus.vault_names()
+        self._submit("new_key", "")
+        self.assertEqual(cerberus.vault_names(), before)
+        self.assertIn("value", self.panel._status.cget("text").lower())
 
 
 if __name__ == "__main__":
