@@ -41,21 +41,37 @@ whole dashboard, not just this tab.
 `play_file(name)` shells out to ffmpeg once per call:
 
 ```
-ffmpeg -i <path> -f f32le -ar 48000 -ac 2 -   (stdout: raw interleaved PCM)
+ffmpeg -i <path> -f f32le -ar 24000 -ac 1 -   (stdout: raw interleaved PCM)
 ```
 
 and reshapes the whole result to `(frames, channels)` before handing it to
-`harmonia.play(pcm, 48000, tag="orpheus")`. For a 3-minute stereo briefing at
-48 kHz float32 that's roughly **70 MB** — fine for what Echo produces. A
-multi-hour file would not be; that bound is **stated in the module docstring** so
-it's a known limit rather than a later surprise. Streaming would mean chunked
-reads off ffmpeg's stdout — a different module, not this one.
+`harmonia.play(pcm, 24000, tag="orpheus")`. For a 3-minute mono 24 kHz briefing
+at float32 that's roughly **17 MB** — fine for what Echo produces. A multi-hour
+file would not be; that bound is **stated in the module docstring** so it's a
+known limit rather than a later surprise. Streaming would mean chunked reads
+off ffmpeg's stdout — a different module, not this one.
 
-**48 kHz, not 24 kHz — the D3 check.** Kokoro (Calliope) emits 24 kHz; ffmpeg
-here is explicitly told to decode to 48 kHz, and that rate is passed to
-`harmonia.play()` on every call. Harmonia itself assumes no rate — if this
-number silently drifted or got hardcoded wrong, every briefing would play at half
-speed. `tests/test_orpheus.py` pins the exact rate reaching `harmonia.play()`.
+**24 kHz mono — matching Echo, not a generic decode.** `_SAMPLE_RATE`/`_CHANNELS`
+aren't "the format Orpheus decodes audio to" in general — they're **what Echo's
+pipeline actually produces**: kokoro synthesizes mono at 24 kHz, and neither
+`calliope.save_wav()` nor Echo's ffmpeg encode step resamples or remixes, so
+every `.opus` in `local_audio/` is mono 24 kHz *at origin*. Decoding at a higher
+rate or a second channel doesn't recover anything — it just upsamples and
+duplicates a channel for zero new information, at real RAM cost (measured on a
+real 6m41s file: **147 MB** decoded at 48 kHz stereo vs. **37 MB** at its native
+24 kHz mono — exactly 4×, for nothing). This is Orpheus's own explicit
+assumption about the folder it reads, not something Harmonia assumes on its
+behalf — Harmonia still takes whatever rate/channel count it's given (D3);
+`tests/test_orpheus.py` pins the exact numbers reaching `harmonia.play()`.
+**A second, stated limit alongside the RAM bound:** the day something that
+*isn't* Echo's own output lands in `local_audio/` (real music, a different
+source rate), forcing 24 kHz mono will audibly degrade it. That's a limit to
+revisit then — not a guard to add now, while the folder holds only Echo's output.
+
+*(This was originally shipped decoding at 48 kHz stereo — a straightforward
+handoff-following mistake: the written spec said 48 kHz/stereo, but never
+verified against what Echo's pipeline actually emits. Caught in review before
+it caused any real problem — see the CHANGELOG.)*
 
 ## Duration, without a second binary
 

@@ -24,11 +24,11 @@ Contract:    fetch() -> {"playing": bool, "files": [{"name", "duration"}, ...]}
              play_file(name) -> dict
                  Decode `name` (must already be a file in local_audio/) whole
                  into RAM via ffmpeg and hand it to harmonia.play() at
-                 48 kHz. Mutation — fires only from deliberate UI action in
-                 OrpheusPanel; never polled, never LLM-facing (no handle(),
-                 no TOOL_DEFINITION — v1 is panel-only, the Echo precedent).
-                 Never raises: a bad name, a missing ffmpeg, or a decode
-                 failure all degrade to a logged no-op and a stable
+                 24 kHz mono. Mutation — fires only from deliberate UI action
+                 in OrpheusPanel; never polled, never LLM-facing (no
+                 handle(), no TOOL_DEFINITION — v1 is panel-only, the Echo
+                 precedent). Never raises: a bad name, a missing ffmpeg, or a
+                 decode failure all degrade to a logged no-op and a stable
                  {"error": ...} dict.
              stop() -> None
                  harmonia.stop(). Mutation, UI-driven only. Never raises.
@@ -36,11 +36,27 @@ Contract:    fetch() -> {"playing": bool, "files": [{"name", "duration"}, ...]}
                  Mirrors morpheus.available() / echo.available(). The panel
                  reads this once at build time to show a placeholder.
 
-Limit:       Whole-file decode into RAM. ~70 MB for a 3-minute stereo 48 kHz
+Limit:       Whole-file decode into RAM. ~17 MB for a 3-minute mono 24 kHz
              float32 briefing — fine for what Echo produces. A multi-hour
              file would not be; that bound is a stated, deliberate limit, not
              a bug. Streaming would need chunked reads off ffmpeg's stdout —
              a different module, not this one.
+
+             _SAMPLE_RATE/_CHANNELS below are 24000/1, not a generic
+             "decode anything" default — they match exactly what Echo's
+             pipeline produces (kokoro synthesizes mono @ 24 kHz;
+             calliope.save_wav()/echo's ffmpeg encode never resample or
+             remix, so every .opus in local_audio/ is mono 24 kHz at
+             origin). Decoding at a higher rate/channel count than the
+             source has doesn't restore anything — it just upsamples and
+             duplicates a channel for zero new information, at up to 4x the
+             RAM for nothing (measured: a real 6m41s file was 147 MB
+             decoded at 48 kHz stereo vs. 37 MB at its native 24 kHz mono).
+             This is a second, deliberate limit alongside the RAM bound: it
+             assumes local_audio/ only ever holds Echo's own output. The day
+             a real music file (or anything not from Echo) lands there,
+             forcing 24 kHz mono would audibly degrade it — that's a stated
+             assumption to revisit then, not a guard to add now.
 
 Duration     No ffprobe — it isn't bundled alongside ffmpeg in bin/, and
 probing:     pulling in a second binary for one number is a bad trade.
@@ -108,10 +124,14 @@ _LOCAL_AUDIO_DIR = os.path.join(_APP_ROOT, "local_audio")
 # on a non-Windows box can't AttributeError (morpheus precedent).
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-# The rate ffmpeg is asked to decode to. Passed to harmonia.play() explicitly
-# every call (D3) — Harmonia itself assumes no rate.
-_SAMPLE_RATE = 48000
-_CHANNELS = 2
+# The rate/channel count ffmpeg is asked to decode to — matched to what
+# Echo's pipeline actually produces (kokoro @ 24 kHz mono), NOT a generic
+# default (see the module "Limit" section: decoding higher than the source
+# just upsamples/duplicates for zero new information, at real RAM cost).
+# Passed to harmonia.play() explicitly every call (D3) — Harmonia itself
+# assumes no rate.
+_SAMPLE_RATE = 24000
+_CHANNELS = 1
 
 _DECODE_TIMEOUT = 120.0   # s — generous for a multi-minute briefing
 
@@ -230,7 +250,8 @@ def _decode(ffmpeg: str, path: str) -> Optional[np.ndarray]:
 
 def play_file(name: str) -> dict[str, Any]:
     """Decode `name` (a file already in local_audio/) and hand it to
-    harmonia.play() at 48 kHz. Never raises.
+    harmonia.play() at 24 kHz mono — Echo's native format, not a generic
+    rate (see the module "Limit" section). Never raises.
     Error codes: bad_name, ffmpeg_unavailable, decode_failed."""
     path = _safe_path(name)
     if path is None:

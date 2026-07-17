@@ -577,3 +577,23 @@ readers know they were intentional. Append, don't rewrite.
   tests assert Calliope *calls* Harmonia rather than touching `sounddevice`
   itself. Full suite green (453 tests), `mypy --strict --explicit-package-bases
   tools/` green. *(Added 2026-07-16.)*
+- **Correction to the entry above: Orpheus's `_SAMPLE_RATE`/`_CHANNELS` were
+  wrong — 48 kHz stereo, not 24 kHz mono.** The written handoff specified
+  `-f f32le -ar 48000 -ac 2`, and the code above matched it exactly — but the
+  handoff itself was stale (an amendment to 24 kHz mono was given
+  conversationally after the fact and never reached the doc, a process gap,
+  not a judgment error). Every `.opus` in `local_audio/` is produced by Echo
+  at **24 kHz mono at origin** (kokoro synthesizes mono @ 24 kHz;
+  `calliope.save_wav()` and Echo's ffmpeg encode step never resample or
+  remix), so decoding at 48 kHz stereo doesn't recover any real information —
+  it upsamples and duplicates a channel for **exactly 4× the RAM**, confirmed
+  on a real 6m41s file: 147 MB decoded at 48 kHz stereo vs. 37 MB at its
+  native 24 kHz mono. Fixed to `_SAMPLE_RATE = 24000`, `_CHANNELS = 1`, with
+  the docstring reframed to say what it actually is: `tools/orpheus.py`
+  *assumes* Echo's own output format — a second, explicit limit alongside the
+  RAM bound, alongside a note that a non-Echo file landing in `local_audio/`
+  (real music, a different source rate) would sound wrong under this
+  assumption. That's a limit to revisit **then**, not a guard to add now.
+  `harmonia.py`'s docstring (which repeated the same wrong number, so it
+  couldn't have caught the bug) corrected in lockstep. Caught in code review
+  before shipping to any real deployment. *(Added 2026-07-17.)*

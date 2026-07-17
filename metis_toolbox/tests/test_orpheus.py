@@ -81,11 +81,11 @@ class TestSafePath(unittest.TestCase):
 
 class TestDecode(unittest.TestCase):
     def test_success_reshapes_to_frames_by_channels(self):
-        raw = np.zeros(8, dtype="<f4").tobytes()   # 4 frames * 2 channels
+        raw = np.zeros(4, dtype="<f4").tobytes()   # 4 mono frames (_CHANNELS = 1)
         with mock.patch("tools.orpheus.subprocess.run",
                         return_value=_FakeProc(0, stdout=raw)):
             pcm = orpheus._decode("ffmpeg", "in.opus")
-        self.assertEqual(pcm.shape, (4, 2))
+        self.assertEqual(pcm.shape, (4, 1))
 
     def test_nonzero_exit_is_none(self):
         with mock.patch("tools.orpheus.subprocess.run",
@@ -126,8 +126,13 @@ class TestPlayFile(unittest.TestCase):
                     mock.patch.object(orpheus, "_decode", return_value=None):
                 self.assertEqual(orpheus.play_file("a.opus"), {"error": "decode_failed"})
 
-    def test_success_hands_pcm_to_harmonia_at_48k(self):
-        pcm = np.zeros((4, 2), dtype=np.float32)
+    def test_success_hands_pcm_to_harmonia_at_24k_mono(self):
+        # 24 kHz mono, matching Echo's own output exactly (kokoro synthesizes
+        # mono @ 24 kHz; neither calliope.save_wav() nor Echo's ffmpeg encode
+        # resamples/remixes) — NOT a generic decode target. Decoding at a
+        # higher rate/channel count than the source has would just upsample
+        # and duplicate a channel for zero new information, at real RAM cost.
+        pcm = np.zeros((4, 1), dtype=np.float32)
         with tempfile.TemporaryDirectory() as tmp:
             open(os.path.join(tmp, "a.opus"), "wb").close()
             with mock.patch.object(orpheus, "_LOCAL_AUDIO_DIR", tmp), \
@@ -138,7 +143,7 @@ class TestPlayFile(unittest.TestCase):
         self.assertEqual(result, {"playing": "a.opus"})
         args, kwargs = hplay.call_args
         self.assertIs(args[0], pcm)
-        self.assertEqual(args[1], 48000)          # D3 — the explicit rate check
+        self.assertEqual(args[1], 24000)          # D3 — the explicit rate check
         self.assertEqual(kwargs.get("tag"), "orpheus")
 
 

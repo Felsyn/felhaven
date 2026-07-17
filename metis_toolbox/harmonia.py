@@ -33,10 +33,14 @@ Contract:    Neither polled nor LLM-facing — infrastructure, like kairos.py.
                      Stop the play thread cleanly. Wired into
                      felhaven._on_close BEFORE morpheus.shutdown().
 
-Sample rate: Every caller passes its OWN rate explicitly. Kokoro (Calliope)
-             synthesizes at 24 kHz; Opus/ffmpeg (Orpheus) is decoded at
-             48 kHz. Harmonia hardcodes neither — get this wrong and half
-             your callers play at half speed.
+Sample rate: Every caller passes its OWN rate explicitly — Harmonia hardcodes
+             none. Kokoro (Calliope) synthesizes at 24 kHz mono; Orpheus
+             decodes at 24 kHz mono too, but only because that's what Echo's
+             pipeline actually produces (see tools/orpheus.py's "Limit"
+             section) — that's Orpheus's assumption about local_audio/, not
+             a fact Harmonia should ever hardcode on its behalf. Get a
+             caller's rate wrong (whichever caller, whatever its own reason)
+             and it plays at the wrong speed.
 
 Yielding     play() calls morpheus.stop() before enqueuing ANY audio, in
 Morpheus:    Harmonia's own code — not in Calliope, not in Orpheus, not in a
@@ -54,8 +58,9 @@ No channels: One stream, full stops only. Harmonia does not know what a
              interrupted; bringing music back is `tools.morpheus.resume_music`,
              a deliberate, separate, manual tool. Harmonia stays dumb.
 
-Upstream:    calliope.py (speech PCM @ 24 kHz), tools/orpheus.py (decoded
-             file PCM @ 48 kHz), felhaven.py (calls shutdown() on close).
+Upstream:    calliope.py (speech PCM @ 24 kHz mono), tools/orpheus.py
+             (decoded file PCM @ 24 kHz mono, matching Echo's own output —
+             not a generic decode), felhaven.py (calls shutdown() on close).
 Downstream:  sounddevice (playback) -> tools/morpheus.py (yielded, never
              called back — Harmonia is a one-way dependency on Morpheus).
 
