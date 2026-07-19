@@ -45,7 +45,7 @@ python -X utf8 -m unittest discover -s tests -p "test_*.py"
 ## License
 
 This snapshot is released under the **MIT License** — see
-[`LICENSE`](LICENSE). You're free to use, copy, modify, and redistribute it,
+[`LICENSE.md`](LICENSE.md). You're free to use, copy, modify, and redistribute it,
 including in your own projects, as long as the copyright notice and license text
 travel with it. It's provided as-is, with no warranty. (Development still lives
 in a separate private repo — see above — so this covers *reuse* of the code, not

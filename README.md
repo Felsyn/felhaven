@@ -247,6 +247,6 @@ Logs rotate into `logs/<program>.log` (~1 MB × 3 backups). The `` | ``-delimite
 ## License
 
 The public snapshot of Felhaven is released under the **MIT License** — see
-[`LICENSE`](LICENSE). Use, copy, modify, and redistribute freely (including in
+[`LICENSE.md`](LICENSE.md). Use, copy, modify, and redistribute freely (including in
 your own projects); just keep the copyright notice and license text with it. No
 warranty.
