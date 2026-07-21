@@ -3,9 +3,9 @@ pythia.py — The Oracle (LLM brain)
 ===================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         Answer a question by talking to the local LLM (gemma4:e2b via
-             Ollama), letting it call the toolbox's tools when it needs live
-             data, and return the final text answer. Nothing else — no
+Job:         Answer a question by talking to the local LLM, using toolbox
+             tools for live data. Runs gemma4:e2b via Ollama, lets the model
+             call the tools, and returns the final text. Nothing else — no
              tkinter, no threads, no persistence. The panel owns the UI and
              the background thread; Pythia is a pure request/response function.
 

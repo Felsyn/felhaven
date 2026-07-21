@@ -3,8 +3,8 @@ themis.py — Keeper of Settled Law (user settings)
 =================================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         Own felhaven_settings.json — the per-install user preferences
-             (location, temperature unit, clock format).
+Job:         Own the per-install user preferences (location, temperature
+             unit, clock format). They live in felhaven_settings.json.
 
 Contract:    Root-level persistence flavor (like scribe.py): no fetch(), no
              TOOL_DEFINITION — plain functions plus one exception class. It is

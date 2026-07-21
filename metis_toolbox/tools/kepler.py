@@ -7,8 +7,8 @@ Job:         Compute the positions of the five classical planets.
 
 Contract:    Pure-function module (the Helios/Selene row of CONVENTIONS §2 —
              no fetch(), no handle(), no TOOL_DEFINITION, absent from
-             __init__.py). Imported only by tools/hypatia.py, which composes
-             it the way Midas composes Plutus. Out of LLM scope on purpose —
+             pythia._TOOL_MODULES). Imported only by tools/hypatia.py,
+             which composes it the way Midas composes Plutus. Out of LLM scope on purpose —
              this is orbital math feeding a display, not a brain tool.
 
 Source:      Low-precision Keplerian elements: J2000 mean elements + secular

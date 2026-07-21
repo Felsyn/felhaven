@@ -3,8 +3,8 @@ echo.py — Echo, the Scribe of Voices
 ====================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         Turn text (typically Markdown) into an audio FILE on disk. Nothing
-             else. Echo does not PLAY audio (that is Calliope), does not control
+Job:         Turn text into an audio file on disk. Typically Markdown, and
+             nothing else. Echo does not PLAY audio (that is Calliope), does not control
              an audio engine (that is Morpheus), and does not decide WHAT to
              narrate — it is handed text + a filename and writes one .opus file.
 

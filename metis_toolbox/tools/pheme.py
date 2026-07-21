@@ -5,7 +5,7 @@ Metis Toolbox | Anti-Legion: ONE JOB
 
 Job:         Aggregate headlines from the configured RSS/Atom news feeds.
 
-Feeds live in pheme_rumormill.json at the repo root — one row per source
+Feeds live in config/pheme_rumormill.json under the app root — one row per source
 ({id, label, url, format}). Adding or removing a feed is a JSON edit, never a
 code change. The parser branches on `format` ("rss" 2.0 vs "atom").
 

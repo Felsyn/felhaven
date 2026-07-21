@@ -1,6 +1,6 @@
 # Orpheus
 
-Play back one audio file from `local_audio/` — the folder Echo writes to. Play and
+Play back one audio file from local_audio/ — the folder Echo writes to. Play and
 stop only.
 
 - **UI:** Vox Array card → ORPHEUS tab

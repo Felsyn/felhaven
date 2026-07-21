@@ -3,10 +3,10 @@
 SCRIBE — Tasks & Notes (Metis tool module, headless)
 "Ex tenebris surgit lumen posteris"
 
-Job:         Store and manage the to-do list and notes (local CRUD).
+Job:         Store and manage the to-do list and notes. Local CRUD only.
 
 Pure task & notes state management for Felhaven. No GUI, no Tkinter.
-Persists to scribe_data.json beside the launching script.
+Persists to scribe_data.json at the app root, anchored to __file__.
 
 Public API:
     handle()                -> dict   # full snapshot (read-only)
@@ -18,7 +18,7 @@ Public API:
     load_data()             -> dict
     save_data(data)         -> None
 
-DATA FILE — scribe_data.json, stored next to the launching script (portable).
+DATA FILE — scribe_data.json at the app root, anchored to __file__ (portable).
             Schema: { "tasks": [{"text": str, "done": bool}, ...], "notes": str }
 
 Dependencies: stdlib only.

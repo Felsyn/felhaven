@@ -1,7 +1,7 @@
 # Cerberus
 
-Guard the toolbox's secrets behind one PIN — the sole encryption authority
-(Vault, Custody, Ledger).
+Guard the toolbox's secrets behind one PIN — the sole encryption authority.
+Vault, Custody, and Ledger are its three facets.
 
 - **UI:** Moderati card → CERBERUS tab
 - **Brain tool:** none — deliberately out of LLM scope

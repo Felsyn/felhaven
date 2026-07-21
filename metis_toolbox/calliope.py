@@ -53,7 +53,7 @@ Auto-speak:  Calliope also owns the single source of truth for the "read every
              panel reads it. The default lives in calliope_config.json, never in
              code.
 
-Config:      calliope_config.json beside this file — voice, speed, lang, model
+Config:      config/calliope_config.json — voice, speed, lang, model
              paths, and the auto_speak default. Voice-switching later is a config
              edit, not a code change (the Pheme / Morpheus precedent).
 

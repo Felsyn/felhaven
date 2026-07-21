@@ -1,11 +1,12 @@
 """
 Pheme panel — RSS / Atom news aggregator for the Felhaven dashboard.
 
-PhemePanel builds one tab per feed listed in pheme_rumormill.json (repo root),
+PhemePanel builds one tab per feed listed in config/pheme_rumormill.json,
 in config order, with the first feed active by default. There are no hardcoded
 tabs — adding a feed to the JSON adds a tab.
 
-Each tab owns a vertically-scrollable body (_ScrollFrame: Canvas + Scrollbar).
+Each tab owns a vertically-scrollable body (_ScrollFrame: Canvas +
+PhosphorScroll — never tk.Scrollbar, see CONVENTIONS §7/§12).
 The mouse wheel is bound only while the pointer is over that tab's canvas, so
 stacked scroll frames don't fight over wheel events.
 
@@ -54,7 +55,7 @@ def _load_feeds() -> list:
 
 class _ScrollFrame(tk.Frame):
     """
-    Canvas + Scrollbar wrapper. Pack content into `.inner`.
+    Canvas + PhosphorScroll wrapper. Pack content into `.inner`.
 
     Labels that should wrap to the available width register via add_wrap_label();
     their wraplength is recomputed whenever the canvas is resized, so titles

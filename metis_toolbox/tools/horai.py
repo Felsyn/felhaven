@@ -9,11 +9,16 @@ Eunomia  →  clock  (exact datetime)
 Dike     →  season (Spring / Summer / Autumn / Winter)
 Eirene   →  cycle  (Dawn / Morning / Afternoon / Evening / Night)
 
-Contract:    Exposes TOOL_DEFINITION and handle().
-             handle() takes no arguments, returns a dict.
+Contract:    Polled + brain tool. Exposes TOOL_DEFINITION and handle(), with
+             fetch = handle as the Kairos entry point — same data, no I/O.
+             Takes no arguments, returns a dict.
+             fetch() never raises, deliberately (§2 asks why): it reads only
+             the local clock and Themis, whose loaders fall back rather than
+             fail, so there is no failure mode left to report.
 
-Upstream:    metis_toolbox/__init__.py (registration + dispatch)
-Downstream:  metis_brain.py (via toolbox, never directly)
+Upstream:    kairos.py (calls fetch), pythia.py (registration + dispatch),
+             themis.py (clock format + hemisphere)
+Downstream:  panels/horai_panel.py (display surface)
 """
 
 import os

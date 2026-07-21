@@ -1,6 +1,6 @@
 # Scribe
 
-Store and manage the to-do list and notes (local CRUD).
+Store and manage the to-do list and notes. Local CRUD only.
 
 - **UI:** Cogitator card → SCRIBE tab
 - **Brain tool:** none — not registered with Pythia today

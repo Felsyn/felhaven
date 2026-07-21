@@ -5,15 +5,16 @@ Metis Toolbox | Anti-Legion: ONE JOB
 
 Job:         Manage a single countdown timer.
 
-State:       Persists to timer_state.json next to the script.
-             Survives restarts. Dashboard and Metis read the same file.
+State:       Persists to timer_state.json at the app root — anchored to
+             __file__, never to the launching script (CONVENTIONS §1).
+             Survives restarts; the panel and Pythia read the same file.
 
 Contract:    Exposes TOOL_DEFINITION and handle().
              Also exposes start_timer(), stop_timer(), reset_timer(),
              query_all() for direct dashboard use.
 
-Upstream:    metis_toolbox/__init__.py (registration + dispatch)
-Downstream:  metis_brain.py (via toolbox) | felhaven.py (direct import)
+Upstream:    pythia.py (registration + dispatch)
+Downstream:  panels/horai_panel.py (AmmitWidget — the countdown display)
 
 v0.01:       Countdown only. No alarm. That's next.
 """
@@ -160,7 +161,7 @@ TOOL_DEFINITION = {
 
 def handle(action: str = "query", slot: int = 1, duration_minutes: float = 0) -> dict[str, Any]:
     """
-    Called by the toolbox dispatcher when Metis invokes manage_timer.
+    Called by Pythia's dispatcher when the model invokes manage_timer.
     slot is 1-indexed in the contract; converted to 0-indexed internally.
     """
     idx = max(0, min(MAX_SLOTS - 1, slot - 1))

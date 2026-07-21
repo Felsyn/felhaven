@@ -5,13 +5,16 @@ Metis Toolbox | Anti-Legion: ONE JOB
 
 Job:         Fetch current price and daily % change for a watchlist.
 
-Contract:    Exposes TOOL_DEFINITION and handle().
-             Also exposes query_all() for direct dashboard use.
+Contract:    Polled + brain tool. Exposes TOOL_DEFINITION, handle(), and
+             fetch(); also query_all() for direct dashboard use.
              Returns price and % change. Nothing more.
+             handle() never raises. fetch() raises only when EVERY ticker
+             failed (per §2, so Kairos delivers None); a partial failure is
+             embedded per-ticker instead.
 
 Source:      Finnhub REST /quote (US equities, free tier). Plain `requests` —
-             no SDK. Watchlist lives in midas_watchlist.json at the repo root
-             (also the source for Plutus's ticker dropdown).
+             no SDK. Watchlist lives in config/midas_watchlist.json under the
+             app root (also the source for Plutus's ticker dropdown).
 
 Key:         The Finnhub key lives ONLY in the Cerberus Vault (the sole
              secrets authority) under the entry name 'finnhub_api_key' —
@@ -25,9 +28,9 @@ Key:         The Finnhub key lives ONLY in the Cerberus Vault (the sole
              that's unlocked but simply has no key stored, ERR_NO_KEY) —
              the panel shows a placeholder either way, never crashes.
 
-Upstream:    metis_toolbox/__init__.py (registration + dispatch)
-Downstream:  cerberus.py (vault_get for the key) | metis_brain.py (via
-             toolbox) | felhaven.py (direct import)
+Upstream:    kairos.py (calls fetch), pythia.py (registration + dispatch)
+Downstream:  cerberus.py (vault_get for the key), panels/midas_panel.py
+             (display surface)
 
 Requires:    requests (already in Felhaven stack)
              os, sys, json, time, concurrent.futures (stdlib)
@@ -92,7 +95,7 @@ def _finnhub_key() -> str:
     return cerberus.vault_get(_VAULT_KEY_NAME)
 
 
-# Watchlist config lives at the app root, next to felhaven.py.
+# Watchlist config lives in config/ under the app root (CONVENTIONS §4).
 _WATCHLIST_PATH = os.path.join(_APP_ROOT, "config", "midas_watchlist.json")
 
 
@@ -243,7 +246,7 @@ TOOL_DEFINITION = {
 
 
 def handle() -> dict[str, Any]:
-    """Called by the toolbox dispatcher when Metis invokes get_market_prices."""
+    """Called by the toolbox dispatcher when the LLM invokes get_market_prices."""
     return {"tickers": query_all()}
 
 

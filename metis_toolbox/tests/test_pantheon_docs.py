@@ -11,6 +11,7 @@ Run from the package root:
     python -X utf8 -m unittest tests.test_pantheon_docs
 """
 
+import ast
 import os
 import re
 import subprocess
@@ -128,6 +129,97 @@ class TestStubFilePathsExist(unittest.TestCase):
                     f"{module}.md lists {rel}, which git does not track — it is "
                     f"either a wrong path or gitignored state that won't exist "
                     f"on a fresh clone")
+
+
+def _source_file(module, text):
+    """The .py file a stub is *about*, read off its own Files field.
+
+    CONVENTIONS S0 puts the gloss in the module's header docstring, so the test
+    needs module -> file. Deriving it from the Files field the stub already
+    maintains (pick the entry whose basename is <module>.py) means no fourth
+    hand-written list to drift: a moved file fails the Files guard above first.
+    """
+    m = _FILES_FIELD.search(text)
+    if m is None:
+        return None
+    for rel in _BACKTICKED.findall(m.group(1)):
+        if os.path.basename(rel) == module + ".py":
+            return os.path.join(_APP_ROOT, rel.replace("/", os.sep))
+    return None
+
+
+def _first_sentence(text):
+    """Leading sentence of a blob, whitespace collapsed.
+
+    The gloss is the FIRST sentence: S0 says later ones elaborate and are not
+    shown, so only this much has to agree across the three copies.
+    """
+    flat = " ".join(text.split())
+    m = re.match(r"(.*?[.!?])(\s|$)", flat)
+    return m.group(1) if m else flat
+
+
+def _docstring_gloss(path):
+    """First sentence of the module docstring's `Job:` field, or None.
+
+    Parsed with ast rather than imported: importing every module would drag in
+    psutil, requests and a Tk root just to read a string.
+    """
+    with open(path, encoding="utf-8") as fh:
+        doc = ast.get_docstring(ast.parse(fh.read()))
+    if not doc:
+        return None
+    m = re.search(r"^Job:\s*(.+?)(?=^\w[\w ]*:|\Z)", doc, re.MULTILINE | re.DOTALL)
+    return _first_sentence(m.group(1)) if m else None
+
+
+def _index_rows():
+    """{module: Job cell} from the README_PANTHEON index table."""
+    with open(os.path.join(_PANTHEON, "README.md"), encoding="utf-8") as fh:
+        body = fh.read()
+    return dict(re.findall(r"^\| \[.+?\]\((\w+)\.md\) \| (.+?) \|$", body,
+                           re.MULTILINE))
+
+
+class TestJobGlossStaysInLockstep(unittest.TestCase):
+    """The gloss exists three times; only one copy sits next to the code.
+
+    CONVENTIONS S0 makes the `Job:` first sentence the text any hover/tooltip
+    surface reads verbatim, and it is duplicated into each stub's opening line
+    and the index table. That is a derivable claim in prose, which S12 says to
+    delete or generate rather than trust -- so it is asserted here instead.
+    The docstring is the authority: it cannot drift from the code silently.
+    """
+
+    def test_stub_and_index_match_the_docstring(self):
+        index = _index_rows()
+        for module, text in _stubs().items():
+            with self.subTest(module=module):
+                path = _source_file(module, text)
+                self.assertIsNotNone(
+                    path, f"{module}.md lists no file named {module}.py, so the "
+                          f"gloss cannot be traced back to a docstring")
+
+                doc_gloss = _docstring_gloss(path)
+                self.assertIsNotNone(
+                    doc_gloss,
+                    f"{os.path.relpath(path, _APP_ROOT)} has no `Job:` field — "
+                    f"CONVENTIONS S0 requires one in every header docstring")
+
+                # Body of the stub = everything after the "# Title" line.
+                stub_body = text.split("\n", 1)[1].lstrip("\n")
+                self.assertEqual(
+                    _first_sentence(stub_body), doc_gloss,
+                    f"\n{module}.md opens with a different gloss than "
+                    f"{os.path.relpath(path, _APP_ROOT)}. The docstring wins.")
+
+                self.assertIn(module, index,
+                              f"{module}.md exists but has no row in the "
+                              f"README_PANTHEON index table")
+                self.assertEqual(
+                    _first_sentence(index[module]), doc_gloss,
+                    f"\nThe index row for {module} differs from "
+                    f"{os.path.relpath(path, _APP_ROOT)}. The docstring wins.")
 
 
 if __name__ == "__main__":

@@ -12,9 +12,9 @@ the module's own docstring, where it cannot drift from the code.
 | [Aura](aura.md) | Report current weather: temperature, sky, wind, and forecast. |
 | [Callimachus](callimachus.md) | Ask the web a question and return trimmed text. |
 | [Calliope](calliope.md) | Turn a string of text into speech and play it. |
-| [Cerberus](cerberus.md) | Guard the toolbox's secrets behind one PIN. |
+| [Cerberus](cerberus.md) | Guard the toolbox's secrets behind one PIN — the sole encryption authority. |
 | [Echo](echo.md) | Turn text into an audio file on disk. |
-| [Emanon](emanon.md) | Watch the stack's logs and report what broke. |
+| [Emanon](emanon.md) | Watch the stack's logs and report what broke — read-only, never act. |
 | [Eudoxus](eudoxus.md) | Convert between units of length, volume, weight, temperature, and time. |
 | [Harmonia](harmonia.md) | Own the one audio output device. |
 | [Helios](helios.md) | Report sunrise, sunset, golden-hour windows, and day length. |
@@ -24,17 +24,17 @@ the module's own docstring, where it cannot drift from the code.
 | [Hypatia](hypatia.md) | Map where every catalog star and planet sits in the sky right now. |
 | [Kairos](kairos.md) | Own the clock. Fire workers. Dispatch results to panels. |
 | [Kepler](kepler.md) | Compute the positions of the five classical planets. |
-| [Machine Spirit](machine_spirit.md) | Own Pythia's system prompt. |
+| [Machine Spirit](machine_spirit.md) | Own Pythia's system prompt — the default text plus an optional per-install override. |
 | [Midas](midas.md) | Fetch current price and daily % change for a watchlist. |
-| [Morpheus](morpheus.md) | Play audio from YouTube. |
-| [Orpheus](orpheus.md) | Play back one audio file from `local_audio/`. |
+| [Morpheus](morpheus.md) | Play audio from YouTube — search, play, pause, and skip tracks. |
+| [Orpheus](orpheus.md) | Play back one audio file from local_audio/ — the folder Echo writes to. |
 | [Pheme](pheme.md) | Aggregate headlines from the configured RSS/Atom news feeds. |
 | [Plutus](plutus.md) | Track stock buys and sells; derive shares held and cost invested. |
-| [Pythia](pythia.md) | Answer a question by talking to the local LLM. |
+| [Pythia](pythia.md) | Answer a question by talking to the local LLM, using toolbox tools for live data. |
 | [Scribe](scribe.md) | Store and manage the to-do list and notes. |
 | [Selene](selene.md) | Report the moon's phase, illumination, moonrise, and moonset. |
-| [Sphynx](sphynx.md) | Verify a PIN against the stored hash; track attempts remaining. |
-| [Themis](themis.md) | Own the per-install user preferences. |
+| [Sphynx](sphynx.md) | Verify a PIN against the stored hash, and track how many attempts remain. |
+| [Themis](themis.md) | Own the per-install user preferences (location, temperature unit, clock format). |
 | [Zeno](zeno.md) | Evaluate Python arithmetic expressions safely, step by step. |
 
 Most tool modules run standalone for a smoke check: `python tools/<module>.py`.

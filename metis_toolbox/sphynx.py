@@ -3,8 +3,9 @@ sphynx.py — Riddle-Posing Guardian (logic)
 ============================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         Verify a PIN against sphynx_data.json's stored hash, and track
-             how many attempts remain. Nothing else — no window, no
+Job:         Verify a PIN against the stored hash, and track how many
+             attempts remain. The hash lives in sphynx_data.json.
+             Nothing else — no window, no
              subprocess, no persistence.
 
 Contract:    preflight()      — validate the hash file loads; raises

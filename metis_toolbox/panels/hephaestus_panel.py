@@ -2,14 +2,12 @@
 Hephaestus panel — system vitals display for the Felhaven dashboard.
 
 BarMeter      — small labelled percent bar (reusable by any panel that wants one).
-VitalsPanel   — CPU / RAM / DISK bars + node/OS footer, polls hephaestus.handle().
+VitalsPanel   — CPU / RAM / DISK bars + node/OS footer, fed hephaestus.fetch().
 """
 
 import tkinter as tk
 
 from theme import C, FONTS
-
-from tools import hephaestus
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -118,7 +116,7 @@ class AetherWidget(tk.Frame):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class VitalsPanel(tk.Frame):
-    """Uses hephaestus.handle() for real system vitals.
+    """Displays real system vitals, fetched by Kairos via hephaestus.fetch().
 
     A bare Frame tab body inside ModeratiPanel (the HEPHAESTUS tab); keeps its
     own update() and is registered with Kairos directly.

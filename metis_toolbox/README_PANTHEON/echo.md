@@ -1,6 +1,6 @@
 # Echo
 
-Turn text (typically Markdown) into an audio file on disk. Writes, never plays.
+Turn text into an audio file on disk. Typically Markdown; writes, never plays.
 
 - **UI:** Vox Array card → ECHO tab
 - **Brain tool:** none

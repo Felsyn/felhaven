@@ -5,15 +5,20 @@ Metis Toolbox | Anti-Legion: ONE JOB
 
 Job:         Report current weather: temperature, sky, wind, and forecast.
 
-Contract:    Exposes TOOL_DEFINITION and handle().
-             handle() takes no arguments, returns a dict.
+Contract:    Polled + brain tool. Exposes TOOL_DEFINITION, handle(), and
+             fetch(); both take no arguments and return a dict.
              Calls wttr.in (JSON, no API key required).
-             On network failure, degrades gracefully — never raises.
+             handle() (the LLM path) degrades to an {"error": ...} dict and
+             never raises. fetch() (the Kairos path) DOES raise on failure,
+             per §2 — that is how Kairos delivers None so the panel holds a
+             stale reading instead of blanking.
 
-Upstream:    metis_toolbox/__init__.py (registration + dispatch)
-Downstream:  metis_brain.py (via toolbox, never directly)
+Upstream:    kairos.py (calls fetch), pythia.py (registration + dispatch),
+             themis.py (location, read fresh per fetch)
+Downstream:  panels/aura_panel.py (display surface), tools/helios.py and
+             tools/selene.py (both read the astronomy dict, never fetch it)
 
-Requires:    requests (already in Metis stack)
+Requires:    requests (already in the Felhaven stack)
 
 Location config:
     The Settings tab (Themis / felhaven_settings.json) is canonical — it holds

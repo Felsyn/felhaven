@@ -14,7 +14,7 @@ Contract:    Exposes TOOL_DEFINITION, handle(), and convert().
              All three never raise; error paths return {"error": ...}.
              No fetch() — Eudoxus is request-driven, not polled.
 
-Upstream:    metis_toolbox/__init__.py (registration + dispatch)
+Upstream:    pythia.py (registration + dispatch)
 Downstream:  panels/eudoxus_panel.py (EudoxusPanel)
 
 Requires:    stdlib only: re, logging

@@ -27,7 +27,7 @@ Data model:  Append-only event log, one record per buy/sell:
              Everything else (net shares, cost invested, totals) is DERIVED by
              folding the log. Nothing mutable is stored — the log is the truth.
 
-Persistence: plutus_ledger.json at repo root. {"events": [...]}.
+Persistence: plutus_ledger.json at the app root. {"events": [...]}.
 
 Sell rule:   Average-cost. Selling reduces cost invested proportionally to the
              average cost of shares held at that moment — NOT the sell price.
@@ -46,7 +46,7 @@ from typing import Any
 
 log = logging.getLogger("METIS.plutus")
 
-# Ledger lives at repo root, next to felhaven.py. plutus.py sits in tools/.
+# Ledger lives at the app root, next to felhaven.py. plutus.py sits in tools/.
 _LEDGER_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "plutus_ledger.json",

@@ -1,7 +1,7 @@
 # Pythia
 
-Answer a question by talking to the local LLM, letting it call the toolbox's
-tools when it needs live data. The sole tool registry.
+Answer a question by talking to the local LLM, using toolbox tools for live
+data. The sole tool registry.
 
 - **UI:** Felhaven home view — the chat
 - **Brain tool:** none — Pythia is the caller, not a tool

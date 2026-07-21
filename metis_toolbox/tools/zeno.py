@@ -25,7 +25,7 @@ Semantics:   Operands are reduced eagerly, innermost-first, so the step readout
              a string (CPython caps int->str at ~4300 digits). Both surface a
              clean "result too large" rather than hanging or an opaque error.
 
-Upstream:    metis_toolbox/__init__.py (registration + dispatch)
+Upstream:    pythia.py (registration + dispatch)
 Downstream:  panels/zeno_panel.py (display surface)
 
 Requires:    stdlib only: ast, math, logging
