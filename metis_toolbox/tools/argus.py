@@ -82,7 +82,7 @@ _DNS_MAX      = 60
 # process isn't talking to anything), so we relabel PID 0 to a token that tells
 # the truth: a connection in teardown with no live owner. NOTE: PID 4 ("System",
 # the real kernel process that legitimately listens on 445 etc.) is left alone —
-# only PID 0 is the misleading one. This is the one deviation from specs/argus.md.
+# only PID 0 is the misleading one.
 _PID0_LABEL = "[system]"
 
 

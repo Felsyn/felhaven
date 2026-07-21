@@ -14,7 +14,7 @@ this file guarded no longer has anything to guard.
 
 The one live registry now is Pythia's, built by reflection in pythia.py
 (_TOOL_MODULES → TOOLS/_DISPATCH) — typed input, so it can't drift from its
-handlers. See README_PANTHEON/README.md ("Two ways in, two registries").
+handlers.
 
 Felhaven itself runs with this directory on sys.path and imports its modules
 top-level (`from tools import ...`, `import pythia`), so nothing depends on this

@@ -35,12 +35,8 @@ actually be folded into the project.
 
 ## Running & testing
 
-See [`SETUP.md`](SETUP.md) to install and launch. The hermetic test suite (no
-network, no audio, no models needed) runs from `metis_toolbox/`:
-
-```
-python -X utf8 -m unittest discover -s tests -p "test_*.py"
-```
+See [`SETUP.md`](SETUP.md) — it covers install, launch, and the hermetic test
+suite (no network, no audio, no models needed).
 
 ## License
 

@@ -69,11 +69,10 @@ Pythia talks to a **local Ollama** over `/api/chat`.
    ```
    ollama pull gemma4:e2b
    ```
-   This is the default (`PYTHIA_MODEL`, in `pythia.py`). To use a different
-   tool-calling model, set the `PYTHIA_MODEL` environment variable to its Ollama
-   tag instead. TODO(verify: `gemma4:e2b` is the tag this project was developed
-   against — confirm your Ollama can pull/serve it, or substitute an equivalent
-   tool-calling model).
+   This is the default (`PYTHIA_MODEL`, in `pythia.py`) and the tag this project
+   was developed against. To use a different tool-calling model, set the
+   `PYTHIA_MODEL` environment variable to its Ollama tag instead — any model
+   Ollama can serve that supports tool calling will do.
 3. Endpoint: Pythia reads `OLLAMA_HOST` (default **`127.0.0.1:11435`**). If your
    Ollama listens on the standard `11434`, set `OLLAMA_HOST=127.0.0.1:11434`.
 
@@ -91,8 +90,8 @@ https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/v
 ```
 
 fp32 is used on purpose — on a CPU it is ~3.5× *faster* than the smaller int8
-build (see [`README_PANTHEON/Calliope.md`](metis_toolbox/README_PANTHEON/Calliope.md)).
-Filler audio and all voice/latency tuning live in `metis_toolbox/calliope_config.json`.
+build (RTF 0.44 vs 1.54; int8's quantize/dequantize overhead dominates).
+Filler audio and all voice/latency tuning live in `metis_toolbox/config/calliope_config.json`.
 If the models are absent, Calliope logs it once and stays silent — nothing else
 is affected.
 

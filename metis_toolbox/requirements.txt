@@ -18,4 +18,4 @@ kokoro-onnx         # text -> speech via ONNX (no torch/transformers)
 sounddevice         # speaker playback of Calliope's PCM (bundles PortAudio)
 numpy               # PCM buffers from kokoro-onnx
 # Model files (voices-v1.0.bin + a kokoro-v1.0*.onnx) are downloaded separately
-# and gitignored — see README_PANTHEON/Calliope.md for the one-time step.
+# and gitignored — see SETUP.md section 4 for the one-time step.

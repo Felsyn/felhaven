@@ -60,7 +60,7 @@ Config:      calliope_config.json beside this file — voice, speed, lang, model
 Model files: kokoro-onnx needs two binaries (a *.onnx voice model and
              voices-v1.0.bin), downloaded separately and gitignored. Paths are
              read from the config and resolved relative to this file. See
-             README_PANTHEON/Vox/Calliope.md for the one-time download step.
+             SETUP.md section 4 for the one-time download step.
 
 Upstream:    panels/home_panel.py (per-response speak button + auto-speak),
              panels/narrator_panel.py (the header toggle)
@@ -94,8 +94,8 @@ _FILLER_DIR = _APP_DIR / "calliope_fillers"
 
 # ── Config (loaded once at import; fail soft to sane defaults) ─────────────────
 
-# These mirror the shipped calliope_config.json (and the table in specs/calliope.md
-# §3): the fallback is only "a working narrator" if it names the model that is
+# These mirror the shipped config/calliope_config.json, pinned in lockstep by
+# TestConfigDefaults: the fallback is only "a working narrator" if it names the model that is
 # actually on disk — fp32, not int8 — and keeps the fp32-era latency tuning.
 _DEFAULTS: dict[str, Any] = {
     "voice": "af_nicole",

@@ -16,6 +16,8 @@ __pycache__/
 
 # Runtime state & data (machine-local, not source)
 *.log
+# RotatingFileHandler backups: felhaven.log.1, .log.2, ... (*.log misses these)
+*.log.[0-9]*
 *.tmp
 scribe_data.json
 timer_state.json
@@ -41,7 +43,7 @@ cerberus_ledger.json
 herodotus_archive/
 
 # Calliope — kokoro-onnx model binaries (voices-v1.0.bin + kokoro-v1.0*.onnx),
-# ~90 MB+. Downloaded separately; see README_PANTHEON/Calliope.md.
+# ~350 MB. Downloaded separately; see SETUP.md section 4.
 kokoro_models/
 
 # Calliope — pre-rendered filler audio (WAVs), regenerated from the config

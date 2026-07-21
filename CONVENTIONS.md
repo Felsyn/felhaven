@@ -2,14 +2,14 @@
 
 > *Ex tenebris surgit lumen posteris*
 
-The patterns every module in this stack is expected to follow, and the
-deliberate exceptions. If you're about to add a tool, a panel, or a config file,
-read the relevant section first — the goal is that a new module looks like it was
-always here.
+The patterns every module follows, and the deliberate exceptions. If you're about
+to add a tool, a panel, or a config file, read the relevant section first — the
+goal is that a new module looks like it was always here.
 
-This is a companion to [`README.md`](README.md) (the user-facing project doc).
-Both live at the **outer root** (the clone's top folder, e.g. `metis/`) alongside
-`.gitignore`; all the *code* lives one level down in `metis_toolbox/`.
+Companion to [`README.md`](README.md) (what the project is) and
+[`CHANGELOG.md`](CHANGELOG.md) (dated history). Per-module detail lives in each
+module's own docstring, indexed at
+[`README_PANTHEON/`](metis_toolbox/README_PANTHEON/README.md).
 
 ---
 
@@ -17,124 +17,95 @@ Both live at the **outer root** (the clone's top folder, e.g. `metis/`) alongsid
 
 **One module, one job.** Every file's header docstring opens with
 `Anti-Legion: ONE JOB` and a one-line `Job:` statement. If you can't write that
-one line without "and", the module is doing too much — split it.
+line without "and", the module is doing too much — split it.
 
-**The `Job:` first sentence is the gloss.** Virgil (and any future hover/tooltip
-surface) reads it verbatim, so it must stand on its own: a neutral, functional
-statement of what the module *does* — written for a human reading the UI, not
-addressed to Metis (`Report CPU, RAM, and disk health.`, not `Tell Metis how the
-machine feels.`). One sentence, ≤ ~90 characters, ending in a period. Personality
-belongs to the deity name and the README, never the gloss. Any sentences after
-the first elaborate and are not shown as the gloss.
+**The `Job:` first sentence is the gloss.** Any hover/tooltip surface reads it
+verbatim, so it must stand alone: a neutral, functional statement of what the
+module *does*, written for a human reading the UI. One sentence, ≤ ~90
+characters, ending in a period. Personality belongs to the deity name, never the
+gloss. Sentences after the first elaborate and are not shown.
 
 A module never reaches across this boundary: tools don't draw, panels don't
-fetch, the scheduler doesn't parse data, the log watcher (Emanon) reads logs but
-never acts on them. When two responsibilities tempt you into one file, that's a
-second module.
+fetch, the scheduler doesn't parse data, the log watcher reads logs but never
+acts on them. When two responsibilities tempt you into one file, that's a second
+module.
 
 ---
 
 ## 1. Project layout
 
-```
-metis\                  ← the clone's outer root (repo name)
-    README.md           ← user-facing project doc (also the public snapshot's README)
-    CONVENTIONS.md       ← this file
-    .gitignore
-    metis_toolbox/      ← THE APP ROOT. Everything below is "the repo" in handoffs.
-        felhaven.py     ← dashboard entry point
-        kairos.py       ← scheduler
-        metis_logging.py
-        theme.py        ← colors, fonts, Card + PhosphorScroll shared widgets
-        __init__.py     ← brain tool registry + dispatcher
-        scribe.py       ← (root-level tool, historical)
-        *.json          ← config + persisted state (see §5, §10)
-        tools/          ← headless logic modules
-        panels/         ← Tk display surfaces
-        tests/          ← stdlib unittest (see §11)
-        bin/            ← external binaries (mpv.exe, yt-dlp.exe); gitignored
-```
+The clone's outer root holds the docs and `.gitignore`. **The "app root" is
+`metis_toolbox/`, not the outer folder** — config JSONs and `bin/` live beside
+`felhaven.py`. Below it: `tools/` (headless logic), `panels/` (Tk display
+surfaces), `config/` (shipped templates, §4), `tests/` (§10).
 
-**The "app root" is `metis_toolbox/`, not the outer folder.** Config JSONs and
-`bin/` live beside `felhaven.py`. A tool in `tools/` finds the app root with
-`os.path.dirname(os.path.dirname(os.path.abspath(__file__)))` (see
-`tools/midas.py`, `tools/morpheus.py`). A module *at* the app root uses
-`Path(__file__).resolve().parent` (see `scribe.py`, `metis_logging.py`).
+A tool in `tools/` finds the app root with
+`os.path.dirname(os.path.dirname(os.path.abspath(__file__)))`. A module *at* the
+app root uses `Path(__file__).resolve().parent`.
 
 **Anchor to `__file__`, never to `cwd` or `sys.argv[0]`.** This is a scar, not a
 preference: an early path bug anchored to `sys.argv[0]` and broke under relative
 invocation (`metis_logging.py:36` documents it). Anchoring to the file means the
-stack runs identically whether launched from Felhaven or
-`python tools/foo.py` from any directory — which is what makes it
-flash-drive-portable.
+stack runs identically whether launched from Felhaven or `python tools/foo.py`
+from any directory — which is what makes it flash-drive-portable.
 
 ---
 
-## 2. Module contracts — the six flavors
+## 2. Module contracts — the flavors
 
 Not every module exposes the same surface. Pick the flavor that fits and follow
-it exactly; the surface is the contract Kairos and the brain rely on.
+it exactly; the surface is the contract Kairos and Pythia rely on.
 
-| Flavor | `fetch()` | `handle()` + `TOOL_DEFINITION` | Examples |
-|---|---|---|---|
-| **Polled + brain tool** | yes (raises on failure) | yes | `horai`, `hephaestus`, `aura`, `midas`, `aether`, `pheme` |
-| **Request-driven brain tool** | no | yes | `zeno`, `eudoxus` |
-| **Dashboard-only watcher** | yes | no | `emanon`, `argus` |
-| **Polled status + UI-driven mutations** *(hybrid)* | yes (never raises) | some do — `morpheus` (`play_music`/`resume_music`), `orpheus` (none) | `morpheus`, `orpheus` |
-| **Local-only ledger / persistence** | no | no (plain functions) | `plutus`, `scribe` |
-| **Pure display-logic helper** | no | no (pure functions) | `helios`, `selene` |
-| **Device / infrastructure authority** | no | no | `kairos.py` (the clock), `harmonia.py` (the audio device) |
+| Flavor | `fetch()` | `handle()` + `TOOL_DEFINITION` |
+|---|---|---|
+| **Polled + brain tool** | yes (raises on failure) | yes |
+| **Request-driven brain tool** | no | yes (singular, or plural `TOOL_DEFINITIONS`) |
+| **Dashboard-only watcher** | yes | no |
+| **Polled status + UI-driven mutations** *(hybrid)* | yes (never raises) | optional |
+| **Local-only ledger / persistence** | no | no (plain functions) |
+| **Device / infrastructure authority** | no | no |
+
+Membership is not listed here on purpose — it drifts, and it already has. The
+ground truth is `pythia._TOOL_MODULES` plus `grep TOOL_DEFINITION tools/`, and
+`tests/test_pantheon_docs.py` holds the docs to it.
 
 Rules that fall out of the table:
 
 - **`handle()` never raises.** A brain tool that throws crashes the dispatcher.
-  On any error, return `{"error": "..."}` (see `zeno.handle`, `midas` error
-  codes). `handle()` is also the read path for the brain — read-only where the
-  module has a separate mutate path (`scribe.handle`).
-- **`fetch()` *does* raise on total failure** — that's how Kairos delivers
-  `None` so the panel can show a stale/error state without crashing
-  (`aura.fetch`, `midas.fetch`). **Two deliberate never-raise exceptions, each
-  documented in its own docstring:** `emanon.fetch` (a watcher that crashes is
-  worse than useless) and `morpheus.fetch` (an idle audio engine is a normal
-  state, not a fault). `argus` is the
-  in-between case: it degrades *per-field* (an unresolved connection, an empty
-  DNS cache, a failed firewall query each fall back inside the returned dict) but
-  still raises on a wholesale `psutil.net_connections()` failure — see
-  `specs/argus.md`. If your `fetch()` doesn't raise, say *why* in the docstring.
-- **Out-of-LLM-scope is a real, intentional category.** `plutus` (mutates a
-  real-money ledger), `orpheus` (a panel action, not yet worth asking for — the
-  Echo precedent), `emanon`/`argus` (read-only watchers),
-  `helios`/`selene` (pure formatters) all deliberately omit `TOOL_DEFINITION` so a
-  tool call can never reach them. Document the *why* — "out of LLM scope because
-  …" — so nobody later "fixes" it by adding a brain tool. (`morpheus` used to be
-  the example here for "controls an audio engine, but a safe one" — it moved into
-  the brain-tool column once `play_music` landed, and now `resume_music` alongside
-  it; see the decisions log.)
+  On any error return `{"error": "..."}`. It is also the read path where a module
+  has a separate mutate path.
+- **`fetch()` *does* raise on total failure** — that's how Kairos delivers `None`
+  so the panel shows a stale state without crashing. Deliberate never-raise
+  exceptions exist (a watcher that crashes is worse than useless; an idle audio
+  engine is a normal state, not a fault) — **if your `fetch()` doesn't raise, say
+  why in the docstring.** Per-field degradation is a third option: fall back
+  inside the returned dict, and raise only on wholesale failure.
+- **Out-of-LLM-scope is a real, intentional category.** A module that mutates a
+  real-money ledger, or whose job is a panel verdict rather than an answer,
+  deliberately omits `TOOL_DEFINITION` so a tool call can never reach it.
+  Document the *why* — "out of LLM scope because …" — so nobody later "fixes" it.
+  **The reverse happens too and is not a violation:** modules get promoted into
+  the brain when a real use appears. Both directions belong in the decisions log.
+  The *category* is deliberate; membership is not frozen.
 
 ---
 
 ## 3. The standard tool-module shape
 
-Copy `tools/midas.py` or `tools/morpheus.py` as the template. A tool module has,
-in order:
+Copy `tools/midas.py` or `tools/morpheus.py` as the template. In order:
 
-1. **House-style header docstring** with these sections:
-   `Job:` · `Contract:` · `Source:` · `Upstream:` · `Downstream:` · `Requires:`.
-   (Plus any module-specific section — e.g. `Key:`, `Playlists:`.) This carries
-   the weight when the name doesn't (see `emanon.py`, whose name says nothing).
+1. **House-style header docstring**: `Job:` · `Contract:` · `Source:` ·
+   `Upstream:` · `Downstream:` · `Requires:`, plus any module-specific section.
+   This carries the weight when the name doesn't.
 2. **`log = logging.getLogger("METIS.<name>")`** at module top. Nothing else
-   touches logging config — see §6.
+   touches logging config — see §5.
 3. **Path constants** anchored to `__file__` (§1).
-4. **`_load_<thing>()` config loaders** that return a safe empty default (`[]`)
-   on *any* failure and log it — never raise, never crash the panel (see
-   `midas._load_watchlist`, `morpheus._load_playlists`, `pheme._load_feeds`).
+4. **`_load_<thing>()` config loaders** that return a safe empty default on *any*
+   failure and log it — never raise, never crash the panel.
 5. **Internals** prefixed `_`.
 6. **Public API** — `fetch()` / `handle()` / `TOOL_DEFINITION` per the flavor.
-7. **`if __name__ == "__main__":`** standalone test block that prints something
-   useful (run the real thing, print the result). Every tool has one.
-
-`TOOL_DEFINITION` shape (when the tool is a brain tool) — see `zeno.py`,
-`midas.py`:
+7. **`if __name__ == "__main__":`** standalone block that runs the real thing and
+   prints the result. Every tool has one.
 
 ```python
 TOOL_DEFINITION = {
@@ -147,57 +118,52 @@ TOOL_DEFINITION = {
 }
 ```
 
-**Multi-tool modules** — a module usually owns exactly one tool (one
-`TOOL_DEFINITION` + one `handle()`). A module whose single job is naturally two
-tightly-coupled calls may instead export the plural **`TOOL_DEFINITIONS`** (a
-list of schemas) and one public function **named exactly for each tool**, in
-place of `handle()`. The first is `tools/callimachus.py` (`search_web` +
-`fetch_page`: search, then read one chosen result — an agentic pair, not two
-jobs). The registry reads each name straight from its schema and binds it to the
-like-named function, so definitions and handlers still can't drift. This is a
-narrow allowance, not a loophole for §0 — if the two tools aren't one job seen
-from two angles, they're two modules. Only the registry that consumes the module
-needs to understand the plural export (`pythia.py` does; see §8).
+**Multi-tool modules** — a module usually owns exactly one tool. A module whose
+single job is naturally two tightly-coupled calls may instead export the plural
+**`TOOL_DEFINITIONS`** (a list of schemas) and one public function **named exactly
+for each tool**, in place of `handle()`. The registry reads each name straight
+from its schema and binds it to the like-named function, so definitions and
+handlers can't drift. This is a narrow allowance, not a loophole for §0 — if the
+two tools aren't one job seen from two angles, they're two modules.
 
 ---
 
 ## 4. Config over code
 
 Anything a user might reasonably want to change without editing Python lives in a
-JSON file at the app root, **ordered**, with **UI order following file order**:
+JSON file under **`metis_toolbox/config/`** (not the app root), **ordered**, with
+**UI order following file order**. Adding a feed / ticker / playlist is a JSON
+edit, **never** a code change. The loader tolerates a missing or malformed file by
+returning `[]` and logging — a bad config degrades one panel, never the app.
 
-- `pheme_rumormill.json` — feed rows (`id`/`label`/`url`/`format`)
-- `midas_watchlist.json` — tickers (also the source for Plutus's dropdown — one
-  source of truth, no code coupling)
-- `morpheus_playlists.json` — playlist rows (`label`/`url`)
-
-Adding a feed / ticker / playlist is a JSON edit, **never** a code change. The
-loader tolerates a missing or malformed file by returning `[]` and logging — a
-bad config degrades one panel, it never crashes the app.
+**"Config" and "committed" are not synonyms.** Most of `config/` ships, but some
+files there are gitignored: they have a config *shape* (ordered rows a user edits
+by hand) and personal *content*. Ask "would I want a stranger cloning this to
+inherit my copy?" — if no, it's state, wherever it sits (§9). A fresh clone
+starting with no playlists is the design, not a missing file; don't "fix" it by
+committing one.
 
 ---
 
 ## 5. Logging
 
 - **Entry points call `setup_logging("<program>")` once**, before anything can
-  emit (`felhaven.py` does it first thing in `__init__`). Tool modules **never**
-  configure logging — they just `logging.getLogger("METIS.<name>")` and inherit.
+  emit. Tool modules **never** configure logging — they just
+  `logging.getLogger("METIS.<name>")` and inherit.
 - **The format is load-bearing.** Lines are `" | "`-delimited
   (`ts | LEVEL | logger | message`) because **Emanon parses them with a plain
   `str.split(" | ")` — no regex.** Don't change the delimiter or column order
   without updating `emanon._parse_line` in lockstep (`metis_logging._DELIM` and
   `emanon._DELIM` must match exactly).
 - **Levels carry meaning Emanon collapses into a health verdict:**
-  `ERROR`/`CRITICAL` → *failed*, `WARNING` → *degraded*, `INFO` → *nominal*.
-  So: routine heartbeat (worker fired/ok) is **DEBUG** — it would be noise at
-  INFO and would drown Emanon. **WARNING** is "expected, recoverable" (a dead
-  pipe, one feed down, a stale cache). **ERROR** is "something a human should
-  look at." Kairos already logs every worker fire at DEBUG and every failure at
-  ERROR, so your `fetch()` rarely needs to log the happy path itself.
+  `ERROR`/`CRITICAL` → *failed*, `WARNING` → *degraded*, `INFO` → *nominal*. So
+  routine heartbeat is **DEBUG** — it would drown Emanon at INFO. **WARNING** is
+  "expected, recoverable." **ERROR** is "a human should look at this." Kairos
+  already logs every worker fire at DEBUG and every failure at ERROR, so your
+  `fetch()` rarely needs to log the happy path.
 - *Known drift:* `scribe.py` reports save errors with `print()` instead of its
-  logger, so those failures never reach Emanon. Pre-existing; fix it the way the
-  rest of the stack does (`log = logging.getLogger("METIS.scribe")`) if you touch
-  that file.
+  logger, so those failures never reach Emanon. Fix it the way the rest of the
+  stack does if you touch that file.
 
 ---
 
@@ -208,107 +174,90 @@ bad config degrades one panel, it never crashes the app.
 > **The result queue is the only object shared between worker threads and the
 > main thread.**
 
-Concretely:
-
 - **Panels are dumb display surfaces.** A panel never calls `root.after()` and
   never spawns a thread. It exposes `update(data)` and waits to be called.
-- Kairos runs a single 500 ms tick loop on the main thread. Each tick it checks
-  which workers are due, fires the due ones as **daemon** threads, drains the
-  result queue, and calls `panel.update(data)` **on the main thread**.
-- A **pile-up guard** (`_running_threads`) means a slow worker never stacks: if
-  last tick's fetch is still alive, this tick skips it.
+- Kairos runs a single 500 ms tick loop on the main thread. Each tick it fires
+  due workers as **daemon** threads, drains the result queue, and calls
+  `panel.update(data)` **on the main thread**.
+- A **pile-up guard** means a slow worker never stacks: if last tick's fetch is
+  still alive, this tick skips it.
 - Workers write **only** to the queue. They never touch a Tk object. Ever.
 - On `fetch()` failure Kairos delivers `data=None`; **every `update(data)` must
   handle `None`** (show stale/idle, don't blank-and-crash).
 - Register a worker by adding `(name, interval_seconds, "tools.x.fetch")` to
-  `Kairos.WORKERS` (rough descending-interval order) and wiring the panel in
-  `felhaven.py` with `kairos.register_panel(name, panel)`.
+  `Kairos.WORKERS` and wiring the panel in `felhaven.py` with
+  `kairos.register_panel(name, panel)`.
 
-**Documented exceptions to "no `after()`, no threads"** — there are exactly
-three, each justified in code:
+**Documented exceptions to "no `after()`, no threads"** — exactly three, each
+justified in code: `AmmitWidget`'s countdown, Emanon's one-shot status blink, and
+`MorpheusPanel`'s one daemon thread for the blocking `yt-dlp` search (see §12).
+That last one preserves the contract: its only shared touch is a queue `put`,
+`update()` drains on the main thread, and a single-flight guard ignores a new
+search while one is in flight.
 
-1. `AmmitWidget` (in `horai_panel.py`) drives its countdown with `after()`.
-2. Emanon's one-shot "failed" status blink uses `after()`.
-3. **`MorpheusPanel` spawns one daemon thread** for the blocking `yt-dlp`
-   search, because the search takes seconds and Kairos has no request-driven job
-   slot. It preserves the contract: the worker thread's only shared touch is
-   `self._search_q.put(rows)` (never a Tk object), `update()` drains the queue on
-   the main thread, and a single-flight guard ignores a new search while one is
-   in flight. See §13 and the header of `panels/morpheus_panel.py`.
-
-If you find yourself reaching for a fourth, stop and reconsider — the answer is
-almost always "give Kairos a worker."
+If you find yourself reaching for a fourth, stop — the answer is almost always
+"give Kairos a worker."
 
 ---
 
 ## 7. Panels
 
-- **Subclass `Card`** (`theme.py`): `super().__init__(parent, "Name — subtitle",
-  C["color"])`. Pack content into `self.body`, never into `self` directly.
+- **Subclass `Card`** (`theme.py`). Pack content into `self.body`, never into
+  `self` directly.
 - **Colors and fonts come from `theme.C` and `theme.FONTS` only.** Never hardcode
-  a hex value or a font tuple in a panel — if you need a new color, add it to the
-  palette. This is what keeps the whole dashboard visually coherent and lets
-  `rescale_fonts` work.
-- **Tab bar pattern** (when a panel has tabs): `tk.Label` tabs with a 1 px
-  underline `tk.Frame`; active tab = `C["text1"]` text + the panel's accent color
-  on the underline, inactive = `C["text3"]` + `C["border"]`. Copy it verbatim
-  from `midas_panel.py` / `pheme_panel.py` / `morpheus_panel.py`.
-- **Scrolling lists**: reuse the `_ScrollFrame` (Canvas + scrollbar) pattern from
-  `pheme_panel.py` / `midas_panel.py` — the frame is still copied per panel, but
-  the scrollbar inside it is always `theme.PhosphorScroll`, never `tk.Scrollbar`
-  (see §12 — the stock widget can't be themed on Windows). Bind the mouse wheel
-  **only while hovering** (`<Enter>`/`<Leave>`) so stacked scroll frames don't
-  fight over wheel events.
-- **Clickable rows**: `cursor="hand2"`, `<Button-1>` for the action, and a
-  hover highlight that flips `fg` to `C["amber"]` on `<Enter>` and back on
-  `<Leave>` (Pheme story rows, Morpheus playlist/result rows).
-- **Collapsible sub-widgets** (embedded tools like Ammit / Helios / Selene):
-  collapsed by default, toggled with a `▶`/`▼` label — copy the `AmmitWidget`
-  section-toggle.
+  a hex value or a font tuple — if you need a new color, add it to the palette.
+  This is what keeps the dashboard coherent and lets `rescale_fonts` work.
+- **Tab bar pattern**: `tk.Label` tabs with a 1 px underline `tk.Frame`; active =
+  `C["text1"]` text + the panel's accent on the underline, inactive =
+  `C["text3"]` + `C["border"]`. Copy it verbatim from an existing tabbed panel.
+- **Scrolling lists**: reuse the `_ScrollFrame` (Canvas + scrollbar) pattern — the
+  frame is copied per panel, but the scrollbar inside it is always
+  `theme.PhosphorScroll`, never `tk.Scrollbar` (§12 — the stock widget can't be
+  themed on Windows). Bind the mouse wheel **only while hovering**
+  (`<Enter>`/`<Leave>`) so stacked scroll frames don't fight over wheel events.
+- **Clickable rows**: `cursor="hand2"`, `<Button-1>` for the action, and a hover
+  highlight flipping `fg` to `C["amber"]` on `<Enter>` and back on `<Leave>`.
+- **Collapsible sub-widgets**: collapsed by default, toggled with a `▶`/`▼`
+  label — copy the `AmmitWidget` section-toggle.
 - **Placeholders, not crashes**: if a tool can't run (no API key, missing
   binary), render a calm placeholder and disable controls — never raise from a
-  panel constructor. See Midas `no_key` and Morpheus's missing-binary path.
+  panel constructor.
 - **`update(data)` is the single entry point Kairos calls.** Keep it cheap and
-  idempotent; rebuild rows from scratch if that's simplest (Pheme, Plutus ledger
-  do this).
+  idempotent; rebuild rows from scratch if that's simplest.
 
 ---
 
 ## 8. Brain registration (only for brain tools)
 
-To make a tool callable by Pythia (the home-chat LLM oracle), add its module to
-`pythia._TOOL_MODULES`. Pythia *derives* `TOOLS` + `_DISPATCH` by reflection
-(reading each module's `TOOL_DEFINITION` + `handle()`, or plural
-`TOOL_DEFINITIONS` for a multi-tool module via `_module_tools()`), so the
-registry can never drift from the handlers — there is no separate list to keep in
-sync.
+To make a tool callable by Pythia, add its module to `pythia._TOOL_MODULES`.
+Pythia *derives* `TOOLS` + `_DISPATCH` by reflection (reading each module's
+`TOOL_DEFINITION` + `handle()`, or plural `TOOL_DEFINITIONS` via
+`_module_tools()`), so the registry can never drift from the handlers — there is
+no separate list to keep in sync.
 
 If the module is deliberately **not** a brain tool (§2), it is simply left out of
-`_TOOL_MODULES` — and that omission is the feature, not an oversight. A
-dashboard-only module (`emanon`, `plutus`, `helios`, `selene`) never appears
-there.
+`_TOOL_MODULES`, and that omission is the feature. **`_TOOL_MODULES` is the ground
+truth**; anything restating it is a copy that will drift, so don't add one.
+`tests/test_pantheon_docs.py` enforces that the module docs stay in step.
 
-**One registry now.** There used to be **two**: a **voice** registry in
-`metis_toolbox/__init__.py` (`TOOLS` + `dispatch()`, which the keyword router
-Apollo and `Metis.py` consumed) sat alongside Pythia's. That voice layer was
-**retired with voice input** — `metis_toolbox/__init__.py` is now an empty
-package marker, and `pythia.py` is the sole tool registry. The old rule "add a
-web-search tool to `pythia` but *not* `__init__.py` so voice can't reach it"
-no longer has anything to enforce; keeping a tool off the LLM surface now just
-means keeping it out of `_TOOL_MODULES`.
+Pythia is the **only** registry. A second, voice-side registry existed until
+voice input was retired (§12); `metis_toolbox/__init__.py` is now an empty package
+marker. Keeping a tool off the LLM surface means keeping it out of
+`_TOOL_MODULES`, nothing more.
 
 ---
 
 ## 9. Persistence
 
-- Pattern: **load → mutate → save → return a snapshot dict** (see `scribe.py`,
-  `tools/plutus.py`). The snapshot is JSON-serialisable and human-readable.
+- Pattern: **load → mutate → save → return a snapshot dict**. The snapshot is
+  JSON-serialisable and human-readable.
 - **Derive, don't store, what you can recompute.** Plutus folds an append-only
   event log into positions/totals rather than storing balances — the log is the
   source of truth.
-- **Personal data is gitignored**: `plutus_ledger.json`, `scribe_data.json`,
-  `timer_state.json`, `felhaven_data.json`, `*.log` (see `.gitignore`). Committed
-  JSON is *config* (§4); generated/personal JSON is *state* and stays local.
+- **Atomic writes**: tempfile in the same directory + `os.replace`, so a crash
+  mid-write can never truncate the original.
+- **Personal data is gitignored.** `.gitignore` is the list; committed JSON is
+  *config* (§4), generated or personal JSON is *state* and stays local.
 
 ---
 
@@ -325,299 +274,160 @@ means keeping it out of `_TOOL_MODULES`.
 - **Headless Tk smoke tests**: this project runs on Windows (no Xvfb). Use a real
   `tk.Tk()` root, `root.withdraw()` so no window flashes, and drive it with
   `root.update_idletasks()` instead of `mainloop()`. *No exception raised == pass.*
-  Template: `tests/test_aura_panel_smoke.py`, `tests/test_morpheus_panel_smoke.py`.
-- **Kairos internals (`_tick`, `_schedule_workers`) treat unknown workers as
-  infinitely overdue** (`_last_run.get(name, 0)` vs. monotonic time). Any test
-  calling them directly must patch both `kairos.time` and `threading.Thread`
-  first, or it will spawn real threads. See `tests/test_kairos.py`.
-- **Prefer captured-real fixtures over hand-built JSON.** A hand-built fixture with
-  the "right" types can hide a real-world type bug (the `wttr.in` string-typed
-  percentages lesson — `tests/fixtures/wttr_j1.json`). Assert against recomputed
-  values so the test can't silently drift from the fixture.
+- **Kairos internals treat unknown workers as infinitely overdue.** Any test
+  calling `_tick`/`_schedule_workers` directly must patch both `kairos.time` and
+  `threading.Thread` first, or it will spawn real threads.
+- **Prefer captured-real fixtures over hand-built JSON.** A hand-built fixture
+  with the "right" types can hide a real-world type bug (the `wttr.in`
+  string-typed percentages lesson). Assert against recomputed values so the test
+  can't silently drift from the fixture.
 - **Test the degraded paths**, not just the happy one: `None` from Kairos, a
   missing binary/key, an empty config, a single failed feed.
+- **Guard invariants in lockstep, never with a hardcoded count.** A count rots
+  red for the wrong reason. Assert that two live sources agree — the shipped
+  config against the code defaults, `TOOLS` against `_DISPATCH`, the docs against
+  `_TOOL_MODULES`. **And confirm the guard actually fails red before trusting
+  it**: a degradation path nothing exercises isn't a safety net, it's a comment.
+- **Assert against the repo, not the working directory.** A check that reads the
+  filesystem passes on a machine where gitignored state happens to exist and
+  fails only in CI. `test_pantheon_docs.py` shipped with exactly that bug — it
+  had been verified to fail red, but only against scenarios the author's own
+  checkout could produce. Ask what a *fresh clone* has: if the answer differs
+  from your disk, check `git ls-files`, not `os.path.exists`.
 
 ---
 
 ## 11. Windows & portability
 
-- The stack targets **Windows** and aims to be **flash-drive-portable** (drop the
-  folder on any PC with Python 3.10+ and run).
-- **No new pip dependencies casually.** `requirements.txt` is `psutil` + `requests`
-  and the bar for adding a third is high. Morpheus added *zero* (it shells out to
-  `mpv`/`yt-dlp` binaries instead of importing a library). Prefer stdlib; prefer a
-  bundled binary in `bin/` over a package when a binary will do.
+- The stack targets **Windows** and aims to be **flash-drive-portable**.
+- **No new pip dependencies casually.** The bar is high; Morpheus added *zero*
+  (it shells out to binaries instead of importing a library). Prefer stdlib;
+  prefer a bundled binary in `bin/` over a package when a binary will do.
 - **Hide console windows** when spawning external processes:
-  `creationflags=subprocess.CREATE_NO_WINDOW`. Reference it defensively
+  `creationflags=subprocess.CREATE_NO_WINDOW`, referenced defensively
   (`getattr(subprocess, "CREATE_NO_WINDOW", 0)`) if the module might be imported
-  off-Windows (e.g. in CI) — see `morpheus._NO_WINDOW`. This suppresses the
-  *console* only — it does **not** stop a GUI/video window the binary opens
-  itself (see the next bullet).
+  off-Windows. This suppresses the *console* only — not a GUI window the binary
+  opens itself.
 - **Neutralize a bundled binary's own user config** — the same instinct as
-  anchoring Python to `__file__` instead of cwd (§1), applied one level down. If
-  the external tool reads a per-user config on the host machine, disable it so
-  the stack behaves identically on Obelisk, Stormcraft, or a stranger's PC in
-  2034 — not subtly differently because someone customized that tool. mpv gets
-  `--no-config` (ignore any host `mpv.conf`/scripts) **and** `--force-window=no`
-  (never open a video output window — `--no-video` alone isn't enough when a host
-  has `force-window=yes`, or a ytdl format selection pulls a video track). See
-  `morpheus._ensure_mpv`. **Trade-off to watch for:** killing a tool's config can
-  also disable features that key off its config *directory* — `--no-config`
-  switches off mpv's default watch-later (resume) location, so Morpheus
-  re-supplies it explicitly with `--watch-later-dir=<app root>/morpheus_watch_later`
-  (and creates that dir itself). If you disable a binary's config, audit what
-  else lived there and re-provide it.
+  anchoring to `__file__` (§1), one level down. If the external tool reads a
+  per-user config on the host, disable it so the stack behaves identically
+  everywhere. **Trade-off to watch for:** killing a tool's config can disable
+  features that key off its config *directory* — `--no-config` switches off mpv's
+  default watch-later location, so Morpheus re-supplies it explicitly. If you
+  disable a binary's config, audit what else lived there and re-provide it.
 - **Binaries resolve `bin/` first, then PATH**, so a portable copy beats a stale
-  install (`morpheus._resolve`).
+  install.
 
 ---
 
 ## 12. Decisions & deviations log
 
-A running record of choices that go *against* a convention above, so future
-readers know they were intentional. Append, don't rewrite.
+Choices that go *against* a convention above, so future readers know they were
+intentional. **Decision · why · date.** Append, don't rewrite. The full narrative
+for any entry is in [`CHANGELOG.md`](CHANGELOG.md) under the same date.
 
-- **`emanon.fetch()` / `morpheus.fetch()` never raise** (vs. the raise-on-failure
-  norm in §2). A watcher that crashes is useless; "nothing playing" is not a
-  fault. Both documented in their module docstrings.
-- **`MorpheusPanel` spawns a daemon thread** (vs. "no panel spawns threads" in
-  §6). The `yt-dlp` search blocks for seconds and Kairos has no request-driven
-  slot. Mitigated by the queue-only-shared-object contract + a single-flight
-  guard; the worker never touches Tk. *(Added 2026-06-10 with Morpheus.)*
-- **Morpheus is out of LLM scope** for now (no `TOOL_DEFINITION`) even though
-  play/pause would be a safe voice tool (it mutates audio, not records). Revisit
-  if/when the Metis brain needs to speak to the audio engine; the module shape
-  already allows bolting on a `handle()`.
-- **`scribe.py` logs save errors via `print()`**, not its logger — so they don't
-  reach Emanon. Pre-existing drift, noted in §5; fix when next editing the file.
+- **`emanon.fetch()` / `morpheus.fetch()` never raise** (vs. §2's raise-on-failure
+  norm). A watcher that crashes is useless; "nothing playing" is not a fault.
+- **`MorpheusPanel` spawns a daemon thread** (vs. §6's "no panel spawns threads").
+  The `yt-dlp` search blocks for seconds and Kairos has no request-driven slot.
+  Mitigated by the queue-only contract + a single-flight guard. *(2026-06-10.)*
+- **A full exit clamps Plutus's cost to exactly 0/0**, which is correct but makes
+  a re-entry-after-*full*-exit test structurally blind to the average-cost sell
+  rule — the clamp launders away any bad cost before the re-buy. So the sell rule
+  is pinned with a **partial**-sell re-entry instead. Lesson for any future
+  basis/re-entry test: a partial sell catches bugs a full exit hides.
+  *(2026-06-10.)*
 - **The Register's feed is `format: "rss"` despite a `.atom` URL** — it actually
-  serves RSS 2.0. Don't "correct" the extension/format mismatch.
-- **A full exit clamps Plutus's cost to exactly 0/0 regardless of the sell
-  arithmetic** — the dust-clamp in `positions()` zeroes both `shares` and `cost`
-  once `|shares| < 1e-9`. This is a correct, desirable property (full exit =
-  clean slate), but it has a testing consequence: a re-entry-*after-full-exit*
-  test is structurally **blind** to the average-cost sell rule, because the clamp
-  launders away any bad cost before the re-buy lands. So `tests/test_plutus.py`
-  pins the sell rule with a *partial*-sell re-entry (a live lot survives, no
-  clamp fires) in addition to the full-exit case. Lesson for any future
-  basis/re-entry test: a **partial** sell catches sell-rule bugs that a full exit
-  hides. *(Added 2026-06-10 with the Plutus tests.)*
-- **`metis.fetch()` never raises** — the third never-raise case alongside
-  `emanon`/`morpheus` in §2. An off voice-loop is a normal state, not a fault, so
-  the header lamp simply reads grey. `tools/metis.py` mirrors Morpheus's
-  external-process shape (polled status + UI-driven start/stop, no
-  `TOOL_DEFINITION`) and is out of LLM scope on purpose — Metis must never start
-  or stop its own loop. *(Added 2026-06-21 with Metis voice-loop control.)*
-  **~~RETIRED 2026-07-10~~** — voice input was removed (see the 2026-07-10 entry
-  below); `tools/metis.py`, `Metis.py`, and the voice lamp are gone, so this
-  never-raise case no longer exists.
-- **Naming scheme is historical + mythological** (precedent: Zeno, Hypatia).
-  Historical figures of the classical world are in-bounds alongside deities —
-  the names still enforce Anti-Legion single-responsibility, and "goddess of
-  X" was never the actual rule. `tools/kepler.py` (Hypatia Phase 2) follows
-  the same expansion. *(Added 2026-07-01 with Hypatia.)*
-- **`aura._build()` grew `cloud_cover_pct`** for Hypatia's Observation
-  Conditions box — Aura stays the single sky-data fetcher; Hypatia reads,
-  never fetches weather. One additive dict key, everything else in Aura
-  unchanged. *(Added 2026-07-01 with Hypatia.)*
-- **`tools/kepler.py` is the first tool module that imports a sibling tool
-  module** (`from tools import hypatia`, to reuse `_julian_date`/`_altaz`
-  rather than duplicate them — the explicit point of those two functions
-  taking generic arguments back in Phase 1). Every prior cross-tool reuse
-  ran through a panel or `__init__.py`; this is tool-to-tool composition,
-  same relationship as Midas→Plutus but at the `tools/` layer. Safe because
-  both modules bind the *module object* (`from tools import X`, never
-  `from tools.x import specific_function`) and only touch the other's
-  attributes inside function bodies, never at their own top level — Python's
+  serves RSS 2.0. Don't "correct" the mismatch.
+- **`scribe.py` logs save errors via `print()`**, not its logger, so they don't
+  reach Emanon. Pre-existing drift, noted in §5; fix when next editing the file.
+- **Naming scheme is historical + mythological.** Historical figures of the
+  classical world are in-bounds alongside deities; the names still enforce
+  single-responsibility, and "goddess of X" was never the rule. *(2026-07-01.)*
+- **`aura._build()` grew `cloud_cover_pct`** for Hypatia's observing conditions —
+  Aura stays the single sky-data fetcher; Hypatia reads, never fetches weather.
+  *(2026-07-01.)*
+- **`tools/kepler.py` imports a sibling tool module** (`from tools import
+  hypatia`) to reuse `_julian_date`/`_altaz` rather than duplicate them. Safe
+  because both bind the *module object* and only touch the other's attributes
+  inside function bodies, never at their own top level — Python's
   partial-module-in-`sys.modules` behavior makes that import order-independent.
-  `kepler.py`'s standalone `__main__` block needed one small addition no
-  other tool has: a `sys.path` insert gated behind `if __name__ ==
-  "__main__"`, since `python tools/kepler.py` alone can't otherwise see the
-  `tools` package to satisfy that import — normal operation (Kairos, tests,
-  `hypatia.py`'s own import) is unaffected. *(Added 2026-07-01 with Hypatia
-  Phase 2.)*
-- **`theme.PhosphorScroll` replaces `tk.Scrollbar` everywhere** — not stylistic
-  preference but necessity: on Windows, `tk.Scrollbar` is rendered by the native
-  theme engine and silently ignores `bg`/`troughcolor`/`activebackground`. The
-  proof is in the repo's own history: Midas's ledger passed a complete theming
-  kwarg set and Windows discarded it. Do not "simplify" back to `tk.Scrollbar`;
-  the gray bars will return. Drop-in contract (`set(first, last)` + `command=`)
-  so `yscrollcommand` wiring is untouched — swapping is one constructor line per
-  site. The frame around it (`_ScrollFrame`) remains a §7 copied pattern:
-  pattern copies, identity shares. *(Added 2026-07-02 with the scrollbar port.)*
-- **`cerberus.py` deliberately bundles four facets in one module** (vs. §0's
-  "one file, one job"): PIN verification, at-rest encryption (Vault), an access
-  ledger, and a config manifest (Custody). They share one PIN, one KDF, and one
-  RAM-only session, and the three "heads" (Vault/Custody/Ledger) are facets of a
-  single identity — the guardian — not three jobs. The Cerberus handoff mandated
-  one independently unit-testable core (like `sphynx.py`) rather than modules
-  passing a live encryption key across import boundaries. It is the toolbox's
-  **sole** encryption implementation: future consumers (Sibyl, Midas's secure
-  notes) call into it rather than rolling their own crypto. **Crypto is stdlib
-  only** — no `cryptography` dep (§11): PBKDF2 (`hashlib`) derives the Vault key,
-  and the at-rest cipher is HMAC-SHA256 counter-mode + encrypt-then-MAC, sized to
-  the Sphynx-class threat model (kids/casual snooping, not a determined
-  attacker). The verify hash (`cerberus_data.json`) and the encryption KDF
-  (`cerberus_vault.json`) use **separate salts in separate files** on purpose.
-  *(Added 2026-07-06 with Cerberus Phase 1.)*
-- **`tools/callimachus.py` is the first multi-tool module and the first tool
-  wired into Pythia's registry only** (web search: `search_web` + `fetch_page`,
-  plural `TOOL_DEFINITIONS` — see §2/§3/§8). Two deliberate deviations from its
-  design handoff, both because the handoff's file list predated the
-  `pythia.py` / `__init__.py` registry split: (1) it registers in **`pythia.py`**
-  (the live dashboard-brain registry, extended with `_module_tools()` to accept a
-  plural export), **not** `metis_toolbox/__init__.py` — that one is the *voice*
-  registry (Apollo → `Metis.py` `dispatch`), and wiring web search there would put
-  it on the voice path, which the handoff's own L9 forbids. (2) its five tunables
-  live as module constants in `callimachus.py` (the aether/zeno convention),
-  **not** in `metis_config.py`, which is the voice router's config (Whisper / VAD /
-  Apollo) that no toolbox tool imports. The Brave API key lives in the Cerberus
-  Vault only (`vault_get('brave_api_key')`), read at call time — so web search
+  Needs a `sys.path` insert gated behind `if __name__ == "__main__"` for
+  standalone runs. *(2026-07-01.)*
+- **`theme.PhosphorScroll` replaces `tk.Scrollbar` everywhere** — necessity, not
+  taste: on Windows `tk.Scrollbar` is rendered by the native theme engine and
+  silently ignores `bg`/`troughcolor`/`activebackground`. The proof is in this
+  repo's history — Midas's ledger passed a complete theming kwarg set and Windows
+  discarded it. **Do not "simplify" back to `tk.Scrollbar`; the gray bars will
+  return.** Drop-in contract (`set(first, last)` + `command=`). *(2026-07-02.)*
+- **`cerberus.py` deliberately bundles four facets** (PIN verification, Vault
+  encryption, Ledger, Custody manifest) vs. §0. They share one PIN, one KDF, and
+  one RAM-only session — facets of a single identity, not four jobs. It is the
+  toolbox's **sole** encryption implementation; future consumers call into it
+  rather than rolling their own. **Crypto is stdlib only** (§11): PBKDF2 for the
+  key, HMAC-SHA256 counter-mode + encrypt-then-MAC at rest, sized to the threat
+  model (casual snooping, not a determined attacker). The verify hash and the
+  encryption KDF use **separate salts in separate files** on purpose.
+  *(2026-07-06.)*
+- **`tools/callimachus.py` is the first multi-tool module** (plural
+  `TOOL_DEFINITIONS`, §2/§3) and the first tool wired into Pythia's registry only.
+  Its Brave key lives in the Cerberus Vault, read at call time — so web search
   works only in a session where Cerberus was unlocked; a locked vault degrades to
-  a `search_failed` error, never a crash. Wiring a `tools/` module to `cerberus.py`
-  for the first time pulled `cerberus.py` into the `mypy --strict tools/` graph and
-  surfaced 9 latent annotation errors there (bare `dict` / `list[dict]` generics +
-  one `str | None` narrowing in `manifest_configs`) — fixed in lockstep
-  (annotations only, zero behavior change) so "mypy at zero" stays true and is now
-  actually enforced for the guardian. *(Added 2026-07-07 with Callimachus.)*
-- **Themis settings module + first-run onboarding — making Felhaven
-  personal-to-you, not personal-to-the author.** New root module `themis.py`
-  owns `felhaven_settings.json` (lat/lon, optional weather-location, temperature
-  unit, clock format). `aura`/`hypatia`/`horai` now read Themis **at fetch time**,
-  not import time, so a Settings edit takes effect on the next Kairos tick — and
-  `Kairos.refetch(*names)` lets the Settings-tab Save nudge those workers to
-  re-fire immediately instead of waiting out Aura's 1800 s interval. Three
-  deliberate calls: (1) `felhaven_settings.json` is **gitignored** even though
-  it's config (§4 config is normally committed) — it's per-user *state* (§9), the
-  whole point being not to ship the author's location; a missing file fail-softs
-  to the old hardcoded defaults (Moundsville/`HYPATIA_LAT/LON`), which now live on
-  only as those fallbacks. (2) Units are **additive**: Aura still emits canonical
-  `temp_f` (the `_temp_color` tiers are °F-defined) and now *also* `temp_c` etc.
-  from wttr's free Celsius fields; the display layer (aura_panel, sidebar, the two
-  clocks) reads `themis` and picks — Aura stays a pure fetcher, no preference
-  logic. (3) `AURA_LOCATION` is now an **env override** of the file, not the
-  source of truth (kept for headless/CI). Settings live as the fifth **Moderati**
-  tab (Themis), one body + one `(key,label)` per §7. **First-run onboarding:**
-  the Sphynx and Cerberus PIN-hash files are no longer shipped — `git rm --cached`
-  + gitignored, per-user like `cerberus_vault.json`. `sphynx.create()` is the
-  module's **first-ever writer** (reversing its old "hand-authored, not
-  runtime-generated" line) — the panel shows a setup screen on a missing file
-  (own riddle + PIN, or a remembered "skip the gate" `disabled` flag) instead of
-  failing closed; `cerberus.set_pin()` (lifted out of `_cli_setpin`, made atomic)
-  backs a first-run PIN prompt in the Cerberus tab. All new writes use the
-  tempfile + `os.replace` atomic pattern. `SETUP.md` §6/§7 rewritten; `README.md`
-  untouched. Anti-Legion holds: the Settings panel only turns fields into a JSON
-  file, Sphynx/Cerberus each gained one setup entry-path, every tool still owns
-  its own behavior and merely *reads* location. *(Added 2026-07-10.)*
-- **Voice input retired; Calliope refactored to output-only TTS.** Removed the
-  whole voice-**input** layer — `Metis.py` (the mic/VAD/Whisper loop),
-  `apollo.py` + `apollo_intents.json` (the keyword router), `metis_config.py`,
-  `tools/metis.py` (the subprocess supervisor), the `MetisLamp` header widget, and
-  the voice-side registry in `metis_toolbox/__init__.py` (now an empty package
-  marker). **Calliope** moved into the toolbox (`metis_toolbox/calliope.py`) and
-  became a single job — `speak(text)`: read Pythia's already-generated, trusted
-  answer text aloud via **kokoro-onnx** (onnxruntime, no torch/transformers), in
-  the Felhaven process, on demand. The trigger is a per-answer `▶ speak aloud`
-  button plus a header **narration lamp** (auto-speak toggle; Calliope owns the
-  flag, the GUI owns the *when*). TTS failure degrades to a logged no-op, never a
-  crash. Config in `calliope_config.json`; model binaries in `kokoro_models/`
-  (gitignored). *Why:* voice input was an untrusted command surface — the reason
-  Apollo had a frozen 9-tool allowlist and a second registry existed at all.
-  Remove it and there's nothing to route or guard, so the three-registry design
-  collapsed to Pythia's one. Also dropped torch/faster-whisper from the stack.
-  *(Added 2026-07-10.)*
-- **Harmonia — one owner for the audio output device — and Orpheus, a third Vox
-  job.** After Echo, three things wanted to make sound (Calliope, Echo's future
-  sibling Orpheus, and Morpheus), and nothing owned the device — Calliope's
-  module-local `_play_lock` protected only Calliope, and a lock across all three
-  **cannot work**: a Python mutex serializes *commands*, not *audio*, and mpv
-  holds its own device handle in a separate process regardless. New app-root
-  module **`harmonia.py`** (beside `kairos.py` — no `fetch()`/`handle()`, the new
-  **"Device / infrastructure authority"** flavor in §2's table) is now the *sole*
-  caller of `sounddevice`: `play(pcm, sample_rate, tag="")` (calls
-  `morpheus.stop()` first, then enqueues — one direction only, Morpheus never
-  learns Harmonia exists), `stop()` (global, no channels — `sd.stop()` + drain +
-  epoch bump), `is_playing()`, `shutdown()`. **Calliope was refactored onto it**:
-  `_play`/`_play_lock`/the play-worker-that-called-`sd.play` are gone from
-  `calliope.py`; its synth pipeline now hands each chunk to `harmonia.play()`
-  instead, with the prebuffer gate kept **Calliope-side** (deciding *when* to call
-  `harmonia.play()`, not *how* to drain a device queue — Harmonia must never learn
-  what a filler is). **Deliberate behavior change:** Calliope's `stop()` used to
-  only bump an epoch (barge-in latency was one ~70-char chunk, unnoticeable);
-  `harmonia.stop()` calls `sd.stop()`, which actually interrupts an in-flight
-  `sd.wait()`, so barge-in is now instant — and, because Harmonia has no channels,
-  a new Pythia question now also silences an in-progress Orpheus briefing (the
-  intended cost of one stream, one truth). **`tools/orpheus.py`** (+
-  `panels/orpheus_panel.py`, the **ORPHEUS** tab in `VoxArrayPanel`) is the third
-  Vox job: play back one `.opus` file from `local_audio/` (Echo's output folder)
-  — play/stop only, no pause/seek/playlists. Whole-file ffmpeg decode into RAM
-  (`-f f32le -ar 48000 -ac 2`, ~70 MB for a 3-minute briefing — a stated limit,
-  not a bug) handed to `harmonia.play()` at the **explicit** 48 kHz rate Harmonia
-  requires (kokoro is 24 kHz; get this wrong and a briefing plays at half speed —
-  the actual reason `harmonia.play()`'s signature takes a rate at all). IS a
-  Kairos worker (`orpheus`, 2 s) unlike Echo — `fetch()` doubles as the
-  file-list refresh *and* the playback-finished signal (`harmonia.is_playing()`),
-  since `sd.wait()` blocks inside Harmonia's own thread and nothing else can see
-  completion directly; out of LLM scope for v1 (no `handle()` — the Echo
-  precedent). **`tools/morpheus.py`** converted to the plural `TOOL_DEFINITIONS`
-  (the Callimachus precedent — its first use *inside* an already-partially-LLM
-  module, not just a new one): `handle()` → **`play_music`**, plus a new
-  **`resume_music`** (replay the last URL `play()` loaded — mpv's own
-  watch-later checkpoint, written by every existing `stop()`/`play()`, restores
-  the position, so Morpheus needed **zero** new persistence, just one remembered
-  URL). **Findings flagged, not fixed:** (1) `morpheus.stop()`/`play()` are now
-  also called from Harmonia's background play thread, not only from UI action —
-  the module docstring's "mutations fire only from deliberate UI action" line is
-  no longer literally true; left as-is pending a house-style wording call. (2)
-  Clicking ▶ on Morpheus while Orpheus has a briefing playing starts both at
-  once — Harmonia's yield only runs one direction. New hermetic
-  `tests/test_harmonia.py`, `tests/test_orpheus.py`,
-  `tests/test_orpheus_panel_smoke.py`; `tests/test_calliope.py` updated so its
-  playback-degradation coverage now lives with Harmonia instead, and its own
-  tests assert Calliope *calls* Harmonia rather than touching `sounddevice`
-  itself. Full suite green (453 tests), `mypy --strict --explicit-package-bases
-  tools/` green. *(Added 2026-07-16.)*
-- **Correction to the entry above: Orpheus's `_SAMPLE_RATE`/`_CHANNELS` were
-  wrong — 48 kHz stereo, not 24 kHz mono.** The written handoff specified
-  `-f f32le -ar 48000 -ac 2`, and the code above matched it exactly — but the
-  handoff itself was stale (an amendment to 24 kHz mono was given
-  conversationally after the fact and never reached the doc, a process gap,
-  not a judgment error). Every `.opus` in `local_audio/` is produced by Echo
-  at **24 kHz mono at origin** (kokoro synthesizes mono @ 24 kHz;
-  `calliope.save_wav()` and Echo's ffmpeg encode step never resample or
-  remix), so decoding at 48 kHz stereo doesn't recover any real information —
-  it upsamples and duplicates a channel for **exactly 4× the RAM**, confirmed
-  on a real 6m41s file: 147 MB decoded at 48 kHz stereo vs. 37 MB at its
-  native 24 kHz mono. Fixed to `_SAMPLE_RATE = 24000`, `_CHANNELS = 1`, with
-  the docstring reframed to say what it actually is: `tools/orpheus.py`
-  *assumes* Echo's own output format — a second, explicit limit alongside the
-  RAM bound, alongside a note that a non-Echo file landing in `local_audio/`
-  (real music, a different source rate) would sound wrong under this
-  assumption. That's a limit to revisit **then**, not a guard to add now.
-  `harmonia.py`'s docstring (which repeated the same wrong number, so it
-  couldn't have caught the bug) corrected in lockstep. Caught in code review
-  before shipping to any real deployment. *(Added 2026-07-17.)*
-- **Finnhub joins the Cerberus-Vault-only pattern; Cerberus's session becomes
-  shared across tabs.** `tools/midas.py`'s Finnhub key moves off `.env`/env
-  entirely onto `cerberus.vault_get('finnhub_api_key')` at call time — the
-  same `_brave_key()` shape Callimachus already established, no fallback kept
-  deliberately. That forced Midas's PIN gate off `cerberus.verify()` (a bare
-  hash check) onto `cerberus.unlock()` (opens a real session, required for
-  `vault_get()` to work at all) — and because `_SESSION_KEY` is module-level,
-  **this makes the Cerberus session shared across every consumer**, not just
-  the RAM attempt counter Midas and Cerberus previously shared. Unlocking
-  either the Midas gate or the Cerberus tab now opens both; locking either
-  clears both. Judged "one guardian, one session" is more consistent with
-  Cerberus's stated role as *sole* secrets authority than the split it
-  replaces, but it is a real behavior change for future consumers to design
-  around: any future Vault-reading module's PIN gate must call `unlock()`,
-  not `verify()`, and must add a liveness check (`cerberus.is_unlocked()`) on
-  its own poll/tick to re-seal if the session dies elsewhere — `MidasPanel`'s
-  new `_reseal()` is the reference implementation. The Vault also gained its
-  first write UI: `panels/cerberus_panel.py`'s generic add/update form
-  (name + masked value + SAVE, silent overwrite, no per-row inline editing)
-  is the pattern any future Vault-writing UI should copy rather than
-  reinventing. `cerberus.vault_set()` now logs a Ledger write per call,
-  deliberately **never deduped** (unlike reads) — a write is a distinct event
-  every time, including a silent overwrite. *(Added 2026-07-17 with the
-  Finnhub migration.)*
+  an error, never a crash. Wiring a `tools/` module to `cerberus.py` pulled the
+  guardian into the `mypy --strict tools/` graph and surfaced 9 latent annotation
+  errors, fixed in lockstep. *(2026-07-07.)*
+- **Themis owns settings; the PIN files became per-user.** `aura`/`hypatia`/`horai`
+  read Themis **at fetch time**, not import time, so a Settings edit applies on the
+  next tick, and `Kairos.refetch(*names)` lets Save nudge them immediately.
+  `felhaven_settings.json` is gitignored **even though it's config** — the whole
+  point is not to ship the author's location (§9). Units are additive: Aura still
+  emits canonical `temp_f` and now also `temp_c`; the display layer picks, so Aura
+  stays a pure fetcher. `AURA_LOCATION` became an env *override*, not the source of
+  truth. The Sphynx/Cerberus PIN files are no longer shipped — first run walks you
+  through setting your own. *(2026-07-10.)*
+- **Voice input retired; Calliope refactored to output-only TTS.** *Why:* voice
+  input was the only untrusted command surface — the sole reason a keyword router
+  had a frozen 9-tool allowlist and a second registry existed. Remove it and there
+  is nothing to route or guard, so three registries collapsed to Pythia's one.
+  Also dropped torch/faster-whisper for kokoro-onnx. *(2026-07-10.)*
+- **`harmonia.py` owns the audio device** — a new "Device / infrastructure
+  authority" flavor (§2). Three things wanted to make sound and nothing owned the
+  device; **a lock across them cannot work**, because a Python mutex serializes
+  *commands*, not *audio*, and mpv holds its own device handle in a separate
+  process regardless. `play()` calls `morpheus.stop()` first, one direction only.
+  **Deliberate behavior change:** `harmonia.stop()` calls `sd.stop()`, so barge-in
+  is instant — and because Harmonia has no channels, a new question also silences
+  an in-progress Orpheus briefing. That is the intended cost of one stream, one
+  truth. *(2026-07-16.)*
+- **Correction: Orpheus shipped decoding at 48 kHz stereo instead of 24 kHz
+  mono** — 4× the RAM for zero new information (measured: 147 MB vs 37 MB on a
+  real 6m41s file). The code matched its written handoff exactly; the handoff was
+  stale, because an amendment was given conversationally and never reached the
+  doc. **A process gap, not a judgment error** — and `harmonia.py`'s docstring
+  repeated the same wrong number, so it couldn't have caught it. The constants are
+  now framed as what they are: Orpheus's explicit *assumption* that `local_audio/`
+  holds only Echo's output. *(2026-07-17.)*
+- **Cerberus's session is now shared across tabs.** Reading the Finnhub key at
+  call time forced Midas's gate off `verify()` (a bare hash check) onto `unlock()`
+  (a real session) — and since the session key is module-level, unlocking either
+  the Midas gate or the Cerberus tab opens both. "One guardian, one session" is
+  more consistent with Cerberus's sole-authority role than the split it replaced,
+  but it is a real behavior change: any future Vault-reading gate must call
+  `unlock()`, not `verify()`, and must add a liveness check on its own tick to
+  re-seal if the session dies elsewhere. *(2026-07-17.)*
+- **Correction: five tools were promoted to brain tools and this file didn't say
+  so.** `argus`, `helios`, `selene`, `ammit`, and `hypatia` gained real contracts
+  on 2026-07-06; their docstrings were fixed the next day (`41fac5f`) but §2, §8,
+  and `README.md` kept describing them as excluded for ~two weeks. **The process
+  lesson:** the docstrings were fixed and the conventions weren't, because nothing
+  linked them — a code-local fix felt complete. A hand-maintained copy of a list
+  that changes will drift. *(2026-07-20.)*
+- **Docs trimmed to one job per layer; module inventories deleted rather than
+  corrected.** The entry above prescribed treating a promotion as a three-file
+  change "until something enforces it." Enforcing it is the better answer, so the
+  copies were removed instead: §2 and §8 no longer list which modules are brain
+  tools, the per-module pages became fixed 5-field stubs, and
+  `tests/test_pantheon_docs.py` now asserts the docs match `pythia._TOOL_MODULES`
+  and `_DISPATCH`. **The standing rule:** if a line asserts something derivable
+  from the code, delete it or generate it — prose can only be wrong about that.
+  *(2026-07-20.)*

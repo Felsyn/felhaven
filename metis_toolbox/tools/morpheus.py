@@ -15,8 +15,12 @@ Contract:    A hybrid flavor, new to the stack — document it here so future-yo
                             state, not a fault — deliberate deviation from the
                             raise-on-failure norm the other fetch()es follow).
                - mutations: play / toggle_pause / next_track / prev_track /
-                            stop fire only from deliberate UI action in
-                            MorpheusPanel.
+                            stop fire from deliberate UI action in
+                            MorpheusPanel — plus one non-UI caller: harmonia.py
+                            calls stop() from its background play thread to
+                            yield the speaker before Calliope or Orpheus makes
+                            sound. Safe because _ipc() opens the pipe fresh per
+                            call and never raises.
              TOOL_DEFINITIONS (plural — see CONVENTIONS §3/§8) exposes two
              tools: play_music — "play this song" searches YouTube's top hit
              and plays it (it mutates audio, not records, so it's a safe LLM
