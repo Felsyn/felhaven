@@ -323,8 +323,9 @@ marker. Keeping a tool off the LLM surface means keeping it out of
 ## 12. Decisions & deviations log
 
 Choices that go *against* a convention above, so future readers know they were
-intentional. **Decision · why · date.** Append, don't rewrite. The full narrative
-for any entry is in [`CHANGELOG.md`](CHANGELOG.md) under the same date.
+intentional. **Decision · why · date.** Append, don't rewrite. **This is where
+the reasoning lives** — [`CHANGELOG.md`](CHANGELOG.md) records only what changed
+and when, one line per change, so a decision worth keeping must be written here.
 
 - **`emanon.fetch()` / `morpheus.fetch()` never raise** (vs. §2's raise-on-failure
   norm). A watcher that crashes is useless; "nothing playing" is not a fault.
