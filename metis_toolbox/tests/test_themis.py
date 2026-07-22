@@ -121,12 +121,12 @@ class TestSaveValidation(ThemisBase):
 
 class TestDerived(ThemisBase):
     def test_weather_query_uses_location_when_set(self):
-        self._write({"latitude": 1.0, "longitude": 2.0, "weather_location": "26041"})
-        self.assertEqual(themis.weather_query(), "26041")
+        self._write({"latitude": 1.0, "longitude": 2.0, "weather_location": "10001"})
+        self.assertEqual(themis.weather_query(), "10001")
 
     def test_weather_query_falls_back_to_coords(self):
-        self._write({"latitude": 39.9226, "longitude": -80.7434, "weather_location": ""})
-        self.assertEqual(themis.weather_query(), "39.9226,-80.7434")
+        self._write({"latitude": 51.4779, "longitude": -0.0015, "weather_location": ""})
+        self.assertEqual(themis.weather_query(), "51.4779,-0.0015")
 
     def test_is_southern(self):
         self._write({"latitude": -1.0, "longitude": 0.0})

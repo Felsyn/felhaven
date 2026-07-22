@@ -3,6 +3,12 @@ name: CI
 on:
   push:
 
+# Least privilege: both jobs only check out and run tests, so the GITHUB_TOKEN
+# never needs write. Without this, jobs inherit the repo default, which CodeQL
+# (actions/missing-workflow-permissions) flags — correctly.
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true

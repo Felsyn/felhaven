@@ -35,9 +35,9 @@ J1_PAYLOAD = {
         "precipMM": "0.0",
     }],
     "nearest_area": [{
-        "areaName": [{"value": "Moundsville"}],
-        "country":  [{"value": "United States of America"}],
-        "region":   [{"value": "West Virginia"}],
+        "areaName": [{"value": "Greenwich"}],
+        "country":  [{"value": "United Kingdom"}],
+        "region":   [{"value": "England"}],
     }],
     "weather": [{
         "maxtempF": "75",
@@ -82,7 +82,7 @@ class TestAuraAstronomy(unittest.TestCase):
         self.assertEqual(self.out["feels_like_c"], 21)
         self.assertEqual(self.out["high_c"], 24)
         self.assertEqual(self.out["low_c"], 12)
-        self.assertEqual(self.out["location"], "Moundsville, West Virginia")
+        self.assertEqual(self.out["location"], "Greenwich, England")
         self.assertEqual(self.out["description"], "Partly cloudy")
 
     def test_astronomy_values_are_raw_strings(self):

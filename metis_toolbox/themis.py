@@ -56,12 +56,15 @@ log = logging.getLogger("METIS.themis")
 # scribe.py / cerberus.py use, not the tools/ two-dirname dance.
 _DATA_PATH = Path(__file__).with_name("felhaven_settings.json")
 
-# Fail-soft defaults — the values that used to be hardcoded in source. A fresh
-# clone with no settings file reads exactly these (Moundsville, WV: the F1
-# analog), so behavior is unchanged until the user edits the Settings tab.
+# Fail-soft defaults. A fresh clone with no settings file reads exactly these
+# until the user edits the Settings tab (SETUP.md §8). Deliberately the Royal
+# Observatory, Greenwich — longitude 0.0 IS the prime meridian, so it is a
+# self-explanatory anchor for the star map rather than somebody's house. Do not
+# replace this with a real personal location: this file ships publicly, and a
+# shipped default is a coordinate you publish about yourself.
 DEFAULTS: dict[str, Any] = {
-    "latitude":         39.9226,
-    "longitude":        -80.7434,
+    "latitude":         51.4779,
+    "longitude":        0.0,
     "weather_location": "",       # optional; overrides lat,lon for weather only
     "temperature_unit": "F",      # "F" or "C"
     "clock_24h":        False,     # False -> 12-hour, True -> 24-hour

@@ -25,7 +25,7 @@ Location config:
     the lat/lon and an optional weather-location string, read fresh per fetch so
     an edit takes effect on the next Kairos tick. The AURA_LOCATION env var, if
     set, OVERRIDES the file (headless/CI). Both accept a city name, ZIP, or
-    lat/lon pair — e.g. "Moundsville,WV", "26041", "39.9226,-80.7434".
+    lat/lon pair — e.g. "Greenwich,UK", "10001", "51.4779,0.0".
 """
 
 import logging

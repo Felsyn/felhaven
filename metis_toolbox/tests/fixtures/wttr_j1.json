@@ -36,25 +36,25 @@
   {
    "areaName": [
     {
-     "value": "Moundsville"
+     "value": "Greenwich"
     }
    ],
    "country": [
     {
-     "value": "United States of America"
+     "value": "United Kingdom"
     }
    ],
-   "latitude": "39.920",
-   "longitude": "-80.743",
+   "latitude": "51.478",
+   "longitude": "-0.001",
    "population": "9638",
    "region": [
     {
-     "value": "West Virginia"
+     "value": "England"
     }
    ],
    "weatherUrl": [
     {
-     "value": "https://www.worldweatheronline.com/v2/weather.aspx?q=39.92,-80.743"
+     "value": "https://www.worldweatheronline.com/v2/weather.aspx?q=51.478,-0.001"
     }
    ]
   }

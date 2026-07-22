@@ -67,8 +67,8 @@ log = logging.getLogger("METIS.hypatia")
 # tab / felhaven_settings.json), read per snapshot in _build_snapshot(). These
 # constants are only the FAIL-SOFT DEFAULTS (== Themis's own) — kept because
 # tests and kepler.py's __main__ reference them as a fixed sky anchor.
-HYPATIA_LAT = 39.9226
-HYPATIA_LON = -80.7434
+HYPATIA_LAT = 51.4779
+HYPATIA_LON = 0.0
 
 # Latitude presets — teaching mode. Longitude stays the observer's own so the
 # sky's *timing* is always honest; only latitude jumps.
