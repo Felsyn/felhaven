@@ -16,9 +16,15 @@ Contract:    Polled + brain tool. Exposes TOOL_DEFINITION and handle(), with
              the local clock and Themis, whose loaders fall back rather than
              fail, so there is no failure mode left to report.
 
+Source:      The local system clock (datetime.now) plus themis.py for the
+             configured clock format and hemisphere. No network, no I/O.
 Upstream:    kairos.py (calls fetch), pythia.py (registration + dispatch),
              themis.py (clock format + hemisphere)
 Downstream:  panels/horai_panel.py (display surface)
+Requires:    stdlib only (datetime); themis.py for settings.
+
+V0.02:       Audited 2026-07-24 — never-raise verified (Themis falls back to
+             defaults), contract fields completed.
 """
 
 import os

@@ -29,6 +29,10 @@ Downstream:  panels/narrator_panel.py (NarratorLamp, reused not forked),
              theme.py (colors/fonts)
 
 Requires:    tkinter (stdlib). calliope only indirectly, via NarratorLamp.
+
+V0.02: Audited 2026-07-26 — verified draw-and-delegate honest; owns no chat state
+of its own. §6-clean: no thread and no after() — HomePanel drives every readout
+and wires the Stop/Refresh handlers.
 """
 
 from typing import Callable

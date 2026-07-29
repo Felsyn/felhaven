@@ -35,7 +35,13 @@ Upstream:    kairos.py (calls fetch)
 Downstream:  panels/argus_panel.py (display surface)
 
 Requires:    psutil (already in the stack); os, json, time, socket, subprocess,
-             ctypes, collections (stdlib).
+             ctypes, collections, logging (stdlib).
+
+V0.02:       Audited 2026-07-25 — every docstring field verified honest: fetch()
+             raises ONLY on a wholesale net_connections() failure (every other
+             source degrades per-field), handle() never-raises to the
+             network_unavailable slug (already §2-conformant). No dead code. The
+             hand-run seed argus_peek.py was retired (superseded by this module).
 """
 
 import ctypes
@@ -382,8 +388,14 @@ def _update_timeline(connections: list[dict[str, Any]]) -> None:
     at launch did not open *now*, so emitting "open" for all of them would be a
     false flood. The loaded file is history; this live baseline is separate."""
     global _known, _seeded
+    # Identity is the socket 4-tuple (pid + remote + local endpoint), NOT its TCP
+    # state: one connection moves ESTABLISHED -> TIME_WAIT during teardown, and
+    # including `status` here would emit a phantom close+open pair for that single
+    # socket. Keep status OUT of the key so the timeline records only genuinely
+    # new and genuinely closed connections. (Do NOT re-add status — that churn is
+    # exactly the bug this key shape fixes.)
     cur = {
-        f"{c['pid']}|{c['raddr']}|{c['laddr']}|{c['status']}": c
+        f"{c['pid']}|{c['raddr']}|{c['laddr']}": c
         for c in connections
     }
     if not _seeded:
@@ -471,9 +483,15 @@ def handle() -> dict[str, Any]:
         return {"error": "network_unavailable"}
 
     s, t, fw, dns = snap["summary"], snap["traffic"], snap["firewall"], snap["dns"]
+    # ESTABLISHED connections are the live ones worth surfacing; teardown and
+    # half-open states sink below them (stable sort preserves table order within
+    # each group) so the 8-row sample the model sees isn't dominated by TIME_WAIT
+    # noise. There's no per-connection metric to rank by (psutil exposes none on
+    # Windows), so "top" means "live first", not "busiest".
+    ranked = sorted(snap["connections"], key=lambda c: c["status"] != "ESTABLISHED")
     top = [
         {"proc": c["proc"], "remote": c["raddr"], "status": c["status"]}
-        for c in snap["connections"][:8]
+        for c in ranked[:8]
     ]
     return {
         "privilege":         snap["privilege"],

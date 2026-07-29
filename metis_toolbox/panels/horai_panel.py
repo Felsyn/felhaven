@@ -5,6 +5,9 @@ HoraiPanel      — clock + date + cycle/season badges, hosts AmmitWidget.
 AmmitWidget     — single countdown timer inside HoraiPanel.
 
 Both widgets read/write state via the horai and ammit tool modules.
+
+V0.02: Audited 2026-07-24 — AmmitWidget's countdown is Kairos-driven (via
+       HoraiPanel.update under horai's 1 s poll), not after()-based; §6 corrected.
 """
 
 import tkinter as tk
@@ -18,7 +21,7 @@ from tools import ammit
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  AmmitWidget — three countdown timers
+#  AmmitWidget — single countdown timer
 # ─────────────────────────────────────────────────────────────────────────────
 
 class AmmitWidget(tk.Frame):
@@ -163,7 +166,7 @@ class AmmitWidget(tk.Frame):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  HoraiPanel — clock, date, cycle/season, + Ammit timers
+#  HoraiPanel — clock, date, cycle/season, + Ammit countdown
 # ─────────────────────────────────────────────────────────────────────────────
 
 class HoraiPanel(Card):

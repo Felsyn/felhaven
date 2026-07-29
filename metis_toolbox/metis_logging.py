@@ -22,12 +22,16 @@ Idempotent:  Calling setup_logging() more than once will NOT attach
 Upstream:    felhaven.py (and any other program entry point)
 Downstream:  emanon.py reads the files this writes
 
-Requires:    stdlib only (logging, logging.handlers, pathlib)
+Requires:    stdlib only (logging, logging.handlers, sys, pathlib)
+
+V0.02:       Audited 2026-07-26 — dropped an unused `import os`; added the used
+             `sys` to Requires. emanon keeps its own DELIM / LOG_DIR, re-derived
+             independently per §5 and lockstep-tested (kept two copies by choice
+             this session, not collapsed). First tests.
 """
 
 import logging
 import logging.handlers
-import os
 import sys
 from pathlib import Path
 

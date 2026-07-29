@@ -5,6 +5,6 @@ Evaluate Python arithmetic expressions safely, step by step.
 - **UI:** Cogitator card → ZENO tab
 - **Brain tool:** `calculate`
 - **Files:** `tools/zeno.py`, `panels/zeno_panel.py`
-- **Test:** `python -X utf8 -m unittest tests.test_tool_handles`
+- **Test:** `python -X utf8 -m unittest tests.test_zeno tests.test_zeno_panel_smoke`
 
 Details: see the docstring in `tools/zeno.py`.

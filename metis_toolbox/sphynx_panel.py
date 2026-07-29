@@ -28,6 +28,10 @@ Downstream:  sphynx.py (verification + create), felhaven.py (spawned on
              success), theme.py (colors/fonts)
 
 Requires:    tkinter (stdlib), subprocess, sys, os.
+
+V0.02:       Audited 2026-07-24 — dropped the stale "v1.0" from the boot
+             litany (an unmaintained version string in the UI is the retired
+             "(FOE v.01)" scar, §12); logic unchanged.
 """
 
 import os
@@ -48,7 +52,7 @@ _NO_WINDOW       = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # per-launch from sphynx_data.json (sphynx.riddle()) and appended at _start.
 _LITANY_PREFIX = [
     "...",
-    ">> SPHYNX v1.0 — threshold guardian",
+    ">> SPHYNX — threshold guardian",
     ">> waking core..............[ OK ]",
     ">> calibrating phosphor array...[ OK ]",
     ">> loading riddle............[ OK ]",

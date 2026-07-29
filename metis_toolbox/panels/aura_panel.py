@@ -73,6 +73,10 @@ class HeliosWidget(tk.Frame):
     Solar timing sub-widget inside WeatherPanel — sunrise, sunset, golden
     hours, day length. Collapsed by default; toggled with ▶/▼ like Ammit.
     Pure display: all interpretation lives in tools/helios.py.
+
+    V0.02: Audited 2026-07-25 — class-scoped tag (this file is shared with
+    session-19's WeatherPanel and session-20's SeleneWidget). update(astro) →
+    helios.interpret; None degrades to "unavailable". No code change.
     """
 
     ROWS = ("sunrise", "sunset", "golden AM", "golden PM", "day length")
@@ -157,6 +161,9 @@ class SeleneWidget(tk.Frame):
     Lunar sub-widget inside WeatherPanel — phase glyph + name, illumination,
     moonrise, moonset. Collapsed by default; toggled with ▶/▼ like Ammit.
     Pure display: all interpretation lives in tools/selene.py.
+
+    V0.02: Audited 2026-07-25 — class-scoped tag (shared file). update(astro) →
+    selene.interpret; None → "unavailable", illumination "" → "—". No code change.
     """
 
     ROWS = ("illumination", "moonrise", "moonset")
@@ -248,6 +255,11 @@ class WeatherPanel(Card):
     pattern, minus the scroll frame — three forecast rows don't scroll):
         NOW       — current conditions + Helios (sun) + Selene (moon)
         FORECAST  — 3-day outlook with emoji icons and chance of rain
+
+    V0.02: Audited 2026-07-25 — update() handles None (stale) and the full dict;
+    the module-level _icon() / _temp_color() display lookups verified. The
+    HeliosWidget / SeleneWidget sub-widgets in this same file are Session 20
+    (helios / selene) and get their own class-scoped tag then.
     """
 
     # Detail rows for the NOW tab. "rain chance" sits after humidity, before UV.

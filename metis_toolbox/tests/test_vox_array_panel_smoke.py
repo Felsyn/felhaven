@@ -4,10 +4,11 @@ and the Echo tab body.
 
 Same approach as test_morpheus_panel_smoke.py: a real tk.Tk() root we withdraw()
 (no window flashes) and drive with update()/update_idletasks() instead of
-mainloop(). No exception raised == pass. Morpheus and Orpheus are both forced
-to their disabled (no-binary) path so the test never depends on mpv/yt-dlp/
-ffmpeg being installed; Echo's conversion is mocked so no kokoro model or
-ffmpeg is touched.
+mainloop(). No exception raised == pass. In the host test Morpheus, Orpheus,
+AND Echo are all forced to their disabled (no-binary) path so it never depends
+on mpv/yt-dlp/ffmpeg being installed; the dedicated Echo panel test below forces
+the ENABLED path and mocks the conversion, so no kokoro model or ffmpeg is
+touched either.
 
     python -X utf8 -m unittest tests.test_vox_array_panel_smoke
 """
@@ -46,11 +47,13 @@ class TestVoxArrayPanelSmoke(unittest.TestCase):
         from panels.morpheus_panel import MorpheusPanel
         from panels.echo_panel import EchoPanel
         from panels.orpheus_panel import OrpheusPanel
-        # Force Morpheus's and Orpheus's disabled paths regardless of the host machine.
+        # Force every binary-gated tab to its disabled path regardless of the host.
         self._orig_avail = morpheus.available
         self._orig_orpheus_avail = orpheus.available
+        self._orig_echo_avail = echo.available
         morpheus.available = lambda: {"mpv": None, "ytdlp": None}
         orpheus.available = lambda: {"ffmpeg": None}
+        echo.available = lambda: {"ffmpeg": None}
         self.MorpheusPanel = MorpheusPanel
         self.EchoPanel = EchoPanel
         self.OrpheusPanel = OrpheusPanel
@@ -60,6 +63,7 @@ class TestVoxArrayPanelSmoke(unittest.TestCase):
     def tearDown(self):
         morpheus.available = self._orig_avail
         orpheus.available = self._orig_orpheus_avail
+        echo.available = self._orig_echo_avail
         self.panel.destroy()
 
     def test_builds_with_all_tab_bodies(self):
@@ -104,11 +108,27 @@ class TestEchoPanelSmoke(unittest.TestCase):
 
     def setUp(self):
         from panels.echo_panel import EchoPanel
+        self.EchoPanel = EchoPanel
+        # Force the ENABLED (ffmpeg-present) path so the convert UI is built
+        # regardless of the host — the conversion itself is mocked per test.
+        self._orig_echo_avail = echo.available
+        echo.available = lambda: {"ffmpeg": "ffmpeg.exe"}
         self.panel = EchoPanel(self.root)
         self.panel.pack()
 
     def tearDown(self):
+        echo.available = self._orig_echo_avail
         self.panel.destroy()
+
+    def test_disabled_when_ffmpeg_missing(self):
+        # No ffmpeg → a calm placeholder, no convert UI, no crash (§7).
+        echo.available = lambda: {"ffmpeg": None}
+        panel = self.EchoPanel(self.root)
+        try:
+            self.assertFalse(panel._enabled)
+            self.assertFalse(hasattr(panel, "_send_btn"))
+        finally:
+            panel.destroy()
 
     def _fill(self, text="hello world", name="out"):
         self.panel._text.delete("1.0", "end")

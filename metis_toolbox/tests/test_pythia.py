@@ -9,8 +9,13 @@ package root:
     python -X utf8 -m unittest tests.test_pythia
 
 Covers: streaming plain answer (+ on_delta tokens), the request payload
-(stream/keep_alive), a tool-call round-trip (dispatch + result fed back),
-graceful network-failure text, and the TOOLS/_DISPATCH registry invariant.
+(stream/keep_alive), a tool-call round-trip (dispatch + result fed back), the
+on_event stats payload's turn_messages (the real tool exchange a caller should
+persist as history, excluding the system prompt and prior history, present
+even on the friendly-degrade error paths), graceful network-failure text, the
+TOOLS/_DISPATCH registry invariant, the §2 error-slug shape of the dispatcher's
+own returns, and that a caught exception's raw message never reaches the LLM
+context or the transcript (only its class).
 """
 
 import json
@@ -57,6 +62,23 @@ class TestPythiaRegistry(unittest.TestCase):
     def test_unknown_tool_is_soft_error(self):
         out = pythia._dispatch("no_such_tool", {})
         self.assertIn("error", out)
+        # A §2 slug, not a bare sentence — the model branches on the identifier.
+        self.assertTrue(out["error"].startswith("unknown_tool:"), out["error"])
+
+    def test_tool_failure_returns_slug_without_the_exception_message(self):
+        # A tool bug must not crash the chat, and the caught exception's raw
+        # text must not ride into the LLM context — only its class name does.
+        # (The Midas lesson: an exception message can carry a path or a key.)
+        secret = "token=SUPERSECRET123"
+
+        def _boom(**_):
+            raise RuntimeError(secret)
+
+        with mock.patch.dict(pythia._DISPATCH, {"boom": _boom}):
+            out = pythia._dispatch("boom", {})
+        self.assertTrue(out["error"].startswith("tool_failed:"), out["error"])
+        self.assertIn("RuntimeError", out["error"])       # class name is useful
+        self.assertNotIn("SUPERSECRET123", out["error"])  # message is not leaked
 
 
 class TestPythiaAsk(unittest.TestCase):
@@ -103,6 +125,52 @@ class TestPythiaAsk(unittest.TestCase):
         self.assertTrue(tool_msgs, "tool result was not appended to the conversation")
         self.assertIn("70", tool_msgs[0]["content"])
 
+    def test_turn_messages_carries_the_real_tool_exchange(self):
+        # The stats event's turn_messages must be the caller's persistence
+        # source: user -> assistant(tool_calls) -> tool(result) -> assistant
+        # (final), in order — the exchange a flattened user/assistant history
+        # used to throw away, which is what taught the small model to narrate
+        # tool use instead of ever actually calling a tool (CONVENTIONS §12).
+        responses = [
+            _stream({"message": {"role": "assistant", "content": "",
+                                 "tool_calls": [{"function": {"name": "get_weather",
+                                                              "arguments": {}}}]},
+                     "done": True}),
+            _stream(_final("It's 70 and clear.")),
+        ]
+        stub = {"get_weather": lambda **_: {"temp_f": 70, "description": "clear"}}
+        prior_history = [{"role": "user", "content": "old question"},
+                         {"role": "assistant", "content": "old answer"}]
+        events = []
+        with mock.patch("pythia.requests.post", side_effect=responses), \
+                mock.patch.dict(pythia._DISPATCH, stub):
+            pythia.ask("weather?", history=prior_history, on_event=events.append)
+
+        turn = events[0]["turn_messages"]
+        roles = [m["role"] for m in turn]
+        self.assertEqual(roles, ["user", "assistant", "tool", "assistant"])
+        self.assertEqual(turn[0]["content"], "weather?")
+        self.assertIn("tool_calls", turn[1])
+        self.assertEqual(turn[2]["role"], "tool")
+        self.assertEqual(turn[3]["content"], "It's 70 and clear.")
+        # Neither the system prompt nor the passed-in prior history leaked in.
+        self.assertNotIn("old question", json.dumps(turn))
+        self.assertFalse(any(m.get("role") == "system" for m in turn))
+
+    def test_turn_messages_present_on_connection_error(self):
+        # Even the friendly-degrade paths must end the turn with an assistant
+        # message, so a caller that persists turn_messages always gets a
+        # well-formed user->assistant exchange, never a dangling user message.
+        events = []
+        with mock.patch("pythia.requests.post",
+                        side_effect=requests.ConnectionError()):
+            out = pythia.ask("hi", on_event=events.append)
+
+        turn = events[0]["turn_messages"]
+        self.assertEqual(turn[0], {"role": "user", "content": "hi"})
+        self.assertEqual(turn[-1]["role"], "assistant")
+        self.assertEqual(turn[-1]["content"], out)
+
     def test_connection_error_is_friendly(self):
         with mock.patch("pythia.requests.post",
                         side_effect=requests.ConnectionError()):
@@ -118,6 +186,16 @@ class TestPythiaAsk(unittest.TestCase):
         with mock.patch("pythia.requests.post", return_value=_stream(_final(""))):
             out = pythia.ask("hi")
         self.assertTrue(out)   # falls back to a placeholder, never an empty string
+
+    def test_unexpected_failure_keeps_exception_text_off_the_transcript(self):
+        # The catch-all in ask() prints to the transcript verbatim, so it must
+        # surface only the exception's class name — never its raw message, which
+        # could carry a path or key onto the screen (§2).
+        secret = "SUPERSECRET at C:/keys/finnhub.txt"
+        with mock.patch("pythia.requests.post", side_effect=RuntimeError(secret)):
+            out = pythia.ask("hi")
+        self.assertIn("RuntimeError", out)
+        self.assertNotIn("supersecret", out.lower())
 
 
 class TestPythiaStats(unittest.TestCase):

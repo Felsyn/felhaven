@@ -17,10 +17,14 @@ Contract:    A hybrid flavor, new to the stack — document it here so future-yo
                - mutations: play / toggle_pause / next_track / prev_track /
                             stop fire from deliberate UI action in
                             MorpheusPanel — plus one non-UI caller: harmonia.py
-                            calls stop() from its background play thread to
-                            yield the speaker before Calliope or Orpheus makes
-                            sound. Safe because _ipc() opens the pipe fresh per
-                            call and never raises.
+                            calls stop() at the top of its play(), which runs on
+                            whatever thread entered play() — Calliope's release
+                            worker (speech) or the UI thread (a filler or an
+                            Orpheus briefing), never Harmonia's own play worker
+                            (which only touches sounddevice) — to yield the
+                            speaker before Calliope or Orpheus makes sound. Safe
+                            because _ipc() opens the pipe fresh per call and
+                            never raises.
              TOOL_DEFINITIONS (plural — see CONVENTIONS §3/§8) exposes two
              tools: play_music — "play this song" searches YouTube's top hit
              and plays it (it mutates audio, not records, so it's a safe LLM
@@ -41,9 +45,9 @@ Source:      Two external binaries, zero new pip packages, stdlib-only Python.
              If either is missing, available() reports it and the panel shows a
              placeholder — we never crash and never raise at import time.
 
-Playlists:   morpheus_playlists.json at the app root (config-over-code, same
-             pattern as pheme_rumormill.json). Adding a playlist is a JSON edit,
-             never a code change.
+Playlists:   config/morpheus_playlists.json under the app root (config-over-code,
+             same pattern as pheme_rumormill.json). Adding a playlist is a JSON
+             edit, never a code change.
 
 Resume:      mpv saves the playback position on quit (--save-position-on-quit)
              into morpheus_watch_later/. The dir is passed explicitly because
@@ -60,6 +64,14 @@ Downstream:  mpv.exe (audio engine) + yt-dlp.exe (search / URL resolution)
 
 Requires:    mpv + yt-dlp binaries (bin/ or PATH).
              json, logging, os, shutil, subprocess, time (stdlib).
+
+V0.02:       Audited 2026-07-25 — the last output-contract allowlist entry:
+             search()'s "search failed" ×3 → "search_failed" (§2 slug), which
+             empties the allowlist. Also: dead _get_prop() removed (superseded by
+             _get_props); the harmonia caller re-described as running on the
+             caller's thread, not a "background play thread"; the playlist path
+             corrected to config/. Never-raise verified across fetch/mutations/
+             search/play_music/resume_music.
 """
 
 import json
@@ -297,14 +309,6 @@ def _ipc(command: list[Any], expect_reply: bool = False, timeout: float = 2.0) -
         return None
 
 
-def _get_prop(name: str) -> Any:
-    """Read one mpv property. Returns its value, or None if unavailable."""
-    reply = _ipc(["get_property", name], expect_reply=True)
-    if reply is None:
-        return None
-    return reply.get("data")
-
-
 def _get_props(names: list[str], timeout: float = 2.0) -> dict[str, Any]:
     """
     Read several mpv properties over ONE pipe connection — one open/write/read/
@@ -426,13 +430,13 @@ def search(query: str, limit: int = 10) -> list[dict[str, Any]]:
     MorpheusPanel calls this on a daemon thread, never the main thread.
 
     Returns up to `limit` rows: {"title", "channel", "duration", "url"}.
-    On any failure returns [{"error": "search failed"}] so the panel can render
+    On any failure returns [{"error": "search_failed"}] so the panel can render
     a single error row.
     """
     ytdlp = _resolve("yt-dlp")
     if not ytdlp:
         log.warning("search: yt-dlp not found")
-        return [{"error": "search failed"}]
+        return [{"error": "search_failed"}]
 
     args = [ytdlp, f"ytsearch{limit}:{query}", "--flat-playlist", "-J", "--no-warnings"]
     try:
@@ -441,11 +445,11 @@ def search(query: str, limit: int = 10) -> list[dict[str, Any]]:
         if proc.returncode != 0:
             log.warning("search: yt-dlp exit %s: %s",
                         proc.returncode, proc.stderr.decode("utf-8", "replace")[:200])
-            return [{"error": "search failed"}]
+            return [{"error": "search_failed"}]
         data = json.loads(proc.stdout)
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
         log.warning("search failed: %s", e)
-        return [{"error": "search failed"}]
+        return [{"error": "search_failed"}]
 
     rows = []
     for entry in data.get("entries") or []:

@@ -127,12 +127,24 @@ class TestSearchWeb(unittest.TestCase):
         self.assertTrue(out["error"].startswith("search_failed:"))
 
     def test_vault_locked_is_search_failed(self):
-        # Override the setUp key patch with a locked-vault raise.
+        # Override the setUp key patch with a locked-vault raise. Only the
+        # exception CLASS reaches the error dict — the VaultError message is
+        # kept out of the LLM context (§2).
         with mock.patch.object(callimachus, "_brave_key",
                                side_effect=cerberus.VaultError("vault is locked")):
             out = callimachus.search_web("q")
-        self.assertTrue(out["error"].startswith("search_failed:"))
-        self.assertIn("locked", out["error"])
+        self.assertEqual(out["error"], "search_failed: VaultError")
+        self.assertNotIn("locked", out["error"])   # message gone, class only
+
+    def test_url_error_reports_reason_class_not_message(self):
+        # URLError.reason is a foreign socket/OS error that can carry a hostname
+        # or errno path — only its class may reach the LLM, never its raw text.
+        leaky = urllib.error.URLError(
+            OSError("[Errno 11001] getaddrinfo failed: secret.internal.host"))
+        with _patch_open(leaky):
+            out = callimachus.search_web("q")
+        self.assertEqual(out["error"], "search_failed: OSError")
+        self.assertNotIn("secret.internal.host", out["error"])
 
 
 class TestStripHtml(unittest.TestCase):
@@ -208,6 +220,16 @@ class TestFetchPage(unittest.TestCase):
         with _patch_open(socket.timeout()):
             self.assertEqual(callimachus.fetch_page("https://slow.example"),
                              {"error": "timeout"})
+
+    def test_url_error_reports_reason_class_not_message(self):
+        # Same rail as search_web: a URLError.reason's raw text (host/errno)
+        # must not ride into the LLM context — only its class.
+        leaky = urllib.error.URLError(
+            OSError("[Errno 11001] getaddrinfo failed: secret.internal.host"))
+        with _patch_open(leaky):
+            out = callimachus.fetch_page("https://gone.example")
+        self.assertEqual(out["error"], "fetch_failed: OSError")
+        self.assertNotIn("secret.internal.host", out["error"])
 
 
 class TestRegistryWiring(unittest.TestCase):

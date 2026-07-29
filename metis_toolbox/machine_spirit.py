@@ -27,6 +27,11 @@ Upstream:    panels/machine_spirit_panel.py (the MACHINE SPIRIT tab), pythia.py
 Downstream:  machine_spirit_config.json
 
 Requires:    json, logging, os, tempfile, pathlib (stdlib only).
+
+V0.02:       Audited 2026-07-24 — effective_prompt()'s never-raise (which makes
+             Pythia's own contract honest), the default-never-persisted rule,
+             the atomic write, and the gitignored per-user config all verified
+             honest; the module needed no code change, only this marker.
 """
 
 import json

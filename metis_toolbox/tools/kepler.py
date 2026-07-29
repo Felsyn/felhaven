@@ -36,9 +36,15 @@ Scope:       Locked to the five classical naked-eye planets — Mercury, Venus,
              permanently.
 
 Upstream:    tools/hypatia.py (_build_snapshot calls positions())
-Downstream:  none
+Downstream:  tools/hypatia.py — reuses its _altaz / _julian_date / compass (see
+             Method; a documented, order-independent circular import, §12)
 
 Requires:    math, logging (stdlib only). No network, no state.
+
+V0.02:       Audited 2026-07-25 — positions() never-raises verified (per-planet
+             degrade, per-body try/except). Dropped the demo's duplicate _compass
+             for the shared hypatia.compass; Downstream corrected to name hypatia
+             (it reuses hypatia's math, the circular half §12 documents).
 """
 
 import logging
@@ -226,18 +232,10 @@ def _radec(name: str, unix: float) -> tuple[float, float]:
 
 # ── Standalone test ──────────────────────────────────────────────────────
 
-_COMPASS_16 = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
-               "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
-
-
-def _compass(az: float) -> str:
-    return _COMPASS_16[int(((az % 360.0) + 11.25) // 22.5) % 16]
-
-
 if __name__ == "__main__":
     import time
     now = time.time()
     for p in positions(now, hypatia.HYPATIA_LAT, hypatia.HYPATIA_LON):
-        where = f"alt {p['alt']:6.1f}, az {p['az']:6.1f} ({_compass(p['az'])})" \
+        where = f"alt {p['alt']:6.1f}, az {p['az']:6.1f} ({hypatia.compass(p['az'])})" \
             if p["alt"] > 0 else f"below horizon (alt {p['alt']:.1f})"
         print(f"[Kepler] {p['glyph']} {p['name']:<8} {where}")

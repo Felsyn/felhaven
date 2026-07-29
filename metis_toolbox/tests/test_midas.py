@@ -87,5 +87,142 @@ class TestFetchOneVaultKey(unittest.TestCase):
         self.assertEqual(key_fn.call_count, 2)
 
 
+class TestLogDoesNotLeakKey(unittest.TestCase):
+    """Regression for the Finnhub key leaking into logs/*.log (found in the
+    session-7 audit via a live felhaven.log). A network error's message carries
+    the request URL, and that URL carries ?token=<key> — so _fetch_one must log
+    a sanitized identifier, never the raw exception (§2). Emanon renders those
+    log lines on screen, so this is a real exposure, not just an at-rest one."""
+
+    def test_request_error_message_is_not_logged(self) -> None:
+        leaky = ("502 Server Error for url: "
+                 "https://finnhub.io/api/v1/quote?symbol=AAPL&token=SECRETKEY123")
+        with mock.patch.object(cerberus, "is_unlocked", return_value=True), \
+                mock.patch.object(midas, "_finnhub_key", return_value="SECRETKEY123"), \
+                mock.patch("requests.get", side_effect=Exception(leaky)):
+            with self.assertLogs("METIS.midas", level="WARNING") as cm:
+                out = midas._fetch_one("AAPL")
+        self.assertEqual(out["error"], midas.ERR_FETCH_FAILED)
+        joined = "\n".join(cm.output)
+        self.assertNotIn("SECRETKEY123", joined)   # the key must never appear
+        self.assertNotIn("token=", joined)         # nor the URL that carries it
+        self.assertIn("Exception", joined)         # the class name alone is fine
+
+
+class TestFmtPrice(unittest.TestCase):
+    def test_thousands_get_commas(self) -> None:
+        self.assertEqual(midas._fmt_price(1234.5), "$1,234.50")
+
+    def test_dollars_two_decimals(self) -> None:
+        self.assertEqual(midas._fmt_price(12.3), "$12.30")
+
+    def test_sub_dollar_four_decimals(self) -> None:
+        self.assertEqual(midas._fmt_price(0.5), "$0.5000")
+
+
+def _good(symbol: str, price: float = 100.0) -> dict:
+    """A well-shaped success result dict, matching _fetch_one's happy path."""
+    return {
+        "symbol": symbol, "price": price, "price_fmt": f"${price:.2f}",
+        "pct": 1.0, "pct_fmt": "+1.00%", "direction": "up",
+    }
+
+
+class _QueryAllBase(unittest.TestCase):
+    """query_all() reads module-level cache globals and the watchlist file.
+    Reset the cache and stub the watchlist so every test is isolated and never
+    touches the real config or network."""
+
+    def setUp(self) -> None:
+        self._orig = (midas._cache, midas._cache_ts, midas._load_watchlist)
+        midas._cache = {}
+        midas._cache_ts = 0.0
+
+    def tearDown(self) -> None:
+        midas._cache, midas._cache_ts, midas._load_watchlist = self._orig
+
+
+class TestQueryAll(_QueryAllBase):
+
+    def test_cache_serves_within_ttl(self) -> None:
+        midas._load_watchlist = lambda: ["AAPL"]
+        with mock.patch.object(midas, "_fetch_one",
+                               side_effect=lambda s: _good(s)) as fo:
+            midas.query_all()          # populates the cache
+            midas.query_all()          # within TTL → served from cache, no refetch
+        self.assertEqual(fo.call_count, 1)
+
+    def test_force_bypasses_cache(self) -> None:
+        midas._load_watchlist = lambda: ["AAPL"]
+        with mock.patch.object(midas, "_fetch_one",
+                               side_effect=lambda s: _good(s)) as fo:
+            midas.query_all()
+            midas.query_all(force=True)
+        self.assertEqual(fo.call_count, 2)
+
+    def test_result_order_follows_watchlist(self) -> None:
+        # Futures finish in arbitrary order; query_all must re-sort to the
+        # watchlist so the panel rows never shuffle between ticks.
+        midas._load_watchlist = lambda: ["AAA", "BBB", "CCC"]
+        with mock.patch.object(midas, "_fetch_one", side_effect=lambda s: _good(s)):
+            out = midas.query_all(force=True)
+        self.assertEqual([r["symbol"] for r in out], ["AAA", "BBB", "CCC"])
+
+    def test_stale_fallback_dims_not_blanks(self) -> None:
+        # A fetch that fails after a good value was cached rides the last good
+        # value back with a `stale` flag (no "error" key) — the panel dims it.
+        midas._load_watchlist = lambda: ["AAPL"]
+        seq = [_good("AAPL"), {"symbol": "AAPL", "error": midas.ERR_FETCH_FAILED}]
+        with mock.patch.object(midas, "_fetch_one", side_effect=seq):
+            first = midas.query_all(force=True)
+            second = midas.query_all(force=True)
+        self.assertNotIn("stale", first[0])
+        self.assertTrue(second[0].get("stale"))            # flagged stale...
+        self.assertNotIn("error", second[0])               # ...not blanked to error
+        self.assertEqual(second[0]["price_fmt"], first[0]["price_fmt"])
+
+
+class TestFetchContract(unittest.TestCase):
+    """fetch()'s raise-on-wholesale-failure contract, and its one deliberate
+    exception (§12): an all-'vault_locked' result is the normal sealed state and
+    must NOT raise — raising it logged an ERROR every 60 s. handle() never
+    raises regardless."""
+
+    def test_partial_success_does_not_raise(self) -> None:
+        mixed = [_good("AAPL"), {"symbol": "MSFT", "error": midas.ERR_NO_DATA}]
+        with mock.patch.object(midas, "query_all", return_value=mixed):
+            self.assertEqual(midas.fetch()["tickers"], mixed)
+
+    def test_all_failed_raises_naming_dominant_slug(self) -> None:
+        allbad = [
+            {"symbol": "AAPL", "error": midas.ERR_NO_KEY},
+            {"symbol": "MSFT", "error": midas.ERR_NO_KEY},
+            {"symbol": "CAT",  "error": midas.ERR_FETCH_FAILED},
+        ]
+        with mock.patch.object(midas, "query_all", return_value=allbad):
+            with self.assertRaises(RuntimeError) as ctx:
+                midas.fetch()
+        # The dominant cause is named so the log says *why*, not just "failed".
+        self.assertIn(midas.ERR_NO_KEY, str(ctx.exception))
+
+    def test_all_vault_locked_is_quiet(self) -> None:
+        locked = [
+            {"symbol": "AAPL", "error": midas.ERR_VAULT_LOCKED},
+            {"symbol": "MSFT", "error": midas.ERR_VAULT_LOCKED},
+        ]
+        with mock.patch.object(midas, "query_all", return_value=locked):
+            out = midas.fetch()                    # must not raise
+        self.assertEqual(out["tickers"], locked)
+
+    def test_empty_watchlist_does_not_raise(self) -> None:
+        with mock.patch.object(midas, "query_all", return_value=[]):
+            self.assertEqual(midas.fetch(), {"tickers": []})
+
+    def test_handle_wraps_tickers_and_never_raises(self) -> None:
+        allbad = [{"symbol": "AAPL", "error": midas.ERR_VAULT_LOCKED}]
+        with mock.patch.object(midas, "query_all", return_value=allbad):
+            self.assertEqual(midas.handle(), {"tickers": allbad})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

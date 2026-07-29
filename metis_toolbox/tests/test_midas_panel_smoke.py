@@ -164,6 +164,41 @@ class TestMidasGate(_Base):
         self.assertTrue(self.panel._unlocked)
         self.assertTrue(cerberus.is_unlocked())
 
+    def test_error_slug_maps_to_human_text(self):
+        # The five midas codes must render as human text, not a constant "err"
+        # and not the raw slug (§2 — the panel maps the slug).
+        self._unlock()
+        self.panel.update({"tickers": [{"symbol": "AAPL",
+                                        "error": midas.ERR_VAULT_LOCKED}]})
+        self.root.update_idletasks()
+        _price, pct = self.panel._row_widgets["AAPL"]
+        self.assertEqual(pct.cget("text"), "locked")
+
+    def test_unmapped_error_falls_back_to_slug(self):
+        # An unknown code is surfaced (as itself), never swallowed.
+        self._unlock()
+        self.panel.update({"tickers": [{"symbol": "AAPL", "error": "some_new_code"}]})
+        self.root.update_idletasks()
+        _price, pct = self.panel._row_widgets["AAPL"]
+        self.assertEqual(pct.cget("text"), "some_new_code")
+
+    def test_stale_price_is_dimmed_not_shown_as_fresh(self):
+        self._unlock()
+        fresh = {"tickers": [{"symbol": "AAPL", "price_fmt": "$100.00",
+                              "pct_fmt": "+1.00%", "direction": "up"}]}
+        self.panel.update(fresh)
+        self.root.update_idletasks()
+        price, _pct = self.panel._row_widgets["AAPL"]
+        self.assertEqual(str(price.cget("fg")), theme.C["text1"])   # fresh = bright
+
+        stale = {"tickers": [{"symbol": "AAPL", "price_fmt": "$100.00",
+                              "pct_fmt": "+1.00%", "direction": "up", "stale": True}]}
+        self.panel.update(stale)
+        self.root.update_idletasks()
+        price, pct = self.panel._row_widgets["AAPL"]
+        self.assertEqual(str(price.cget("fg")), theme.C["text3"])   # stale = dimmed
+        self.assertEqual(str(pct.cget("fg")), theme.C["text3"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

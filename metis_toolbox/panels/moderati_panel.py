@@ -1,12 +1,13 @@
 """
-panels/moderati_panel.py — Moderati host (Hephaestus + Emanon tabs)
-==================================================================
+panels/moderati_panel.py — Moderati host (vitals, logs, network, secrets, settings, spirit)
+===========================================================================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         Host the system-monitoring tabs and switch between them. Build the
-             tab bar; pack the active tab body; nothing else. No data, no
-             update() — each tab body keeps its own update() and is registered
-             with Kairos individually (see felhaven.py).
+Job:         Host the Moderati tabs and switch between them. Build the tab bar;
+             pack the active tab body; nothing else. No data, no update() — the
+             polled tab bodies (Hephaestus/Aether, Emanon, Argus) keep their own
+             update() and register with Kairos individually; the request-driven
+             ones (Cerberus, Settings, Machine Spirit) don't (see felhaven.py).
 
 Tabs:        HEPHAESTUS     — system vitals (CPU/RAM/DISK + Aether connectivity)
              EMANON         — rolling log watch
@@ -15,16 +16,18 @@ Tabs:        HEPHAESTUS     — system vitals (CPU/RAM/DISK + Aether connectivit
              SETTINGS       — location / unit / clock (Themis)
              MACHINE SPIRIT — Pythia's editable system prompt
 
-Why a host with no update(): Kairos maps worker-name -> [subscribers]; the tab
-bodies register under their existing worker names ("hephaestus", "aether",
-"emanon"), so Kairos drives them directly and this host never sees a tick. Do
-NOT register the host with Kairos — Card (a tk.Frame) has a built-in update()
-that takes no data arg, so a Kairos dispatch would TypeError.
+Why a host with no update(): Kairos maps worker-name -> [subscribers]; the polled
+tab bodies register under their existing worker names ("hephaestus", "aether",
+"emanon", "argus"), so Kairos drives them directly and this host never sees a
+tick. Do NOT register the host with Kairos — Card (a tk.Frame) has a built-in
+update() that takes no data arg, so a Kairos dispatch would TypeError.
+
+V0.02: Audited 2026-07-26 — verified honest against felhaven.py wiring; freshened
+       the stale 2-of-6-tabs header, split the Job into polled vs request-driven
+       tabs, and added "argus" to the polled-worker list. First smoke coverage.
 """
 
-import tkinter as tk
-
-from theme import C, FONTS, Card
+from theme import C, TabHost
 
 from panels.hephaestus_panel import VitalsPanel
 from panels.emanon_panel     import EmanonPanel
@@ -34,8 +37,9 @@ from panels.themis_panel     import ThemisPanel
 from panels.machine_spirit_panel import MachineSpiritPanel
 
 
-class ModeratiPanel(Card):
-    """Thin tab host. Tab bodies are children of self.body and ARE the tabs."""
+class ModeratiPanel(TabHost):
+    """Thin tab host (theme.TabHost). Tab bodies are children of self.body and
+    ARE the tabs."""
 
     def __init__(self, parent):
         super().__init__(parent, "Moderati — vitals, logs, network & settings", C["teal"])
@@ -50,55 +54,13 @@ class ModeratiPanel(Card):
         self.themis     = ThemisPanel(self.body)
         self.machine_spirit = MachineSpiritPanel(self.body)
 
-        # key -> (body widget, accent color for the active underline).
-        # Each deity keeps the card color it had as a standalone panel.
-        self._bodies = {
-            "hephaestus": (self.hephaestus, C["teal"]),
-            "emanon":     (self.emanon,     C["red"]),
-            "argus":      (self.argus,      C["blue"]),
-            "cerberus":   (self.cerberus,   C["purple"]),
-            "themis":     (self.themis,     C["amber"]),
-            "machine_spirit": (self.machine_spirit, C["green"]),
-        }
-
-        # ── Tab bar (loop over (key, label) — add a tab in one line) ─────────
-        tab_row = tk.Frame(self.body, bg=C["card"])
-        tab_row.pack(fill="x", pady=(6, 0))
-
-        self._tabs:  dict[str, tk.Label] = {}
-        self._lines: dict[str, tk.Frame] = {}
-        for key, text in (("hephaestus", "HEPHAESTUS"), ("emanon", "EMANON"),
-                          ("argus", "ARGUS"), ("cerberus", "CERBERUS"),
-                          ("themis", "SETTINGS"), ("machine_spirit", "MACHINE SPIRIT")):
-            wrap = tk.Frame(tab_row, bg=C["card"])
-            wrap.pack(side="left", padx=(0, 14))
-            lbl = tk.Label(wrap, text=text, font=FONTS["card_header"],
-                           fg=C["text3"], bg=C["card"], cursor="hand2")
-            lbl.pack()
-            line = tk.Frame(wrap, height=1, bg=C["border"])
-            line.pack(fill="x")
-            lbl.bind("<Button-1>", lambda e, k=key: self._show_tab(k))
-            self._tabs[key]  = lbl
-            self._lines[key] = line
-
-        # ── Activate the default tab (HEPHAESTUS) ────────────────────────────
-        # Bodies are constructed but unpacked; _show_tab packs the active one
-        # BELOW tab_row (tab_row was packed first), so the bar stays on top.
-        self._active = None
-        self._show_tab("hephaestus")
-
-    def _show_tab(self, key: str) -> None:
-        if key == self._active:
-            return
-        # Hide the current body and dim its tab (skipped on the first call).
-        if self._active is not None:
-            self._bodies[self._active][0].pack_forget()
-            self._tabs[self._active].config(fg=C["text3"])
-            self._lines[self._active].config(bg=C["border"])
-
-        # Show the chosen body and light its tab.
-        body, accent = self._bodies[key]
-        body.pack(fill="both", expand=True, pady=(6, 0))
-        self._tabs[key].config(fg=C["text1"])
-        self._lines[key].config(bg=accent)
-        self._active = key
+        # (key, label, body, accent) — each deity keeps the card color it had
+        # as a standalone panel. TabHost builds the bar and activates the first.
+        self._build_tabs([
+            ("hephaestus",     "HEPHAESTUS",     self.hephaestus,     C["teal"]),
+            ("emanon",         "EMANON",         self.emanon,         C["red"]),
+            ("argus",          "ARGUS",          self.argus,          C["blue"]),
+            ("cerberus",       "CERBERUS",       self.cerberus,       C["purple"]),
+            ("themis",         "SETTINGS",       self.themis,         C["amber"]),
+            ("machine_spirit", "MACHINE SPIRIT", self.machine_spirit, C["green"]),
+        ], default="hephaestus")

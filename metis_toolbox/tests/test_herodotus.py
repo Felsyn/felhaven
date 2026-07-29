@@ -12,6 +12,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from tools import herodotus
 
@@ -253,6 +254,39 @@ class TestEditEngine(HerodotusBase):
         after = herodotus.read_document("fm.md")["content"]
         self.assertNotIn(new_stamp, after)
         self.assertIn("updated: ", after)
+
+
+class TestIOErrorsAreCleanSlugs(HerodotusBase):
+    """§2: an OSError's message carries the absolute archive path, and the error
+    dict feeds straight into the LLM context — so only the class name may
+    travel, never the message. (The session-2 guard amendment caught these.)"""
+
+    def test_read_failure_reports_class_not_path(self) -> None:
+        herodotus.write_document("real.md", "body")
+        leaky = "[Errno 13] Permission denied: '/home/u/herodotus_archive/real.md'"
+        with mock.patch("pathlib.Path.read_text",
+                        side_effect=PermissionError(leaky)):
+            result = herodotus.read_document("real.md")
+        self.assertEqual(result["error"], "read_failed: PermissionError")
+        self.assertNotIn("herodotus_archive", result["error"])  # path gone
+        self.assertNotIn("Permission denied", result["error"])  # message gone
+
+    def test_list_failure_reports_class_not_path(self) -> None:
+        leaky = "[Errno 13] Permission denied: '/home/u/herodotus_archive'"
+        with mock.patch("pathlib.Path.iterdir",
+                        side_effect=PermissionError(leaky)):
+            result = herodotus.list_documents()
+        self.assertEqual(result["error"], "list_failed: PermissionError")
+        self.assertNotIn("herodotus_archive", result["error"])
+
+    def test_search_survives_a_dir_walk_error(self) -> None:
+        # Before the audit search_documents did not guard its iterdir: a
+        # permission error or a mid-scan delete RAISED, breaking the "never
+        # raises" contract list_documents already honored. Now it degrades.
+        with mock.patch("pathlib.Path.iterdir",
+                        side_effect=PermissionError("denied")):
+            result = herodotus.search_documents("anything")
+        self.assertEqual(result["error"], "search_failed: PermissionError")
 
 
 class TestToolExport(HerodotusBase):

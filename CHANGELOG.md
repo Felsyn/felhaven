@@ -14,6 +14,154 @@ New here? Start with [`README.md`](README.md) for what Felhaven is,
 [`SETUP.md`](SETUP.md) to run it, and [`CONVENTIONS.md`](CONVENTIONS.md) for how
 the code is put together.
 
+- `2026-07-29` — `panels/home_panel.py`: `self._history` now stores each turn's full tool_calls/tool-result exchange (not flattened prose), windowed to 3 turns — fixes gemma4:e2b losing tool use after ~3 turns by imitating its own history.
+- `2026-07-29` — `pythia.py`: `ask()`'s stats event gains `turn_messages` (this call's own user/assistant/tool messages) so callers can persist the real tool exchange as history, not just the final answer text.
+- `2026-07-29` — `harmonia.py`: `play()` now flattens incoming PCM to 1D mono, fixing silent Orpheus briefings — its 2D `(frames, 1)` decode broke the callback's 1D assignment (shape mismatch → silence); `tests/test_harmonia.py` gains coverage.
+- `2026-07-26` — `harmonia.py`: now owns one persistent `sd.OutputStream` with a callback-pulled buffer; barge-in is a buffer flush, fixing the cross-thread `sd.play()`/`sd.stop()` race that silently crashed the app during narration.
+- `2026-07-26` — `tools/dev_build_hypatia_catalog.py` audited + tagged `V0.02` (session 30 — the walkthrough finale; all 30 sessions / 60 source modules now audited): verified honest — write paths + emitted schema match hypatia's readers, atomic writes, no dead code.
+- `2026-07-26` — `tools/dev_build_hypatia_catalog.py`: docstring completed — added the missing `Upstream:`/`Downstream:` fields and the used `io`/`logging` to `Requires:`. No code change; the generator was already correct.
+- `2026-07-26` — `tests/test_dev_build_hypatia_catalog.py`: new — first (hermetic, no-network) coverage of the builders: mag cutoff, HIP dedup, RA hours→degrees, referential-integrity pull-in, polyline→pairs + IAU naming, atomic write.
+- `2026-07-26` — `theme.py` + `metis_logging.py` audited (session 29, Tier 8): both tagged `V0.02`; verified honest, first tests added.
+- `2026-07-26` — `theme.py`: extracted `TabHost(Card)` and `themed_menu`/`popup_menu` — each had been copy-pasted 3× (the three tab hosts; the home/echo/emanon right-click menus), now single-sourced and the six panels rewired.
+- `2026-07-26` — `theme.py`: corrected the `Upstream` field and `rescale_fonts` docstring off the retired standalone-Scribe window (Scribe is persistence-only since session 23) — the live callers are felhaven + sphynx_panel.
+- `2026-07-26` — `metis_logging.py`: dropped an unused `import os`; added the used `sys` to the `Requires:` line. DELIM/LOG_DIR stay independently re-derived by emanon per §5 (kept two copies by choice, not collapsed).
+- `2026-07-26` — CONVENTIONS §5 + §12: removed the "`scribe.py` logs save errors via `print()`" drift notes — session 23 already moved that to `log.warning` (`scribe.py:103`).
+- `2026-07-26` — `tests/test_theme.py` + `tests/test_metis_logging.py`: new — first coverage (font lifecycle, Card/TabHost/PhosphorScroll, menu seams; the delimited log format, the idempotency guard, degrade paths).
+- `2026-07-26` — The three tab hosts audited (session 28, Tier 8): `panels/moderati_panel.py`, `panels/cogitator_panel.py`, `panels/vox_array_panel.py` tagged `V0.02`; verified honest, no dead code.
+- `2026-07-26` — `panels/moderati_panel.py`: stale docstring freshened — the header named 2 of 6 tabs and the polled-worker list omitted "argus"; the Job now splits polled vs request-driven tabs.
+- `2026-07-26` — `tests/test_moderati_panel_smoke.py` + `tests/test_cogitator_panel_smoke.py`: new — first coverage for the two tab hosts (builds, default tab, tab-switch; Moderati's Kairos children still tick when hidden).
+- `2026-07-26` — `panels/home_panel.py`: the latency-masking filler `after()` is now epoch/cancel-guarded — a Stop or Refresh during the filler delay suppresses it, instead of blipping a filler in after the user silenced narration.
+- `2026-07-26` — `panels/narrator_panel.py`: docstring wording fixed — the narration lamp is Hestia's command-bar toggle, not an app "header" lamp (it was relocated into HestiaBar's control row).
+- `2026-07-26` — Home / Hestia / Narrator panels audited (session 27, Tier 8 — the Pythia-chat + Calliope-narration UI): `panels/home_panel.py`, `panels/hestia_panel.py`, `panels/narrator_panel.py` tagged `V0.02`; verified honest, no dead code.
+- `2026-07-26` — CONVENTIONS §6: `HomePanel`'s `pythia.ask` worker thread + persistent `after()`-poll added to the documented threading exceptions — the forward-reference standing since walkthrough session 6.
+- `2026-07-26` — CONVENTIONS §6 narrowed: a single one-shot `after()` for transient UI feedback is no longer a panel deviation (threads + polling/timing loops still are; see §12). Retires the session-17 MorpheusPanel one-shot-timer flag.
+- `2026-07-26` — `tests/test_narrator_panel_smoke.py`: new — first dedicated coverage for `NarratorLamp` (click flips Calliope's auto-speak flag; lit/dim `draw_speaker` states) and the redraw-safe `draw_speaker` seam.
+- `2026-07-25` — Felhaven + Sidebar audited (session 26, Tier 8 — the app shell): `felhaven.py` + `panels/sidebar.py` tagged `V0.02`; verified honest — no dead code, felhaven's root `after()` is the shell's own debounce (outside §6's panel rule).
+- `2026-07-25` — `panels/sidebar.py`: added a header docstring (the module had none), documenting the Kairos-fed "aura" row whose subtitle carries the live temperature.
+- `2026-07-25` — `tests/test_sidebar_smoke.py` + `tests/test_felhaven.py`: new — first coverage for the sidebar (aura-row °F/°C + None-degrade, set_active, rescale, click-wiring) and felhaven's `_ClockCluster` (12h/24h rendering).
+- `2026-07-25` — Kairos audited (session 25, Tier 8 — infrastructure & shell): `kairos.py` tagged `V0.02`; verified honest — exhaustive coverage (registry/drain/scheduling/pile-up/refetch), no dead code, solo (no panel).
+- `2026-07-25` — `kairos.py`: tightened the thread-safety docstring to §6's precise worker↔main-thread wording — the absolute "no other cross-thread access" overclaimed vs Midas's pool over Cerberus's lock-guarded ledger (§12).
+- `2026-07-25` — `kairos.py`: added the house-style `Upstream`/`Downstream`/`Requires` header fields (the metis_logging precedent) and a registry-resolution `__main__` probe.
+- `2026-07-25` — Themis audited (session 24, last of persistence & settings): `themis.py` + `panels/themis_panel.py` tagged `V0.02`; verified honest — never-raise `load()`, strict atomic `save()`, panel §6-clean; coverage already thorough.
+- `2026-07-25` — `themis.py`: deleted the unused `weather_location()` getter — zero callers (`weather_query()` supersedes it for aura; the panel reads the whole `load()` dict), so it was dead code.
+- `2026-07-25` — Scribe audited (session 23, persistence & settings): `scribe.py` + `panels/scribe_panel.py` tagged `V0.02`; deleted scribe's unused task/notes tool interface — the panel owns all mutation, so those functions were dead code.
+- `2026-07-25` — `scribe.py`: `save_data` now writes atomically (tempfile + `os.replace`, §9) so a crash can't truncate `scribe_data.json`; `print` → metis_logging; `load_data` guards non-dict roots and backfills the tasks/notes keys the panel indexes.
+- `2026-07-25` — `tests/test_scribe.py`: new — first coverage for scribe (missing/garbled/non-object/partial file → clean default, save round-trip, a failed commit leaves the original intact, never-raise on write error).
+- `2026-07-25` — Hephaestus audited (session 22): `tools/hephaestus.py` tagged `V0.02` and `panels/hephaestus_panel.py`'s `VitalsPanel`/`BarMeter` class-tagged; fetch/handle split verified honest, `Requires` line completed.
+- `2026-07-25` — `tests/test_hephaestus_panel_smoke.py`: new — first Tk coverage for `VitalsPanel` (construct, None→"unavailable", data drives the bars) and `BarMeter.set()` clamp/format (0–100, "<1%").
+- `2026-07-25` — Argus `handle()` now ranks ESTABLISHED connections first before the top-8 slim, so the LLM's `top_connections` sample isn't dominated by TIME_WAIT teardown noise (no per-connection metric exists on Windows to rank by).
+- `2026-07-25` — Argus timeline dedup key dropped `status`: a socket's ESTABLISHED→TIME_WAIT teardown no longer emits a phantom close+open pair — only genuinely new and genuinely closed connections are recorded.
+- `2026-07-25` — Argus audited (session 21, system watchers): `tools/argus.py` + `panels/argus_panel.py` tagged `V0.02`; contract honest — fetch() raises only on a wholesale net_connections() failure, handle() never-raises to a slug; no dead code.
+- `2026-07-25` — `tests/test_argus.py`: added handle()/fetch() §2 contract tests — handle() slims the snapshot and degrades to `network_unavailable` (never raises); fetch() raises on a wholesale net_connections() failure.
+- `2026-07-25` — Deleted `tools/argus_peek.py`, the hand-run reverse-DNS seed that `tools/argus.py` superseded; no importer, test, or wiring referenced it (session 21).
+- `2026-07-25` — Helios + Selene audited (session 20, last of sky & weather): `helios.py`, `selene.py`, and their `aura_panel.py` widgets tagged `V0.02` — tag-only; both pure interpreters verified never-raise, coverage already thorough.
+- `2026-07-25` — Aura audited (walkthrough session 19, sky & weather): `aura.py` tagged `V0.02` and `panels/aura_panel.py`'s `WeatherPanel` class-tagged (Helios/Selene widgets in that file stay Session 20); contracts verified honest.
+- `2026-07-25` — `tests/test_aura_contract.py`: new — pins Aura's §2 surface by mocking `requests.get`: `handle()` degrades to `weather_timeout`/`weather_offline`/`weather_unavailable` and never raises, `fetch()` raises.
+- `2026-07-25` — Hypatia + Kepler audited (walkthrough session 18, sky & weather): `hypatia.py`, `kepler.py`, `hypatia_panel.py` tagged `V0.02`; contracts verified honest, `ConditionsWidget` confirmed safe against aura's typed weather fields.
+- `2026-07-25` — `hypatia.py`/`kepler.py`/`hypatia_panel.py`: promoted `_compass` to public `hypatia.compass` and deleted the two duplicate copies (kepler's demo, the panel's) — one source, so the LLM digest and on-screen directions can't diverge.
+- `2026-07-25` — `kepler.py`: `Downstream` docstring corrected from "none" to name `hypatia` (it reuses `_altaz`/`_julian_date`/`compass` — the circular-import half §12 documents).
+- `2026-07-25` — Morpheus audited (walkthrough session 17, last of the audio chain): `morpheus.py` + `morpheus_panel.py` tagged `V0.02`; never-raise verified across fetch/mutations/search/play_music/resume_music.
+- `2026-07-25` — `morpheus.py`: `search()`'s `"search failed"` ×3 → `"search_failed"` (§2 slug) — it was the last entry, so `test_tool_output_contract.py`'s `_EXPECTED_VIOLATIONS` allowlist is now EMPTY.
+- `2026-07-25` — `morpheus.py`: removed dead `_get_prop()` (superseded by the batched `_get_props()`, zero callers); fixed the harmonia-caller docstring (runs on the caller's thread, not a "background play thread") and the playlist path (config/).
+- `2026-07-25` — Orpheus audited (walkthrough session 16): `orpheus.py` + `orpheus_panel.py` tagged `V0.02` — never-raise verified across fetch/play_file/stop, error slugs already conformant (never in the output-contract allowlist).
+- `2026-07-25` — `orpheus.py`: `fetch()`'s missing-ffmpeg slug renamed `no_ffmpeg` → `ffmpeg_unavailable`, matching `play_file()` and Echo — one vocabulary for one condition (§2); the two test fixtures updated in lockstep.
+- `2026-07-25` — `orpheus.py`: corrected the out-of-LLM-scope docstring — Orpheus is the §2 "Polled status + UI-driven mutations" hybrid (it has a Kairos fetch), not Echo's no-fetch "Local-only / plain functions" shape.
+- `2026-07-25` — Echo audited (walkthrough session 15, the audio chain): `echo.py` and `echo_panel.py` tagged `V0.02` — never-raise contract verified, error slugs already conformant (never in the output-contract allowlist).
+- `2026-07-25` — `echo_panel.py`: reads `echo.available()` at build time and disables the tab with a placeholder when ffmpeg is absent (§7, OrpheusPanel precedent) — `available()` was documented as the gate but had no caller.
+- `2026-07-25` — `echo.py`: dropped `SAMPLE_RATE` from the reused-seam docstring list — Echo reuses `synthesize`/`take_chunk`/`save_wav` but never references `SAMPLE_RATE` (save_wav owns it internally).
+- `2026-07-25` — `CONVENTIONS.md` §6: named `EchoPanel`'s daemon conversion thread + bounded `after()` drain chain among the documented threading exceptions (`home_panel.py`'s same shape deferred to session 27).
+- `2026-07-25` — `tests/test_vox_array_panel_smoke.py`: force Echo's disabled path in the host test and its enabled path in the dedicated test, plus a disabled-when-ffmpeg-missing assertion; `tests/test_echo.py` now covers `available()`.
+- `2026-07-25` — `harmonia.py`: live-narration stutter fixed — `_play_pcm` opens the output at `latency="high"` (deep buffer) so the audio callback survives CPU contention (kokoro + LLM + playback on 6 cores) that was underrunning it mid-word.
+- `2026-07-24` — Calliope + Harmonia audited (walkthrough session 14, the audio chain): `calliope.py` and `harmonia.py` tagged `V0.02` — verified honest; neither is a brain tool, so neither was in the output-contract allowlist.
+- `2026-07-24` — `harmonia.py`: corrected the stale "Yielding Morpheus" docstring note — morpheus.py now documents the harmonia caller, and morpheus.stop() runs in play() on the caller's thread, not the harmonia-play worker.
+- `2026-07-24` — Callimachus audited (walkthrough session 13): `callimachus.py` tagged `V0.02`; removed from the `test_tool_output_contract.py` allowlist.
+- `2026-07-24` — `callimachus.py`: `search_failed`/`fetch_failed` error dicts now surface `type(exc).__name__` only — covering the guard-flagged bare `{exc}` and the two `{exc.reason}` (a foreign socket/OS message) the guard can't see.
+- `2026-07-24` — `tests/test_callimachus.py`: added regressions that a `URLError.reason` and a locked-vault `VaultError` surface the exception class only, never the raw message, into the LLM context.
+- `2026-07-24` — Herodotus audited (walkthrough session 12): `herodotus.py` tagged `V0.02`; removed from the `test_tool_output_contract.py` allowlist.
+- `2026-07-24` — `herodotus.py`: `read_failed`/`write_failed`/`list_failed` error dicts now surface `type(exc).__name__` only, not the caught `OSError` message that carried the absolute archive path into the LLM context (§2).
+- `2026-07-24` — `herodotus.py`: `search_documents` now guards its directory walk with the same `OSError` handler `list_documents` had (returns `search_failed: <class>`), closing a hole in its "never raises" contract.
+- `2026-07-24` — `tests/test_herodotus.py`: added regressions that a read/list I/O error surfaces the exception class only, never the path, and that a dir-walk error degrades search instead of raising.
+- `2026-07-24` — Machine Spirit audited (walkthrough session 11): `machine_spirit.py` and `machine_spirit_panel.py` tagged `V0.02` — verified honest, no code change needed.
+- `2026-07-24` — Pythia audited (walkthrough session 10): `pythia.py` tagged `V0.02`; removed from the `test_tool_output_contract.py` allowlist.
+- `2026-07-24` — `pythia.py`: dispatcher error returns normalized to §2 slugs (`unknown_tool` / `tool_failed`); the caught exception's raw message no longer reaches the LLM context — only its class name does.
+- `2026-07-24` — `pythia.py`: `ask()`'s catch-all now prints only the exception class name to the transcript, not the raw message (which could carry a path or key onto the screen, §2); the message stays in the log.
+- `2026-07-24` — `pythia.py`: dropped the stale "Mirrors the toolbox dispatcher" reference in `_dispatch` (that voice-side dispatcher was retired with voice input).
+- `2026-07-24` — `tests/test_pythia.py`: added a tool-failure and a catch-all regression asserting the exception message never rides into the returned dict or the transcript.
+- `2026-07-24` — Sphynx audited (walkthrough session 9): `sphynx.py` and `sphynx_panel.py` tagged `V0.02`.
+- `2026-07-24` — `sphynx.py`: `Contract:` now documents the public `is_disabled()`/`riddle()`/`create()` (previously undocumented), and the stale "no persistence" / preflight-"fail closed" lines are corrected.
+- `2026-07-24` — `sphynx.py`: added a read-only `__main__` status block (§3.7) reporting the gate state without touching the attempt counter or the file.
+- `2026-07-24` — `sphynx_panel.py`: dropped the baked-in "v1.0" from the boot litany — an unmaintained version string in the UI (the retired `(FOE v.01)` scar).
+- `2026-07-24` — New coverage in `tests/test_sphynx_panel_smoke.py` — construction, the three `_start` boot branches, first-run create/mismatch, and gate verify, all with `subprocess.Popen` patched so no test spawns felhaven.
+- `2026-07-24` — Cerberus audited (walkthrough session 8): `cerberus.py` and `panels/cerberus_panel.py` tagged `V0.02`.
+- `2026-07-24` — `cerberus.py`: the Ledger's load-modify-write is now guarded by `_LEDGER_LOCK` and written atomically — a non-atomic truncate+rewrite was corrupting `cerberus_ledger.json` under Midas's 5-thread fetch pool.
+- `2026-07-24` — `cerberus.py`: Vault and PIN-hash files now write through one shared atomic writer (`_atomic_write_json`, tempfile + `os.replace`); the Vault write was the last non-atomic one.
+- `2026-07-24` — `panels/cerberus_panel.py`: removed the unused `_NO_WINDOW` constant (defined, never referenced; the only Windows open-path uses `os.startfile`).
+- `2026-07-24` — `CONVENTIONS.md` §12: recorded that the Cerberus Ledger is thread-shared state (Midas's pool + the panel) guarded by its own lock + atomic writes.
+- `2026-07-24` — New coverage in `tests/test_cerberus.py` — `TestLedgerConcurrency` hammers `_ledger_add_read` from 8 threads and asserts the file stays valid JSON with no lost count bumps.
+- `2026-07-24` — Midas + Plutus audited (walkthrough session 7): `tools/midas.py`, `tools/plutus.py`, and `panels/midas_panel.py` tagged `V0.02`.
+- `2026-07-24` — `tools/midas.py`: `_fetch_one` no longer logs the raw exception — the Finnhub key was leaking into `logs/*.log` through the request URL's `?token=`; it now logs the exception class + HTTP status only.
+- `2026-07-24` — `tools/midas.py`: `fetch()` no longer raises for an all-`vault_locked` result (the normal sealed-vault state, which fired an ERROR every 60 s); genuine total failures now name the dominant slug (`all tickers failed: no_key`).
+- `2026-07-24` — `tools/midas.py`: removed the unused `ERR_STALE_CACHE` constant and the write-only `_original_error` field.
+- `2026-07-24` — `panels/midas_panel.py`: the five Midas error slugs map to short human text (was a constant `"err"` for all); stale prices are dimmed rather than shown as if current.
+- `2026-07-24` — `CONVENTIONS.md` §12: recorded the Midas locked-vault non-raise deviation and the key-leak fix.
+- `2026-07-24` — New coverage in `tests/test_midas.py` — `fetch()`/`handle()` contract, `query_all()` cache/stale/order, `_fmt_price`, and a regression that the key never reaches the log.
+- `2026-07-24` — New coverage in `tests/test_midas_panel_smoke.py` — error-slug→text mapping, unmapped-slug fallback, and stale-price dimming.
+- `2026-07-24` — Ammit + Horai audited (walkthrough session 6): `tools/ammit.py`, `tools/horai.py`, and `panels/horai_panel.py` tagged `V0.02`; `_EXPECTED_VERSION_VIOLATIONS` is now empty — ammit's `v0.01:` was its last entry.
+- `2026-07-24` — `CONVENTIONS.md` §6 corrected: `AmmitWidget`'s countdown is Kairos-driven (refreshed by `HoraiPanel.update` on horai's 1 s tick), not an `after()` exception — it never held one.
+- `2026-07-24` — `tools/ammit.py`: `fmt()` privatized to `_fmt()` — nothing outside the module called it; the dashboard reads `query_all()["display"]`.
+- `2026-07-24` — `tools/ammit.py`: the `v0.01:` "No alarm. That's next." line replaced by the `V0.02:` audit line — no alarm was ever added.
+- `2026-07-24` — `tools/horai.py` header gained `Source:` and `Requires:` fields (completing the standard field set).
+- `2026-07-24` — `tests/test_tool_output_contract.py` gained `test_version_allowlist_has_no_stale_entries`, mirroring the slug allowlist's stale guard.
+- `2026-07-24` — New `tests/test_ammit.py` — first coverage: `_fmt` definitional cases, start/stop/reset, expiry freeze-at-zero, `handle()` slot clamp + never-raise on a corrupt state file.
+- `2026-07-24` — New `tests/test_horai_panel_smoke.py` — `HoraiPanel` + embedded `AmmitWidget` across construct, `None` stale-tick, badge update, and running-timer refresh.
+- `2026-07-24` — `README_PANTHEON/ammit.md` `Test:` line repointed from `tests.test_tool_handles` (which never exercised ammit) to `tests.test_ammit`.
+- `2026-07-24` — Aether audited (walkthrough session 5): `tools/aether.py` + `AetherWidget` (in `panels/hephaestus_panel.py`) tagged `V0.02`; the widget tag is scoped to the class since the file's `VitalsPanel`/`BarMeter` are session 22.
+- `2026-07-24` — Aether's header docstring gained `Source:` / `Upstream:` / `Downstream:` fields (the last polled tool without them, after pheme).
+- `2026-07-24` — New `tests/test_aether.py` — the netsh WiFi line parser, the Statuspage indicator→state mapping through the real path, and the never-raise contract of `handle()`/`fetch()`.
+- `2026-07-24` — New `tests/test_aether_widget_smoke.py` — `AetherWidget` across every WiFi/API state plus the `None` stale-tick fallback.
+- `2026-07-24` — `README_PANTHEON/aether.md` `Test:` line repointed from `tests.test_tool_handles` (which never exercised aether) to the two new suites.
+- `2026-07-24` — Emanon `fetch()` folds consecutive repeating log lines into one `count` entry, wildcarding digit runs so a jittering duration/offset still matches; severity counts still tally every occurrence.
+- `2026-07-24` — `emanon_panel` events area rebuilt as a read-only word-wrapped `tk.Text` + `PhosphorScroll`: long lines wrap and show in full instead of truncating at 48 chars behind a hover tooltip.
+- `2026-07-24` — `emanon_panel` gained the standard right-click Copy / Select All / Copy all menu (the `home_panel` transcript precedent), so log lines can be selected and pasted to an AI.
+- `2026-07-24` — Deleted `emanon_panel._Tooltip`, `_build_event_row`, `_level_color`, and the `_MSG_MAX`/`_MAX_ROWS` truncation constants — superseded by the wrapped Text.
+- `2026-07-24` — Emanon audited (walkthrough session 4): `tools/emanon.py` + `panels/emanon_panel.py` tagged `V0.02`.
+- `2026-07-24` — Deleted Emanon's unused `deque` and `json` imports; `Requires:` now reads `pathlib, logging`.
+- `2026-07-24` — New `tests/test_emanon.py` — the CONVENTIONS §5 delimiter lockstep with `metis_logging` is now enforced by a test, plus the verdict, the tail read, and the never-raise net.
+- `2026-07-24` — New `tests/test_emanon_panel_smoke.py` — the rolling tail, the verdict dot, and the one-shot "failed" blink state machine.
+- `2026-07-24` — `README_PANTHEON/emanon.md` `Test:` line now points at the two new suites instead of "no dedicated suite".
+- `2026-07-23` — Eudoxus audited (walkthrough session 3): `tools/eudoxus.py` + `panels/eudoxus_panel.py` tagged `V0.02`.
+- `2026-07-23` — Eudoxus's error sentences became §2 slugs (`unknown_unit: X`, `incompatible_units: X`, `missing_separator`, `missing_source_unit`, `conversion_failed: X`).
+- `2026-07-23` — Eudoxus no longer logs raw `str(exc)` on the unexpected-failure path — it logs the class name, matching the returned slug.
+- `2026-07-23` — Deleted `eudoxus._format_number`, a hand-synced copy of Zeno's; Eudoxus now imports the public `zeno.format_number` (the kepler→hypatia precedent).
+- `2026-07-23` — Fixed: `eudoxus.convert` split on the first `" in "`, so `"3 in in cm"` lost its source unit; it now `rsplit`s, since "in" is a unit too.
+- `2026-07-23` — `eudoxus_panel` gained an `_ERROR_TEXT` map (the `echo_panel` pattern plus a slug/detail split); error codes no longer render raw at the user.
+- `2026-07-23` — Fixed: `eudoxus_panel` compared the entry against its example text, so typing `"10 mi to km"` by hand did nothing; it now tracks a placeholder flag.
+- `2026-07-23` — Fixed: after a failed conversion `eudoxus_panel` hid the last successful result — it was in neither the current row nor the history strip.
+- `2026-07-23` — New `tests/test_eudoxus.py` and `tests/test_eudoxus_panel_smoke.py` — first coverage: definitional unit ratios, the parser, every error path, the error map.
+- `2026-07-23` — `README_PANTHEON/eudoxus.md` pointed at `tests.test_tool_handles`, which never tested Eudoxus.
+- `2026-07-23` — Pheme audited (walkthrough session 2): `tools/pheme.py` + `panels/pheme_panel.py` tagged `V0.02`.
+- `2026-07-23` — Pheme's per-feed failures became §2 slugs (`http_error: <status>`, `feed_timeout`, `network_error`, `invalid_feed_xml`, `fetch_failed: <class>`) — no more raw `str(e)`.
+- `2026-07-23` — Pheme's `handle()` failures are now §2 errors (`config_unreadable`, `unknown_feed`, `all_feeds_failed`) instead of a `{"stories": []}` that masked outages as quiet news days.
+- `2026-07-23` — Fixed: `pheme._story` computed the domain from the unstripped URL, so a feed link with stray whitespace grew a trailing-space domain.
+- `2026-07-23` — `pheme_panel` gained an `_ERROR_TEXT` map (the `echo_panel` pattern plus a slug/detail split); feed error codes no longer render raw at the user.
+- `2026-07-23` — `tools/pheme.py` gained the `Source:`/`Upstream:`/`Downstream:` header fields — it was the only tool missing them.
+- `2026-07-23` — New `tests/test_pheme.py` and `tests/test_pheme_panel_smoke.py` — first coverage: captured-real feed fixtures, every error path, the interleave, and the error map lockstep.
+- `2026-07-23` — The output guard now rejects `f"slug: {exc}"` — a literal head no longer excuses splicing the caught exception in (§12); it immediately caught `herodotus` leaking `OSError` paths.
+- `2026-07-23` — Zeno audited (walkthrough session 1): `tools/zeno.py` + `panels/zeno_panel.py` tagged `V0.02`.
+- `2026-07-23` — Zeno's twelve error sentences became ten §2 slugs, raised as private exceptions so each identifier is a literal in `handle()`.
+- `2026-07-23` — Zeno no longer returns a math function's own `str(exc)` — `sqrt(-1)` reports `math_domain_error`.
+- `2026-07-23` — Zeno's reduction cap moved from a literal `500` into `_MAX_REDUCTIONS`; running out now reports `evaluation_stalled`.
+- `2026-07-23` — `zeno._format_number` became public `zeno.format_number`; `zeno_panel` no longer reaches into a tool's private.
+- `2026-07-23` — `zeno_panel` gained an `_ERROR_TEXT` map (the `echo_panel` pattern plus a slug/detail split); error codes no longer render raw at the user.
+- `2026-07-23` — Fixed: after a failed evaluation `zeno_panel` hid the last successful result — it was in neither the current row nor the history strip.
+- `2026-07-23` — New `tests/test_zeno.py` and `tests/test_zeno_panel_smoke.py` — first coverage for the AST whitelist, the magnitude guards, and the error map.
+- `2026-07-23` — `README_PANTHEON/zeno.md` pointed at `tests.test_tool_handles`, which never tested Zeno.
+- `2026-07-21` — CONVENTIONS §2 gained the error vocabulary: every `{"error": ...}` is a snake_case slug, optionally `slug: human detail`.
+- `2026-07-21` — CONVENTIONS §3 gained the `V0.02:` audit marker — the only version a file names, applied to a tool and its panel together.
+- `2026-07-21` — New `tests/test_tool_output_contract.py` — AST-based error-identifier guard; 20 sites across 5 modules sit in an allowlist that empties as each is audited.
+- `2026-07-21` — New `tests/test_changelog_format.py` — enforces one line per change, newest first, under a 250-char cap.
+- `2026-07-21` — CHANGELOG trimmed to one line per change: 63 prose entries → 135 one-liners, 15,391 → 2,274 words.
+- `2026-07-21` — CONVENTIONS §12 is now the only home for a decision's reasoning; its header no longer points at the changelog.
 - `2026-07-21` — Default coordinates moved to Royal Observatory, Greenwich (51.4779, 0.0).
 - `2026-07-21` — Coordinates swept out of `hypatia.py`, `aura.py`'s docstring, two tests, and `tests/fixtures/wttr_j1.json`.
 - `2026-07-21` — `.github/workflows/ci.yml` given a top-level `permissions: contents: read`.

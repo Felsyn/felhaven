@@ -20,7 +20,11 @@ Contract:    Diagnoses, never treats. Borrowed wholesale from Hygieia:
 
 Data source: logs/*.log, written by metis_logging.py. Each line is
              ` | `-delimited: timestamp | level | logger | message
-             Emanon parses by splitting on " | " — no regex.
+             Emanon parses by splitting on " | " — no regex. Consecutive
+             repeating lines (same level/logger/message, with digit runs in the
+             message ignored so a changing duration/offset still matches) are
+             folded into one entry with a count, so a fast-repeating error
+             doesn't bury the tail.
 
 Status verdict (Hygieia's precedence, collapsed for one sidebar dot):
              failed   — an ERROR/CRITICAL line in the recent window
@@ -35,11 +39,18 @@ Polling:     NONE. Kairos owns the clock. fetch() is called on each tick
 Upstream:    metis_logging.py (writes the files), kairos.py (calls fetch)
 Downstream:  panels/emanon_panel.py (display surface)
 
-Requires:    stdlib only (pathlib, collections)
+Requires:    stdlib only (pathlib, logging)
+
+V0.02:       Audited 2026-07-24 — removed the unused deque and json imports; the
+             " | " delimiter's required match with metis_logging._DELIM
+             (CONVENTIONS §5) is now enforced by a test, not only a comment;
+             first test coverage (tests/test_emanon.py); fetch() now folds
+             consecutive repeating lines (digit runs in the message ignored)
+             into one entry with a count.
 """
 
 import logging
-from collections import deque
+import re
 from pathlib import Path
 from typing import Any
 
@@ -125,6 +136,50 @@ def _verdict(entries: list[dict[str, Any]]) -> str:
     return "degraded" if has_warn else "nominal"
 
 
+# Digit runs are wildcarded in the fold key so a line whose text embeds a
+# changing number still folds — e.g. midas "…failed after 0.01s / 0.00s / 0.02s"
+# or cerberus "…(char 0) / (char 167)". Only the KEY is normalized; the row on
+# screen keeps the real, latest message. Trade-off: two errors that differ ONLY
+# by a number fold together (the count still says it recurred).
+_DIGITS = re.compile(r"\d+")
+
+
+def _dedup_key(entry: dict[str, Any]) -> tuple[str, str, str]:
+    """The identity two adjacent lines must share to fold: same level, same
+    logger, same message once its digit runs are blanked."""
+    return (entry["level"], entry["logger"], _DIGITS.sub("#", entry["message"]))
+
+
+def _collapse_consecutive(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse runs of the same log line into one row, with a count.
+
+    Two entries are "the same issue" when their _dedup_key matches — level,
+    logger, and message-with-digits-wildcarded — so an error firing every tick
+    (with a jittering duration or offset in its text) still folds. Only
+    *consecutive* matches merge, so the chronology is preserved (A, B, A stays
+    three rows, not two). The kept row carries the newest timestamp / raw /
+    message of its run and a "count" of how many lines it stands for. Every
+    returned entry has a "count" (singletons = 1) for a uniform shape. Input is
+    assumed already sorted by timestamp.
+    """
+    collapsed: list[dict[str, Any]] = []
+    prev_key: tuple[str, str, str] | None = None
+    for entry in entries:
+        key = _dedup_key(entry)
+        if collapsed and key == prev_key:
+            prev = collapsed[-1]
+            prev["count"] += 1
+            prev["ts"] = entry["ts"]          # show the most recent occurrence…
+            prev["raw"] = entry["raw"]
+            prev["message"] = entry["message"]  # …with its real (un-wildcarded) text
+        else:
+            merged = dict(entry)              # copy — never mutate the parsed dict
+            merged["count"] = 1
+            collapsed.append(merged)
+            prev_key = key
+    return collapsed
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def fetch() -> dict[str, Any]:
@@ -137,8 +192,9 @@ def fetch() -> dict[str, Any]:
             "status":        "nominal" | "degraded" | "failed",
             "error_count":   int,   # ERROR/CRITICAL in the window
             "warning_count": int,   # WARNING in the window
-            "entries":       [ {ts, level, logger, message, raw}, ... ],
-                                    # most-recent last, capped at _TAIL_LINES
+            "entries":       [ {ts, level, logger, message, raw, count}, ... ],
+                                    # most-recent last, capped at _TAIL_LINES;
+                                    # count = consecutive identical lines folded
             "files":         [str, ...],   # which log files were read
         }
 
@@ -173,12 +229,14 @@ def fetch() -> dict[str, Any]:
         # so lexical sort == chronological sort. Cheap and correct.
         all_entries.sort(key=lambda e: e["ts"])
 
-        # Count over the full window before trimming for display.
+        # Count over the full window before collapsing — a repeated error is
+        # still N errors, so severity is never hidden by de-duplication.
         error_count   = sum(1 for e in all_entries if e["level"] in _FAIL_LEVELS)
         warning_count = sum(1 for e in all_entries if e["level"] in _WARN_LEVELS)
 
-        # Trim to the most recent N for the panel.
-        recent = all_entries[-_TAIL_LINES:]
+        # Collapse consecutive identical lines (each gains a "count"), then trim
+        # to the most recent N collapsed rows for the panel.
+        recent = _collapse_consecutive(all_entries)[-_TAIL_LINES:]
 
         return {
             "status":        _verdict(recent),
@@ -203,7 +261,6 @@ def fetch() -> dict[str, Any]:
 # ── Standalone test ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import json
     snap = fetch()
     print(f"status={snap['status']}  "
           f"errors={snap['error_count']}  warnings={snap['warning_count']}  "

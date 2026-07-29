@@ -16,7 +16,9 @@ Contract:    ask(message, history=None, on_delta=None, on_event=None,
                  network/LLM failure it returns a short human-readable string
                  instead of raising, so the UI thread can print it verbatim.
                  on_event fires once at the end with a stats payload (tokens,
-                 wall time, tool call/failure counts); cancel is a
+                 wall time, tool call/failure counts, plus turn_messages — the
+                 turn's full message exchange, tool calls and results included,
+                 for the caller to persist as history); cancel is a
                  threading.Event checked mid-stream for cooperative Stop.
              TOOLS / _DISPATCH are built once, at import, by reading each tool
              module's own TOOL_DEFINITION — so the registry can never drift
@@ -44,6 +46,11 @@ Downstream:  tools/{horai,hephaestus,aura,ammit,midas,aether,pheme,zeno,
              the voice-side registry is retired.
 
 Requires:    requests (already in the Felhaven stack). Stdlib otherwise.
+
+V0.02:       Audited 2026-07-24 — the dispatcher's own error returns normalized
+             to §2 slugs (unknown_tool / tool_failed), and no caught exception's
+             raw message now reaches the LLM context or the transcript (only its
+             class name does); "never raises" contract verified, tests added.
 """
 
 import json
@@ -123,18 +130,20 @@ def _ms(start: float, end: Optional[float] = None) -> str:
 # ── Internals ─────────────────────────────────────────────────────────────────
 
 def _dispatch(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Route one tool call to its handler. Mirrors the toolbox dispatcher:
-    forwards arguments as kwargs, calls with none if the model gave none, and
-    turns any handler failure into an error dict so the model can recover
-    rather than the whole turn crashing."""
+    """Route one tool call to its handler: forward the model's arguments as
+    kwargs (call with none if it gave none) and turn any handler failure into
+    an error dict so the model can recover rather than the whole turn crashing.
+    The error identifier is a §2 slug: the caught exception's *message* is kept
+    out of the returned dict (it feeds straight into the LLM context) — only
+    its class name travels, the raw text stays in the log."""
     fn = _DISPATCH.get(tool_name)
     if fn is None:
-        return {"error": f"Unknown tool: {tool_name!r}"}
+        return {"error": f"unknown_tool: {tool_name!r}"}
     try:
         return fn(**arguments) if arguments else fn()
     except Exception as e:                       # a tool bug must not kill the chat
-        log.error(f"Pythia: tool {tool_name!r} raised: {e}")
-        return {"error": f"Tool {tool_name!r} failed: {e}"}
+        log.error(f"Pythia: tool {tool_name!r} raised: {type(e).__name__}: {e}")
+        return {"error": f"tool_failed: {tool_name!r} raised {type(e).__name__}"}
 
 
 def _chat(
@@ -219,9 +228,14 @@ def ask(
     cancel: Optional[threading.Event] = None,
 ) -> str:
     """
-    Answer `message`, using tools as needed. `history` is prior turns as
-    {"role": "user"|"assistant", "content": str} dicts; pass the running
-    conversation to keep context. Returns the final answer text.
+    Answer `message`, using tools as needed. `history` is prior turns —
+    each turn is the flattened list of messages from a prior ask() call's
+    `turn_messages` (see on_event below): a user message, any assistant
+    replies carrying `tool_calls`, the matching `tool` result messages, and
+    the final assistant answer. Plain {"role": "user"|"assistant", "content":
+    str} dicts also work (a caller that hasn't kept tool messages degrades
+    gracefully). Pass the running conversation to keep context. Returns the
+    final answer text.
 
     If `on_delta` is given, it's called with each content token as the model
     streams it (so the UI can render the answer live). It fires on every round,
@@ -231,7 +245,14 @@ def ask(
     If `on_event` is given, it's called exactly once, right before returning,
     with a {"type": "stats", ...} payload summing prompt/output tokens and eval
     time across every round (a tool-using answer runs multiple rounds), plus
-    tool call/failure counts and whether `cancel` fired. Runs on the caller's
+    tool call/failure counts, whether `cancel` fired, and `turn_messages` — this
+    call's own messages (the new user message, every assistant/tool message the
+    tool-calling loop produced, and the final assistant reply), EXCLUDING the
+    system prompt and whatever was passed in as `history`. A caller persisting
+    conversation state should store `turn_messages` as one turn (not just
+    message.content) — that keeps the model's own transcript showing real
+    tool_call → result → answer exchanges instead of flattened prose, which is
+    what a small model reliably imitates on the next call. Runs on the caller's
     (worker) thread like `on_delta`.
 
     If `cancel` is given and gets set mid-answer, the in-flight round stops
@@ -246,6 +267,7 @@ def ask(
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     if history:
         messages.extend(history)
+    n_preamble = len(messages)                   # system + prior history — not this turn's own
     messages.append({"role": "user", "content": message})
 
     prompt_tokens = 0
@@ -266,6 +288,10 @@ def ask(
                 "tools_failed": len(failed_tools),
                 "failed_tools": failed_tools,
                 "cancelled": cancel is not None and cancel.is_set(),
+                # This turn's own messages only (user + every assistant/tool
+                # message the loop produced), for the caller to persist as one
+                # history turn — see the on_event paragraph in ask()'s docstring.
+                "turn_messages": messages[n_preamble:],
             })
         return answer_text
 
@@ -301,16 +327,26 @@ def ask(
                     "content": json.dumps(result),
                 })
         # Ran out of rounds still wanting tools — hand back whatever text we have.
-        return _emit("The oracle got stuck consulting its tools. Try rephrasing.")
+        stuck = "The oracle got stuck consulting its tools. Try rephrasing."
+        messages.append({"role": "assistant", "content": stuck})
+        return _emit(stuck)
     except requests.Timeout:
         log.warning("Pythia: Ollama request timed out.")
-        return _emit("The oracle is slow to answer (LLM timed out). Is the model still loading?")
+        timed_out = "The oracle is slow to answer (LLM timed out). Is the model still loading?"
+        messages.append({"role": "assistant", "content": timed_out})
+        return _emit(timed_out)
     except requests.ConnectionError:
         log.warning("Pythia: could not reach Ollama.")
-        return _emit(f"The oracle is unreachable — no Ollama server at {_BASE_URL}.")
+        unreachable = f"The oracle is unreachable — no Ollama server at {_BASE_URL}."
+        messages.append({"role": "assistant", "content": unreachable})
+        return _emit(unreachable)
     except Exception as e:
-        log.error(f"Pythia: unexpected failure: {e}")
-        return _emit(f"The oracle faltered: {e}")
+        log.error(f"Pythia: unexpected failure: {type(e).__name__}: {e}")
+        # Only the class name reaches the transcript — the raw exception text
+        # could carry a path or key onto the screen (§2). The message is logged.
+        faltered = f"The oracle faltered ({type(e).__name__})."
+        messages.append({"role": "assistant", "content": faltered})
+        return _emit(faltered)
 
 
 # ── Preload ─────────────────────────────────────────────────────────────────

@@ -17,18 +17,47 @@ Contract:    Exposes TOOL_DEFINITION, handle(), and fetch().
                  (config unreadable) so Kairos delivers None to the panel.
 
              _fetch_feed(): never raises — one dead feed yields {"error": ...}
-                 for its id only and cannot poison its siblings.
+                 for its id only and cannot poison its siblings. Per-feed
+                 identifiers (§2 slugs):
+                   http_error: <status>       server answered with an error
+                   feed_timeout               no answer within _HTTP_TIMEOUT
+                   network_error              connection-level failure
+                   invalid_feed_xml           response was not parseable XML
+                   fetch_failed: <ClassName>  anything else — class name only,
+                                              never the message (§2)
 
              handle(feed=None)  (Brain): never raises; returns a flat
                  {"stories": [...]} capped at _MAX_STORIES. The optional `feed`
-                 arg narrows results to a single source.
+                 arg narrows results to a single source. Its own failures are
+                 §2 errors, so the model can tell "no news" from "broken":
+                   config_unreadable          pheme_rumormill.json missing/bad
+                   unknown_feed: <id>         `feed` matches no configured id
+                   all_feeds_failed           every source errored this call
+                   news_failed: <ClassName>   the never-raises safety net
+                 {"stories": []} therefore always means the feeds answered
+                 and were empty — never a masked failure.
 
              Story shape:
                  {"title": str, "url": str, "author": str,
                   "date": str,  "domain": str}     # missing fields are ""
 
+Source:      The feeds configured in config/pheme_rumormill.json (7 as shipped:
+             tech, world, and local news), fetched over HTTP with a per-feed
+             timeout.
+
+Upstream:    kairos.py — the "pheme" worker polls fetch() every 900 s.
+             pythia.py — exposes handle() to the LLM via TOOL_DEFINITION.
+
+Downstream:  panels/pheme_panel.py (display surface; maps the slugs above to
+             human text in its _ERROR_TEXT dict)
+
 Requires:    requests (already in Felhaven stack)
              concurrent.futures, json, html, datetime, xml.etree (stdlib)
+
+V0.02:       Audited 2026-07-23 — error identifiers normalized to §2 slugs
+             (one literal per except arm; no more raw str(e)), handle() failures
+             made distinguishable from an empty news day, docstring gained
+             Source/Upstream/Downstream, first tests added.
 """
 
 import html
@@ -132,9 +161,10 @@ def _short_date(raw: str) -> str:
 
 def _story(title: str, url: str, author: str, date: str) -> dict[str, str]:
     """Assemble the normalized story dict shared by every feed format."""
+    url = url.strip()
     return {
         "title":  html.unescape(title).strip() or "(no title)",
-        "url":    url.strip(),
+        "url":    url,
         "author": _clean_author(html.unescape(author)),
         "date":   date,
         "domain": _domain(url),
@@ -214,10 +244,19 @@ def _parse_atom(root: ET.Element) -> list[dict[str, str]]:
 
 # ── Per-feed fetch ───────────────────────────────────────────────────────────────
 
+# Failure identifiers are inline literals at each dict site, not ERR_*
+# constants, even though there are more than three (vs. §2's recommendation):
+# tests/test_tool_output_contract.py verifies an f-string identifier by its
+# literal head, which a spliced-in constant would hide — and every code below
+# has exactly one site anyway. The zeno "literal at the dict site" precedent,
+# without the exception-class machinery zeno needed (its errors are decided
+# deep in a recursive walk; ours are decided right here at the except arm).
+
 def _fetch_feed(feed: dict[str, Any]) -> dict[str, Any]:
     """
     Fetch and parse one feed. NEVER raises: a failure becomes {"error": str}
     scoped to this feed alone, so a single dead source can't poison siblings.
+    Identifiers are the §2 slugs listed in the header docstring.
     """
     try:
         resp = requests.get(
@@ -235,14 +274,28 @@ def _fetch_feed(feed: dict[str, Any]) -> dict[str, Any]:
 
         return {"stories": stories[:_MAX_STORIES]}
 
+    # Order matters: HTTPError and Timeout both subclass RequestException, and
+    # ParseError must be named before the bare Exception net.
     except requests.HTTPError as e:
-        # Surface the status code so the panel can show "feed unavailable (HTTP 404)".
+        # Surface the status code so the panel can show "HTTP 404".
         status = e.response.status_code if e.response is not None else "?"
         log.warning(f"Pheme: feed {feed.get('id')} HTTP {status}")
-        return {"error": f"HTTP {status}"}
+        return {"error": f"http_error: {status}"}
+    except requests.Timeout:
+        log.warning(f"Pheme: feed {feed.get('id')} timed out")
+        return {"error": "feed_timeout"}
+    except requests.RequestException as e:
+        # The full message stays in the log (not the LLM surface, §2): it
+        # names which network layer refused, which the slug deliberately hides.
+        log.warning(f"Pheme: feed {feed.get('id')} network failure: {e}")
+        return {"error": "network_error"}
+    except ET.ParseError as e:
+        log.warning(f"Pheme: feed {feed.get('id')} sent unparseable XML: {e}")
+        return {"error": "invalid_feed_xml"}
     except Exception as e:
-        log.warning(f"Pheme: feed {feed.get('id')} failed: {e}")
-        return {"error": str(e)}
+        log.warning(f"Pheme: feed {feed.get('id')} failed: "
+                    f"{type(e).__name__}: {e}")
+        return {"error": f"fetch_failed: {type(e).__name__}"}
 
 
 def _fetch_all(feeds: list[dict[str, Any]]) -> dict[str, Any]:
@@ -312,20 +365,33 @@ TOOL_DEFINITION = {
 
 def handle(feed: str | None = None) -> dict[str, Any]:
     """
-    Brain entry point — never raises. Returns a flat {"stories": [...]} capped at
-    _MAX_STORIES. `feed` narrows to a single source; omit for a mix of all.
+    Brain entry point — never raises. Returns a flat {"stories": [...]} capped
+    at _MAX_STORIES; `feed` narrows to a single source, omit for a mix of all.
+    Failures are the §2 errors in the header docstring, so an outage never
+    masquerades as a quiet news day.
     """
     try:
         feeds = _load_config()
+    except Exception as e:
+        log.error(f"Pheme: handle() could not read config: "
+                  f"{type(e).__name__}: {e}")
+        return {"error": "config_unreadable"}
+    try:
         if feed:
             feeds = [f for f in feeds if f["id"] == feed]
+            if not feeds:
+                return {"error": f"unknown_feed: {feed}"}
         results = _fetch_all(feeds)
+        if feeds and all("error" in results[f["id"]] for f in feeds):
+            return {"error": "all_feeds_failed"}
         # Pull per-feed lists in config order; skip feeds that errored.
         per_feed = [results[f["id"]].get("stories", []) for f in feeds]
         return {"stories": _interleave(per_feed)[:_MAX_STORIES]}
     except Exception as e:
-        log.error(f"Pheme: handle() failed: {e}")
-        return {"stories": []}
+        # Nothing in the fan-out is expected to raise (_fetch_feed never
+        # does); this net is the never-raises contract, not a code path.
+        log.error(f"Pheme: handle() failed: {type(e).__name__}: {e}")
+        return {"error": f"news_failed: {type(e).__name__}"}
 
 
 def fetch() -> dict[str, Any]:

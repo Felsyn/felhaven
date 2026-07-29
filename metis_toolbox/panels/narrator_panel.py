@@ -3,10 +3,10 @@ panels/narrator_panel.py — Narration Toggle Lamp
 ================================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         A header lamp for Pythia's narration. Draw a speaker — lit (amber,
-             with sound waves) when auto-speak is on, dim (grey, muted) when off
-             — and flip the toggle on click. Display + one action, no state of
-             its own.
+Job:         A toggle lamp for Pythia's narration, mounted in Hestia's command
+             bar (panels/hestia_panel.py). Draw a speaker — lit (amber, with
+             sound waves) when auto-speak is on, dim (grey, muted) when off — and
+             flip the toggle on click. Display + one action, no state of its own.
 
 State:       calliope's auto-speak flag, the single source of truth. This lamp
              is the flag's ONLY mutator; the home panel merely reads it. So —
@@ -15,8 +15,13 @@ State:       calliope's auto-speak flag, the single source of truth. This lamp
              flipping.
 
 Colors:      theme.C only (no hex literals here).
-Precedent:   Repurposes the retired Metis voice lamp's header slot and lit/dim
-             pattern; the flame became a speaker when voice input was removed.
+Precedent:   Repurposes the retired Metis voice lamp's lit/dim pattern (the flame
+             became a speaker when voice input was removed). That voice lamp sat
+             in the app header; this speaker now lives in HestiaBar's control row.
+
+V0.02: Audited 2026-07-26 — verified honest; NarratorLamp is the sole runtime
+mutator of Calliope's auto-speak flag. First dedicated coverage added
+(tests/test_narrator_panel_smoke.py).
 """
 
 import tkinter as tk

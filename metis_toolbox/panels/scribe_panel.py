@@ -8,6 +8,14 @@ ScribePanel receives `data` (shared dict) and an `on_save` callback; does not
 touch persistence directly. A bare Frame tab body inside CogitatorPanel (the
 SCRIBE tab); the open-count readout that used to sit in the Card header now
 lives in the body.
+
+The panel owns all task/note mutation (add/toggle/delete/edit) directly on the
+shared dict; scribe.py is persistence-only (load_data/save_data). This is the
+single live mutation path — scribe's unused parallel tool interface was deleted
+in the V0.02 audit.
+
+V0.02: Audited 2026-07-25 — no logic change; documented the panel-owns-mutation
+       split after scribe.py's dead tool interface was removed.
 """
 
 import tkinter as tk

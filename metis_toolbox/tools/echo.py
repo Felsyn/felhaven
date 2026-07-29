@@ -26,9 +26,9 @@ Source:      One external binary, zero new pip packages.
                           — the Morpheus precedent. Absent, or present but built
                           without libopus, both degrade to a clean {"error": ...}.
              TTS itself is NOT owned here: Echo calls calliope.synthesize() and
-             reuses calliope.take_chunk() / save_wav() / SAMPLE_RATE, so there is
-             exactly one loaded kokoro model and one WAV writer in the process
-             (see calliope.py "Shared seam").
+             reuses calliope.take_chunk() / save_wav(), so there is exactly one
+             loaded kokoro model and one WAV writer in the process (save_wav owns
+             the sample rate internally — see calliope.py "Shared seam").
 
 Markdown:    Echo eats real .md, so its stripper is deliberately MORE thorough
              than Calliope's defensive character strip:
@@ -61,6 +61,12 @@ Upstream:    panels/echo_panel.py (the paste-and-convert UI); Eos later (an
 Downstream:  calliope.synthesize() (TTS) -> ffmpeg (Opus encode).
 
 Requires:    ffmpeg binary (bin/ or PATH). numpy (via calliope). Stdlib otherwise.
+
+V0.02:       Audited 2026-07-25 — never-raise contract verified, error slugs
+             already conformant (never in the output allowlist). echo_panel now
+             reads available() at build time to disable the tab when ffmpeg is
+             absent (§7); SAMPLE_RATE dropped from the reused-seam list (Echo
+             never references it — save_wav owns it).
 """
 
 import logging

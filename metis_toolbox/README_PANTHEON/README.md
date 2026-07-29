@@ -31,7 +31,7 @@ the module's own docstring, where it cannot drift from the code.
 | [Pheme](pheme.md) | Aggregate headlines from the configured RSS/Atom news feeds. |
 | [Plutus](plutus.md) | Track stock buys and sells; derive shares held and cost invested. |
 | [Pythia](pythia.md) | Answer a question by talking to the local LLM, using toolbox tools for live data. |
-| [Scribe](scribe.md) | Store and manage the to-do list and notes. |
+| [Scribe](scribe.md) | Store the to-do list and notes. |
 | [Selene](selene.md) | Report the moon's phase, illumination, moonrise, and moonset. |
 | [Sphynx](sphynx.md) | Verify a PIN against the stored hash, and track how many attempts remain. |
 | [Themis](themis.md) | Own the per-install user preferences (location, temperature unit, clock format). |

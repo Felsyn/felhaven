@@ -29,6 +29,10 @@ Plutus ledger UI:
     Below:  scrolling record, newest first —
             date · ticker · action · shares · cost-of-this-event
             BUY rows green, SELL rows red.
+
+V0.02:  Audited 2026-07-24 — map the five midas error slugs to short human text
+        (was a constant "err" for every one), and dim stale prices instead of
+        showing a stale value as if it were current.
 """
 
 import tkinter as tk
@@ -38,6 +42,18 @@ from theme import C, FONTS, Card, PhosphorScroll
 
 import cerberus
 from tools import midas, plutus
+
+
+# Midas hands the panel a slug when a ticker can't be priced; §2 says the panel
+# maps it to human text, never renders it raw. Kept terse to fit the narrow pct
+# column. An unmapped slug falls back to itself, so a new code is surfaced
+# rather than swallowed (the echo_panel._ERROR_TEXT pattern).
+_ERROR_TEXT = {
+    midas.ERR_VAULT_LOCKED: "locked",
+    midas.ERR_NO_KEY:       "no key",
+    midas.ERR_NO_DATA:      "no data",
+    midas.ERR_FETCH_FAILED: "net err",
+}
 
 
 class MidasPanel(Card):
@@ -267,7 +283,13 @@ class MidasPanel(Card):
             price_lbl, pct_lbl = self._row_widgets[sym]
             if "error" in r:
                 price_lbl.config(text="—", fg=C["text3"])
-                pct_lbl.config(text="err", fg=C["text3"])
+                pct_lbl.config(text=_ERROR_TEXT.get(r["error"], r["error"]),
+                               fg=C["text3"])
+            elif r.get("stale"):
+                # Last good value, but this tick's fetch failed — dim rather
+                # than blank, so the number reads as "recent, not current".
+                price_lbl.config(text=r["price_fmt"], fg=C["text3"])
+                pct_lbl.config(text=r["pct_fmt"], fg=C["text3"])
             else:
                 price_lbl.config(text=r["price_fmt"], fg=C["text1"])
                 color = C["green"] if r["direction"] == "up" else C["red"]

@@ -26,7 +26,15 @@ Source:      Stars   — HYG Database v41 CSV (CC BY-SA), astronexus/HYG-Databas
                         polyline list per constellation, expanded here into
                         consecutive HIP pairs), not the old .fab row format.
 
-Requires:    requests (existing dependency), csv/json/os/tempfile (stdlib).
+Upstream:    none — hand-run, imported by nothing.
+Downstream:  writes hypatia_stars.json + hypatia_constellations.json, read by
+             tools/hypatia.py (never config/hypatia_lore.json).
+
+Requires:    requests (existing dependency), csv/io/json/logging/os/tempfile (stdlib).
+
+V0.02:       Audited 2026-07-26 — verified honest (write paths + schema match
+             hypatia's readers, atomic writes, no dead code); Requires/Upstream/
+             Downstream completed; first hermetic tests. The walkthrough finale.
 """
 
 import csv

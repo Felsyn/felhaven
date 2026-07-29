@@ -34,6 +34,11 @@ Downstream:  cerberus.py (all logic), theme.py (colors/fonts)
 
 Requires:    tkinter, os, platform, subprocess (stdlib). No crypto here — that
              is cerberus.py's job, and cerberus.py's alone.
+
+V0.02:       Audited 2026-07-24 — reads cerberus.py's now-thread-safe Ledger on
+             the main thread (safe against Midas's write pool via cerberus's
+             atomic writes). Dropped the unused _NO_WINDOW constant. Draw-only
+             contract verified.
 """
 
 import os
@@ -44,10 +49,6 @@ import tkinter as tk
 from theme import C, FONTS, PhosphorScroll
 
 import cerberus
-
-# Console-window suppression for the OS-editor handoff on the non-Windows
-# fallback paths; referenced defensively so an off-Windows import (CI) is fine.
-_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 _MASK = "•" * 10
 

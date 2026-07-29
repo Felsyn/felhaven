@@ -18,8 +18,14 @@ Kairos contract (single method): update(data) routes each feed's result to its
 own tab.
     data = {"feeds": {feed_id: {"stories": [...]} | {"error": str}}}
     data is None                  -> every tab shows "stale"
-    a feed's {"error": ...}       -> inline "feed unavailable (…)" in that tab
-                                     only; footer reads "failed HH:MM".
+    a feed's {"error": ...}       -> the slug mapped to human text via
+                                     _ERROR_TEXT, inline in that tab only;
+                                     footer reads "failed HH:MM".
+
+V0.02: Audited 2026-07-23 — grew the _ERROR_TEXT map (echo_panel pattern) in
+       lockstep with pheme's §2 slugs, replacing the raw render of
+       result["error"]; tests/test_pheme_panel_smoke.py holds the two halves
+       together.
 """
 
 import json
@@ -47,6 +53,27 @@ def _load_feeds() -> list:
             return json.load(f)["feeds"]
     except Exception:
         return []
+
+
+# Human text per per-feed error slug from tools/pheme.py._fetch_feed (anything
+# unknown falls back to the raw code so a new code is surfaced, never
+# swallowed — the echo_panel rule). handle()'s slugs are Pythia-facing and
+# never reach this panel, so they are deliberately not mapped here.
+_ERROR_TEXT = {
+    "http_error":       "feed returned HTTP",       # detail: the status code
+    "feed_timeout":     "feed timed out",
+    "network_error":    "network error",
+    "invalid_feed_xml": "feed sent unreadable data",
+    "fetch_failed":     "feed fetch failed",        # detail: exception class
+}
+
+
+def _error_text(code: str) -> str:
+    """Human text for a `slug` or `slug: detail` identifier."""
+    slug, sep, detail = code.partition(": ")
+    if slug not in _ERROR_TEXT:
+        return code
+    return f"{_ERROR_TEXT[slug]}: {detail}" if sep else _ERROR_TEXT[slug]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -274,7 +301,7 @@ class PhemePanel(Card):
         # This feed failed but its siblings may be fine — show it inline.
         if "error" in result:
             tk.Label(
-                scroll.inner, text=f"feed unavailable ({result['error']})",
+                scroll.inner, text=_error_text(result["error"]),
                 font=FONTS["small_italic"], fg=C["text3"], bg=C["card"],
                 anchor="w", justify="left",
             ).pack(anchor="w", pady=(8, 0))

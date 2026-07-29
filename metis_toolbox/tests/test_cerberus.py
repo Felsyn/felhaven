@@ -21,6 +21,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -364,6 +365,62 @@ class TestVaultDegraded(_Base):
         with open(cerberus._VAULT_PATH, "w", encoding="utf-8") as f:
             f.write("{ not json")
         self.assertEqual(cerberus.vault_names(), [])
+
+
+# ── Ledger concurrency (the Midas 5-thread-pool race) ────────────────────────
+
+class TestLedgerConcurrency(_Base):
+    """Midas reads the Finnhub key from a ThreadPoolExecutor(max_workers=5)
+    (tools/midas.py), and every vault read appends or bumps a Ledger entry, so
+    several threads do a load-modify-write on cerberus_ledger.json at once. This
+    pins the fix: the write is atomic and the whole load→mutate→write is one
+    critical section, so the file always stays valid JSON AND the per-session
+    read dedupe never loses a count. Before the fix this failed both ways —
+    interleaved truncate+rewrite corrupted the file, and racing count bumps lost
+    updates (or minted duplicate entries for the one key)."""
+
+    def _hammer(self, target: str, n_threads: int, per_thread: int) -> None:
+        start = threading.Barrier(n_threads)   # line the threads up for max contention
+        errors: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                start.wait()
+                for _ in range(per_thread):
+                    cerberus._ledger_add_read(target)
+            except BaseException as exc:        # pragma: no cover - surfaced below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [], f"a ledger writer thread raised: {errors}")
+
+    def test_concurrent_reads_never_corrupt_the_file(self):
+        cerberus.unlock(_TEST_PIN)
+        # Pre-seed some custody rows so each rewrite is large enough that an
+        # interleaved truncate leaves a visibly broken file, not a lucky-small one.
+        for i in range(40):
+            cerberus.ledger_log_custody(f"seed_{i}.json", "open")
+
+        self._hammer("finnhub_api_key", n_threads=8, per_thread=25)
+
+        # 1) The raw file must still be valid JSON (a list) — _ledger_load hides
+        #    corruption by degrading to [], so read the bytes directly.
+        with open(cerberus._LEDGER_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)                 # raises if a write clobbered another
+        self.assertIsInstance(raw, list)
+
+        # 2) No lost updates: the 200 reads of one key collapse to exactly one
+        #    entry whose count is 200, and the 40 seed rows all survive.
+        reads = [e for e in raw if e.get("head") == "vault"
+                 and e.get("action") == "read" and e.get("target") == "finnhub_api_key"]
+        self.assertEqual(len(reads), 1, "the deduped read split into multiple entries")
+        self.assertEqual(reads[0]["count"], 8 * 25, "count bumps were lost to a race")
+        custody = [e for e in raw if e.get("head") == "custody"]
+        self.assertEqual(len(custody), 40, "concurrent writes clobbered seed rows")
 
 
 class TestSetPin(_Base):

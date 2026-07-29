@@ -36,6 +36,10 @@ Sell rule:   Average-cost. Selling reduces cost invested proportionally to the
              still recorded on the event for an honest history.
 
 Requires:    json, os, datetime (stdlib). No third-party deps.
+
+V0.02:       Audited 2026-07-24 — average-cost fold, atomic write, and the
+             deliberate out-of-LLM-scope omission all verified honest; the
+             module needed no code change, only this marker.
 """
 
 import json

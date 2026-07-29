@@ -10,9 +10,29 @@ status (via the public Statuspage JSON endpoint).
 
 Contract:    Exposes TOOL_DEFINITION, handle(), and fetch().
              Both checks handle their own failures and return safe defaults,
-             so neither handle() nor fetch() ever raises.
+             so neither handle() nor fetch() ever raises. fetch() is aliased to
+             handle() — the poll path is the read path — so its never-raise is
+             §2's brain-tool rule, not an emanon-style watcher exception.
+
+Source:      netsh wlan show interfaces (Windows WiFi state) + the public
+             Anthropic Statuspage JSON (status.anthropic.com/api/v2/status.json),
+             over HTTP with a 5 s timeout; the netsh probe has a 2 s timeout.
+
+Upstream:    kairos.py — the "aether" worker polls fetch() every 3600 s (hourly).
+             pythia.py — exposes handle() to the LLM as get_connectivity.
+
+Downstream:  panels/hephaestus_panel.py → AetherWidget (embedded in VitalsPanel,
+             the HEPHAESTUS tab; registered with Kairos as its own "aether" panel,
+             fed directly rather than relayed through VitalsPanel).
 
 Requires:    requests (already in Felhaven stack)
+             subprocess, logging (stdlib); netsh is Windows-only and degrades to
+             "unknown" off-Windows.
+
+V0.02:       Audited 2026-07-24 — docstring gained Source/Upstream/Downstream;
+             first test coverage (tests/test_aether.py,
+             tests/test_aether_widget_smoke.py); contract verified — handle()/
+             fetch() never raise and emit no error dict, so no §2 slug work.
 """
 
 import logging

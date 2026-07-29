@@ -27,6 +27,11 @@ ANY sound coming out of the speaker, not only a briefing Orpheus started —
 if Calliope is mid-answer, this tab will show "playing" too, and its ⏹ will
 stop that. That cross-talk is a deliberate consequence of the one-stream
 design, not a bug in this panel (flagged, not fixed, per the handoff).
+
+V0.02: Audited 2026-07-25 — verified §6-clean (the ffmpeg decode runs
+synchronously from the click handler by design — "No thread, no queue" above —
+so no after()/thread exception applies); _ERROR_TEXT stays in lockstep with
+play_file()'s three codes. No code change.
 """
 
 import tkinter as tk

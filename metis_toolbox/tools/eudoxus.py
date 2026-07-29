@@ -10,14 +10,25 @@ Job:         Convert between units of length, volume, weight, temperature,
              and mathematician who developed the theory of proportions —
              the mathematical foundation of unit conversion.
 
-Contract:    Exposes TOOL_DEFINITION, handle(), and convert().
-             All three never raise; error paths return {"error": ...}.
+Contract:    Exposes TOOL_DEFINITION, handle() and convert().
+             handle(value, from_unit, to_unit) is the brain tool; convert()
+             parses an expression and calls it. Neither raises — a brain tool
+             that throws crashes Pythia's dispatcher (§2) — and every failure
+             path returns {"error": <slug>} instead.
              No fetch() — Eudoxus is request-driven, not polled.
 
-Upstream:    pythia.py (registration + dispatch)
-Downstream:  panels/eudoxus_panel.py (EudoxusPanel)
+Errors:      Identifiers are §2 slugs; the text after ": " is human detail:
 
-Requires:    stdlib only: re, logging
+               unknown_unit: X          X is not in _ALIASES — as the caller
+                                        wrote it, not normalized
+               incompatible_units: X    a category mismatch, "length to weight"
+               missing_separator        no " to " / " in " in the expression
+               missing_source_unit      a number with no unit after it
+               conversion_failed: X     unforeseen; X is the exception CLASS
+                                        name, never its message (§2)
+
+             The last two are reachable only through convert(). Pythia calls
+             handle() directly, so the parser's errors are panel-facing.
 
 US-customary defaults (for brain/panel consumers):
     gallon  = US gallon  (3.785 411 784 L)         NOT the Imperial 4.546 L
@@ -26,13 +37,35 @@ US-customary defaults (for brain/panel consumers):
     quart   = US quart   (946.352 946 mL)
     fl_oz   = US fluid ounce (29.573 529 5625 mL)
 
-Fractions not supported in v1 — use decimals (0.5 cup, not 1/2 cup).
+Fractions are not supported — use decimals (0.5 cup, not 1/2 cup).
+
+Upstream:    pythia.py (registration + dispatch)
+Downstream:  panels/eudoxus_panel.py (EudoxusPanel)
+
+Requires:    stdlib: re, os, sys, logging, typing. Plus tools/zeno.py for
+             format_number() — the kepler→hypatia precedent (§12). Eudoxus
+             kept its own copy of those rules until 2026-07-23, marked "kept
+             in sync with tools/zeno.py", which is a promise no file can keep.
+
+V0.02:       Audited 2026-07-23 — error sentences normalized to §2 slugs, the
+             duplicated number formatter replaced by zeno's public one, the
+             " in " separator no longer mis-split "3 in in cm", first tests.
 """
 
+import os
 import re
-import math
+import sys
 import logging
 from typing import Any
+
+# The kepler.py precedent (§12): a tool importing a sibling tool. Every real
+# entry point (felhaven, kairos, pythia, the tests) already runs with the app
+# root on sys.path; only a bare `python tools/eudoxus.py` needs it added, and
+# the insert must precede the import.
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from tools import zeno
 
 log = logging.getLogger("METIS.eudoxus")
 
@@ -168,35 +201,6 @@ _ALIASES: dict[str, str] = {
 }
 
 
-# ── Number formatting (kept in sync with tools/zeno.py — Anti-Legion ok) ────
-
-def _format_number(v: Any) -> str:
-    if isinstance(v, bool):
-        return str(v)
-    if isinstance(v, float):
-        # Guard non-finite values before the int(v) comparison below, which
-        # raises on nan/inf (e.g. `inf - inf` -> nan, then int(nan) -> ValueError).
-        if math.isnan(v):
-            return "nan"
-        if math.isinf(v):
-            return "inf" if v > 0 else "-inf"
-    if isinstance(v, int):
-        try:
-            return str(v)
-        except ValueError:
-            # Int beyond CPython's str-conversion cap — show a placeholder
-            # rather than raise. (Conversions won't produce these; guards
-            # direct callers only.)
-            return f"<{v.bit_length()}-bit integer>"
-    # finite float
-    if v == int(v) and abs(v) < 1e15:
-        return str(int(v))
-    # 6 significant figures: enough precision to stay useful, few enough to hide
-    # float noise (0.1+0.2 -> "0.3") and repeating decimals (100°F->C -> "37.7778").
-    # %g strips trailing zeros and keeps very small values (1e-8) intact.
-    return f"{v:.6g}"
-
-
 # ── Structured API ────────────────────────────────────────────────────────────
 
 def handle(value: float, from_unit: str, to_unit: str) -> dict[str, Any]:
@@ -214,19 +218,22 @@ def handle(value: float, from_unit: str, to_unit: str) -> dict[str, Any]:
         to_key   = _ALIASES.get(str(to_unit).lower().strip())
 
         if from_key is None:
-            return {"error": f"unknown unit: '{from_unit}'"}
+            return {"error": f"unknown_unit: {from_unit}"}
         if to_key is None:
-            return {"error": f"unknown unit: '{to_unit}'"}
+            return {"error": f"unknown_unit: {to_unit}"}
 
         from_cat = _CATEGORY_OF.get(from_key)
         to_cat   = _CATEGORY_OF.get(to_key)
 
+        # Unreachable while every _ALIASES target has a category — which is
+        # what tests/test_eudoxus.py asserts, rather than trusting it. Kept so
+        # an alias added without a table entry degrades instead of KeyError-ing.
         if from_cat is None or to_cat is None:
-            return {"error": f"unknown unit: '{from_unit if from_cat is None else to_unit}'"}
+            return {"error": f"unknown_unit: {from_unit if from_cat is None else to_unit}"}
 
         if from_cat != to_cat:
             return {
-                "error": f"cannot convert {from_cat} to {to_cat}",
+                "error": f"incompatible_units: {from_cat} to {to_cat}",
                 "from":  from_key,
                 "to":    to_key,
             }
@@ -234,6 +241,9 @@ def handle(value: float, from_unit: str, to_unit: str) -> dict[str, Any]:
         if from_cat == "temperature":
             k_val  = _to_kelvin(float(value), from_key)
             result = _from_kelvin(k_val, to_key)
+            # The .get default is unreachable while _TEMP_FORMULA holds all
+            # nine f/c/k pairs (asserted in tests/test_eudoxus.py); it exists
+            # so a fourth temperature unit degrades to a generic formula line.
             formula = _TEMP_FORMULA.get((from_key, to_key),
                                         f"{to_key} = f({from_key})")
             return {
@@ -241,7 +251,7 @@ def handle(value: float, from_unit: str, to_unit: str) -> dict[str, Any]:
                 "from":    from_key,
                 "to":      to_key,
                 "result":  result,
-                "display": f"{_format_number(result)} {to_key}",
+                "display": f"{zeno.format_number(result)} {to_key}",
                 "factor":  formula,
             }
 
@@ -254,13 +264,13 @@ def handle(value: float, from_unit: str, to_unit: str) -> dict[str, Any]:
             "from":    from_key,
             "to":      to_key,
             "result":  result,
-            "display": f"{_format_number(result)} {to_key}",
-            "factor":  f"1 {from_key} = {_format_number(unit_factor)} {to_key}",
+            "display": f"{zeno.format_number(result)} {to_key}",
+            "factor":  f"1 {from_key} = {zeno.format_number(unit_factor)} {to_key}",
         }
 
     except Exception as exc:
-        log.error(f"Eudoxus.handle: unexpected failure: {exc}")
-        return {"error": f"conversion failed: {type(exc).__name__}"}
+        log.error(f"Eudoxus.handle: unexpected failure: {type(exc).__name__}: {exc}")
+        return {"error": f"conversion_failed: {type(exc).__name__}"}
 
 
 # ── Expression parser ─────────────────────────────────────────────────────────
@@ -281,6 +291,7 @@ def convert(expression: str) -> dict[str, Any]:
         "1.5 cups in liters"      ✓
         "1e3 m to km"             ✓  (scientific notation)
         "-40 f to c"              ✓  (negative value)
+        "3 in in cm"              ✓  ("in" is also a unit — see below)
     Not supported:
         "1/2 cup to ml"           — use 0.5 cup instead
     """
@@ -288,10 +299,13 @@ def convert(expression: str) -> dict[str, Any]:
         s   = expression.lower().strip()
         sep = " to " if " to " in s else (" in " if " in " in s else None)
         if sep is None:
-            return {"error": "expected 'X to Y' or 'X in Y'",
-                    "expression": expression}
+            return {"error": "missing_separator", "expression": expression}
 
-        left, right = s.split(sep, 1)
+        # rsplit, not split: "in" is a unit as well as a separator, so
+        # "3 in in cm" has two candidates and only the LAST one is the
+        # separator. No unit name contains " to " or " in ", so the right-hand
+        # side can never hold one — splitting from the right is always safe.
+        left, right = s.rsplit(sep, 1)
         left, right = left.strip(), right.strip()
 
         m = _LEFT_RE.match(left)
@@ -299,7 +313,7 @@ def convert(expression: str) -> dict[str, Any]:
             value    = float(m.group(1))
             from_str = m.group(2).strip()
         elif m and not m.group(2).strip():
-            return {"error": "missing source unit", "expression": expression}
+            return {"error": "missing_source_unit", "expression": expression}
         else:
             value    = 1.0
             from_str = left
@@ -309,8 +323,8 @@ def convert(expression: str) -> dict[str, Any]:
         return result
 
     except Exception as exc:
-        log.error(f"Eudoxus.convert: unexpected failure: {exc}")
-        return {"error": f"conversion failed: {type(exc).__name__}",
+        log.error(f"Eudoxus.convert: unexpected failure: {type(exc).__name__}: {exc}")
+        return {"error": f"conversion_failed: {type(exc).__name__}",
                 "expression": expression}
 
 
@@ -357,7 +371,6 @@ TOOL_DEFINITION = {
 
 if __name__ == "__main__":
     import io
-    import sys
     if isinstance(sys.stdout, io.TextIOWrapper):
         sys.stdout.reconfigure(encoding="utf-8")
 

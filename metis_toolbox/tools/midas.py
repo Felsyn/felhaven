@@ -6,10 +6,12 @@ Metis Toolbox | Anti-Legion: ONE JOB
 Job:         Fetch current price and daily % change for a watchlist.
 
 Contract:    Polled + brain tool. Exposes TOOL_DEFINITION, handle(), and
-             fetch(); also query_all() for direct dashboard use.
+             fetch(); query_all() is the shared fetch both wrap.
              Returns price and % change. Nothing more.
-             handle() never raises. fetch() raises only when EVERY ticker
-             failed (per §2, so Kairos delivers None); a partial failure is
+             handle() never raises. fetch() raises when EVERY ticker failed
+             (per §2, so Kairos delivers None) — with ONE exception: an
+             all-'vault_locked' result is the normal pre-unlock state, not a
+             fault, so fetch() returns it quietly (§12). A partial failure is
              embedded per-ticker instead.
 
 Source:      Finnhub REST /quote (US equities, free tier). Plain `requests` —
@@ -35,6 +37,12 @@ Downstream:  cerberus.py (vault_get for the key), panels/midas_panel.py
 Requires:    requests (already in Felhaven stack)
              os, sys, json, time, concurrent.futures (stdlib)
              Plus cerberus (app-root sibling) for the key.
+
+V0.02:       Audited 2026-07-24 — stopped logging raw exceptions (the Finnhub
+             key was leaking into logs/*.log via the request URL), made a
+             locked vault a quiet non-fault instead of an ERROR every 60 s,
+             dropped the unused stale_cache code, contract verified,
+             fetch()/handle()/query_all() tests added.
 """
 
 import json
@@ -42,6 +50,7 @@ import logging
 import os
 import sys
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -65,13 +74,13 @@ log = logging.getLogger("METIS.midas")
 #   NO_DATA       — ticker exists but Finnhub returned all-zero fields
 #                   (invalid symbol, market never traded)
 #   FETCH_FAILED  — network error, timeout, 429 rate limit, unexpected exception
-#   STALE_CACHE   — cache hit, but older than CACHE_TTL (informational, usable)
 #   NO_KEY        — vault is unlocked but holds no 'finnhub_api_key' entry
 #   VAULT_LOCKED  — Cerberus session isn't open, so the Vault can't be read
+# (A cache hit older than CACHE_TTL is not an error — it rides back as a good
+#  result carrying a `stale` flag, see query_all(); the panel dims it.)
 
 ERR_NO_DATA      = "no_data"
 ERR_FETCH_FAILED = "fetch_failed"
-ERR_STALE_CACHE  = "stale_cache"
 ERR_NO_KEY       = "no_key"
 ERR_VAULT_LOCKED = "vault_locked"
 
@@ -163,7 +172,15 @@ def _fetch_one(symbol: str) -> dict[str, Any]:
     except Exception as e:
         # Includes 429 rate limit (raise_for_status) — transient, falls back to
         # stale cache in query_all() and retries next tick.
-        log.warning(f"Midas: failed to fetch {symbol}: {e}")
+        #
+        # NEVER log the raw exception (§2): requests puts the full request URL
+        # in its message, and that URL carries `?...&token=<finnhub key>` — so
+        # `{e}` would write the Vault-protected key straight into logs/*.log
+        # (which Emanon renders on screen). Log the class name and, when the
+        # error carries an HTTP response, its status code — never the message.
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        detail = type(e).__name__ + (f" {status}" if status else "")
+        log.warning(f"Midas: failed to fetch {symbol}: {detail}")
         return {"symbol": symbol, "error": ERR_FETCH_FAILED}
 
 
@@ -212,7 +229,6 @@ def query_all(force: bool = False) -> list[dict[str, Any]]:
             if "error" in result and sym in _cache and "error" not in _cache[sym]:
                 stale = dict(_cache[sym])
                 stale["stale"] = True
-                stale["_original_error"] = result["error"]
                 results[sym] = stale
                 log.debug("Midas: %s fetch failed, serving stale cache", sym)
             else:
@@ -251,10 +267,24 @@ def handle() -> dict[str, Any]:
 
 
 def fetch() -> dict[str, Any]:
-    """Kairos entry point — raises on total failure; per-ticker errors are embedded."""
+    """Kairos entry point. Per-ticker errors ride back inside the returned dict;
+    fetch() raises only on WHOLESALE failure, so Kairos delivers None and the
+    panel holds its last state (§2).
+
+    One deliberate exception (§12): if EVERY ticker failed only because the
+    Cerberus vault is locked, fetch() does NOT raise. A sealed vault is the
+    normal pre-unlock state — the panel starts sealed and Kairos polls it
+    regardless — not a fault a human should be paged about. Raising it logged
+    an ERROR every 60 s and made Emanon read Midas as failed. Genuine failures
+    (no_key, fetch_failed, no_data) still raise, naming the dominant cause so
+    the log line says *why* instead of a bare "all tickers failed"."""
     results = query_all()
     if results and all("error" in r for r in results):
-        raise RuntimeError("Midas: all tickers failed")
+        errors = [r["error"] for r in results]
+        if all(e == ERR_VAULT_LOCKED for e in errors):
+            return {"tickers": results}          # expected sealed state, not a fault
+        dominant = Counter(errors).most_common(1)[0][0]
+        raise RuntimeError(f"all tickers failed: {dominant}")
     return {"tickers": results}
 
 

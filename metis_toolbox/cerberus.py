@@ -79,9 +79,23 @@ Downstream:  cerberus_data.json (PIN hash, committed), cerberus_vault.json
              (encrypted blob, gitignored), cerberus_manifest.json (config
              list, committed), cerberus_ledger.json (access log, gitignored).
 
-Requires:    hashlib, hmac, secrets, json, os, logging, pathlib, datetime
-             (stdlib only). No tkinter, no subprocess — stays independently
-             unit-testable and UI-free, like sphynx.py.
+Concurrency: Cerberus is called from worker threads, not just the main one —
+             Midas reads the Finnhub key from a ThreadPoolExecutor (5 threads),
+             and every read logs to the Ledger. So the three Ledger mutators
+             hold _LEDGER_LOCK across their whole load→mutate→write, and all
+             three files are written atomically (tempfile + os.replace, §9) so a
+             reader never catches a half-truncated file. The Vault is written
+             only from the main thread / CLI (the pool path only reads it), so
+             it needs no lock — just the atomic write. Recorded in §12.
+
+Requires:    hashlib, hmac, secrets, json, os, threading, logging, pathlib,
+             datetime (stdlib only). No tkinter, no subprocess — stays
+             independently unit-testable and UI-free, like sphynx.py.
+
+V0.02:       Audited 2026-07-24 — the deferred Ledger-corruption finding fixed:
+             _LEDGER_LOCK + atomic writes (was a non-atomic truncate+rewrite that
+             raced under Midas's thread pool). Crypto, salts, and session model
+             verified honest and unchanged.
 """
 
 import hashlib
@@ -91,6 +105,7 @@ import logging
 import os
 import secrets
 import tempfile
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -114,6 +129,19 @@ _ATTEMPTS_REMAINING = 3   # resets every process start — soft-lock is impossib
 # ── RAM-only session state (never persisted) ─────────────────────────────────
 _SESSION_KEY: bytes | None = None          # 64 B PBKDF2 material, set on unlock
 _SESSION_READS: dict[str, str] = {}        # key name -> this-session ledger id
+
+# Serializes the Ledger's load-modify-write. Midas reads the Finnhub key from a
+# ThreadPoolExecutor(max_workers=5) (tools/midas.py), and every vault read
+# appends or bumps a Ledger entry, so several threads do a read-modify-write on
+# cerberus_ledger.json at once — and the panel reads it on the main thread too.
+# Without this lock they raced: an interleaved truncate+rewrite corrupted the
+# file (readers caught it mid-write, writes clobbered each other) and the
+# per-session read dedupe (the _SESSION_READS check-then-set) lost count bumps.
+# The write itself is now atomic (_atomic_write_json); the lock additionally
+# makes the whole load→mutate→write one critical section. It guards only the
+# Ledger — the Vault is never written from the pool (only vault_set, on the main
+# thread / CLI). See CONVENTIONS §12.
+_LEDGER_LOCK = threading.Lock()
 
 
 class HashFileError(Exception):
@@ -273,6 +301,31 @@ def _decrypt(key: bytes, blob: dict[str, str]) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Persistence — one atomic JSON writer for every file Cerberus owns (§9)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _atomic_write_json(path: "str | os.PathLike[str]", payload: Any) -> None:
+    """Write `payload` as JSON to `path` atomically: a uniquely-named temp file
+    in the same directory, then os.replace (atomic on Windows and POSIX). A
+    crash mid-write can never truncate the destination, and a concurrent reader
+    sees either the whole old file or the whole new one — never the empty middle
+    of a truncate (the §9 rule, and the fix for the Ledger corruption a reader
+    caught mid-rewrite). Unique temp names (not a fixed '.tmp') so a CLI writing
+    beside the running app never collides on the temp path; same reason set_pin
+    used mkstemp."""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".cerberus-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Vault — encrypted key/value store (R3)
 #  File shape: {"kdf_salt": "<hex>", "entries": {"<name>": {nonce,ct,mac}}}
 # ─────────────────────────────────────────────────────────────────────────────
@@ -297,8 +350,10 @@ def _vault_load() -> dict[str, Any]:
 
 
 def _vault_write(vault: dict[str, Any]) -> None:
-    with open(_VAULT_PATH, "w", encoding="utf-8") as f:
-        json.dump(vault, f, indent=2)
+    # Atomic (§9): the Vault holds the actual secrets, so a crash mid-write must
+    # not truncate it. Not lock-guarded — vault_set only runs on the main thread
+    # or the CLI, never from Midas's fetch pool (that path only reads).
+    _atomic_write_json(_VAULT_PATH, vault)
 
 
 def _vault_salt() -> bytes | None:
@@ -385,50 +440,58 @@ def _ledger_load() -> list[dict[str, Any]]:
 
 
 def _ledger_write(entries: list[dict[str, Any]]) -> None:
-    with open(_LEDGER_PATH, "w", encoding="utf-8") as f:
-        json.dump(entries, f, indent=2)
+    # Atomic (§9) so a reader (the panel, on the main thread) never catches a
+    # half-truncated file. Callers hold _LEDGER_LOCK across their whole
+    # load→mutate→write; this is the write half of that critical section.
+    _atomic_write_json(_LEDGER_PATH, entries)
 
 
 def _ledger_add_read(name: str) -> None:
     """Record a Vault read, deduped per key per unlock session. The first read
     of a key this session appends a new entry; repeats bump its read-count on
     the same entry. A fresh unlock() clears _SESSION_READS, so the next session
-    starts a new entry (R2)."""
-    entries = _ledger_load()
-    eid = _SESSION_READS.get(name)
-    if eid is not None:
-        for e in entries:
-            if e.get("id") == eid:
-                e["count"] = e.get("count", 1) + 1
-                e["ts"] = _now()
-                _ledger_write(entries)
-                return
-        # The entry vanished (file rewritten out from under us): fall through
-        # and create a fresh one.
-    eid = secrets.token_hex(8)
-    entries.append({"id": eid, "ts": _now(), "head": "vault",
-                    "action": "read", "target": name, "count": 1})
-    _SESSION_READS[name] = eid
-    _ledger_write(entries)
+    starts a new entry (R2). Locked: Midas's 5-thread pool reads keys
+    concurrently, so the load→mutate→write (and the _SESSION_READS check-then-
+    set) must be one critical section, or racing threads mint duplicate entries
+    and drop count bumps."""
+    with _LEDGER_LOCK:
+        entries = _ledger_load()
+        eid = _SESSION_READS.get(name)
+        if eid is not None:
+            for e in entries:
+                if e.get("id") == eid:
+                    e["count"] = e.get("count", 1) + 1
+                    e["ts"] = _now()
+                    _ledger_write(entries)
+                    return
+            # The entry vanished (file emptied by a corrupt read before the lock
+            # existed): fall through and create a fresh one.
+        eid = secrets.token_hex(8)
+        entries.append({"id": eid, "ts": _now(), "head": "vault",
+                        "action": "read", "target": name, "count": 1})
+        _SESSION_READS[name] = eid
+        _ledger_write(entries)
 
 
 def _ledger_add_write(name: str) -> None:
     """Record a Vault write. Never deduped (unlike reads) — each vault_set call
     is a distinct event, whether it's a fresh key or a silent overwrite."""
-    entries = _ledger_load()
-    entries.append({"id": secrets.token_hex(8), "ts": _now(), "head": "vault",
-                    "action": "write", "target": name, "count": 1})
-    _ledger_write(entries)
+    with _LEDGER_LOCK:
+        entries = _ledger_load()
+        entries.append({"id": secrets.token_hex(8), "ts": _now(), "head": "vault",
+                        "action": "write", "target": name, "count": 1})
+        _ledger_write(entries)
 
 
 def ledger_log_custody(filename: str, action: str = "open") -> None:
     """Record a Custody event at full fidelity — one entry per open/edit, no
     deduping. `action` is 'open' (we can log the handoff to the OS editor) or
     'edit' if a caller can distinguish the two."""
-    entries = _ledger_load()
-    entries.append({"id": secrets.token_hex(8), "ts": _now(), "head": "custody",
-                    "action": action, "target": filename, "count": 1})
-    _ledger_write(entries)
+    with _LEDGER_LOCK:
+        entries = _ledger_load()
+        entries.append({"id": secrets.token_hex(8), "ts": _now(), "head": "custody",
+                        "action": action, "target": filename, "count": 1})
+        _ledger_write(entries)
 
 
 def ledger_entries() -> list[dict[str, Any]]:
@@ -509,20 +572,11 @@ def set_pin(pin: str) -> None:
     """Create or replace cerberus_data.json: a fresh verify-salt + the salted
     hash of the PIN. This is the one-time setup step, callable from the CLI
     (`setpin`) OR the Cerberus panel's first-run flow on a fresh clone. Atomic
-    (tempfile in the same dir + os.replace) so a crash mid-write can't leave a
-    half-file that then fails preflight forever."""
+    (see _atomic_write_json) so a crash mid-write can't leave a half-file that
+    then fails preflight forever."""
     salt = secrets.token_bytes(16)
     payload = {"verify_salt": salt.hex(), "pin_hash": _hash_pin(pin, salt)}
-    directory = os.path.dirname(os.path.abspath(_DATA_PATH))
-    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".cerberus-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        os.replace(tmp, _DATA_PATH)
-    except BaseException:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
+    _atomic_write_json(_DATA_PATH, payload)
 
 
 def _cli_setpin(pin: str) -> None:

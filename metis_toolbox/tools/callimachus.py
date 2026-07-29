@@ -52,6 +52,14 @@ Downstream:  cerberus.py (vault_get for the Brave key).
 Requires:    stdlib only — json, logging, socket, urllib, html.parser. No pip
              deps (no requests, no beautifulsoup4). Plus cerberus (app-root
              sibling) for the key.
+
+V0.02:       Audited 2026-07-24 — every search_failed/fetch_failed error dict
+             stopped interpolating the caught exception's message (raw text into
+             the LLM context — §2); now only type(exc).__name__ travels. That
+             covers the guard-flagged bare {exc} AND the two {exc.reason} the
+             guard can't see (URLError.reason is a foreign socket/OS message).
+             Contract verified never-raise; regression tests added; off the
+             output-contract allowlist.
 """
 
 import json
@@ -260,7 +268,7 @@ def search_web(query: str) -> dict[str, Any]:
         key = _brave_key()
     except cerberus.VaultError as exc:
         log.warning("Callimachus: Brave key unavailable (vault): %s", exc)
-        return {"error": f"search_failed: {exc}"}
+        return {"error": f"search_failed: {type(exc).__name__}"}
 
     params = urllib.parse.urlencode({
         "q":          q,
@@ -287,15 +295,17 @@ def search_web(query: str) -> dict[str, Any]:
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, socket.timeout):
             return {"error": "timeout"}
-        return {"error": f"search_failed: {exc.reason}"}
+        # exc.reason is a FOREIGN message (a socket/OS error) — it can carry a
+        # hostname or errno detail, so only its class travels (§2), not its text.
+        return {"error": f"search_failed: {type(exc.reason).__name__}"}
     except Exception as exc:
         log.warning("Callimachus.search_web: unexpected failure: %s", exc)
-        return {"error": f"search_failed: {exc}"}
+        return {"error": f"search_failed: {type(exc).__name__}"}
 
     try:
         data = json.loads(raw.decode("utf-8", "replace"))
     except (json.JSONDecodeError, ValueError) as exc:
-        return {"error": f"search_failed: {exc}"}
+        return {"error": f"search_failed: {type(exc).__name__}"}
     if not isinstance(data, dict):
         return {"error": "search_failed: response was not a JSON object"}
 
@@ -336,10 +346,11 @@ def fetch_page(url: str) -> dict[str, Any]:
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, socket.timeout):
             return {"error": "timeout"}
-        return {"error": f"fetch_failed: {exc.reason}"}
+        # Foreign message (socket/OS error) — class only, never its text (§2).
+        return {"error": f"fetch_failed: {type(exc.reason).__name__}"}
     except Exception as exc:
         log.warning("Callimachus.fetch_page: unexpected failure: %s", exc)
-        return {"error": f"fetch_failed: {exc}"}
+        return {"error": f"fetch_failed: {type(exc).__name__}"}
 
     text = _strip_html(raw.decode("utf-8", "replace"))
     truncated = len(text) > _PAGE_CHARS

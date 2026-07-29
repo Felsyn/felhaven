@@ -16,7 +16,8 @@ Contract:    Exposes TOOL_DEFINITION and handle().
 Upstream:    pythia.py (registration + dispatch)
 Downstream:  panels/horai_panel.py (AmmitWidget — the countdown display)
 
-v0.01:       Countdown only. No alarm. That's next.
+V0.02:       Audited 2026-07-24 — countdown display only, no alarm (deliberate);
+             contract verified, _fmt privatized, hermetic tests added.
 """
 
 import json
@@ -71,8 +72,8 @@ def _remaining(timer: dict[str, Any]) -> int:
     return max(0, duration - int(elapsed))
 
 
-def fmt(seconds: int) -> str:
-    """HH:MM:SS string. Public so the dashboard can call it directly."""
+def _fmt(seconds: int) -> str:
+    """HH:MM:SS string. Internal — the dashboard reads query_all()['display']."""
     h = seconds // 3600
     m = (seconds % 3600) // 60
     s = seconds % 60
@@ -117,7 +118,7 @@ def query_all() -> list[dict[str, Any]]:
             "slot":             i + 1,
             "running":          t["running"],
             "remaining_seconds": rem,
-            "display":          fmt(rem),
+            "display":          _fmt(rem),
             "expired":          t["running"] and rem == 0,
         })
     return out

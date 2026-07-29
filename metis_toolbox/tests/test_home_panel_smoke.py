@@ -28,6 +28,8 @@ def _stats(**overrides) -> dict:
         "type": "stats", "prompt_tokens": 10, "output_tokens": 5,
         "wall_ms": 2100, "eval_ms": 1000, "tools_called": 1,
         "tools_failed": 0, "failed_tools": [], "cancelled": False,
+        "turn_messages": [{"role": "user", "content": "hi"},
+                         {"role": "assistant", "content": "hi"}],
     }
     base.update(overrides)
     return base
@@ -57,9 +59,11 @@ class TestHomePanelSmoke(unittest.TestCase):
         panel = HomePanel(self.root)
         self.root.update_idletasks()
 
+        turn = [{"role": "user", "content": "what day is it?"},
+               {"role": "assistant", "content": "It is Tuesday."}]
         epoch = panel._epoch
         panel._q.put(("delta", "It is Tuesday.", epoch))
-        panel._q.put(("stats", _stats(), epoch))
+        panel._q.put(("stats", _stats(turn_messages=turn), epoch))
         panel._q.put(("done", "It is Tuesday.", epoch))
         panel._poll()
         self.root.update_idletasks()
@@ -70,7 +74,53 @@ class TestHomePanelSmoke(unittest.TestCase):
         self.assertIn("1 tools", text)
         self.assertEqual(panel._hestia._flux.cget("text"), "Scraptoken Flux: 15")
         self.assertEqual(panel._hestia._rites_main.cget("text"), "Rites: 1")
-        self.assertEqual(panel._history[-1], {"role": "assistant", "content": "It is Tuesday."})
+        # History stores the turn's REAL exchange verbatim, not flattened
+        # prose — one entry per turn, each a full message list.
+        self.assertEqual(panel._history, [turn])
+
+    def test_persisted_turn_keeps_tool_calls_and_tool_results_verbatim(self):
+        # The whole point of storing turn_messages instead of flattened prose:
+        # a tool_calls-bearing assistant message and its tool result must
+        # survive into self._history exactly as pythia.ask() produced them,
+        # not collapsed down to {"role": "assistant", "content": answer}.
+        panel = HomePanel(self.root)
+        self.root.update_idletasks()
+
+        turn = [
+            {"role": "user", "content": "weather?"},
+            {"role": "assistant", "content": "",
+             "tool_calls": [{"function": {"name": "get_weather", "arguments": {}}}]},
+            {"role": "tool", "tool_name": "get_weather", "content": '{"temp_f": 70}'},
+            {"role": "assistant", "content": "It's 70."},
+        ]
+        epoch = panel._epoch
+        panel._q.put(("delta", "It's 70.", epoch))
+        panel._q.put(("stats", _stats(turn_messages=turn, tools_called=1), epoch))
+        panel._q.put(("done", "It's 70.", epoch))
+        panel._poll()
+        self.root.update_idletasks()
+
+        self.assertEqual(panel._history, [turn])
+        self.assertIn("tool_calls", panel._history[0][1])
+        self.assertEqual(panel._history[0][2]["role"], "tool")
+
+    def test_history_window_keeps_only_the_last_three_turns(self):
+        panel = HomePanel(self.root)
+        self.root.update_idletasks()
+
+        for i in range(4):
+            turn = [{"role": "user", "content": f"q{i}"},
+                   {"role": "assistant", "content": f"a{i}"}]
+            epoch = panel._epoch
+            panel._q.put(("delta", f"a{i}", epoch))
+            panel._q.put(("stats", _stats(turn_messages=turn), epoch))
+            panel._q.put(("done", f"a{i}", epoch))
+            panel._poll()
+            self.root.update_idletasks()
+
+        self.assertEqual(len(panel._history), 3)
+        firsts = [turn[0]["content"] for turn in panel._history]
+        self.assertEqual(firsts, ["q1", "q2", "q3"])   # q0 aged out
 
     def test_failed_tool_shows_in_meta_line(self):
         panel = HomePanel(self.root)
@@ -377,6 +427,37 @@ class TestStopRefreshEdgeCases(unittest.TestCase):
         self.assertNotIn("Par", self._transcript_text(panel))
         self.assertEqual(panel._history, [])
         self.assertEqual(panel._hestia._flux.cget("text"), "Scraptoken Flux: 0")
+
+    # ── Latency filler: only fires while the turn is still live ──────────────
+
+    def test_filler_fires_when_turn_is_live(self):
+        panel = HomePanel(self.root)
+        self.root.update_idletasks()
+        with mock.patch("panels.home_panel.calliope.speak_filler") as filler:
+            panel._maybe_speak_filler(panel._epoch, panel._cancel)
+        filler.assert_called_once()
+
+    def test_filler_suppressed_when_epoch_advanced(self):
+        # A new question / Refresh bumps the epoch during the filler delay; the
+        # stale turn's filler must not blip in (isolates the epoch guard).
+        panel = HomePanel(self.root)
+        self.root.update_idletasks()
+        ep, cancel = panel._epoch, panel._cancel
+        panel._epoch += 1                       # a fresh turn started meanwhile
+        with mock.patch("panels.home_panel.calliope.speak_filler") as filler:
+            panel._maybe_speak_filler(ep, cancel)
+        filler.assert_not_called()
+
+    def test_filler_suppressed_after_stop_sets_cancel(self):
+        # Stop sets the cancel Event without bumping the epoch — the pending
+        # filler must still be suppressed (isolates the cancel guard).
+        panel = HomePanel(self.root)
+        self.root.update_idletasks()
+        ep, cancel = panel._epoch, panel._cancel
+        panel._on_stop()                        # sets cancel, epoch unchanged
+        with mock.patch("panels.home_panel.calliope.speak_filler") as filler:
+            panel._maybe_speak_filler(ep, cancel)
+        filler.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -15,6 +15,13 @@ from theme import C, FONTS
 # ─────────────────────────────────────────────────────────────────────────────
 
 class BarMeter(tk.Frame):
+    """Small labelled percent bar, reusable by any panel that wants one.
+
+    V0.02:  Audited 2026-07-25 — set()'s clamp/format (0–100, "<1%" for a tiny
+            nonzero) now covered by tests/test_hephaestus_panel_smoke.py.
+            Class-scoped tag: AetherWidget (session 5) shares this file.
+    """
+
     def __init__(self, parent, label: str, color: str = C["amber"]):
         super().__init__(parent, bg=C["card"])
         row = tk.Frame(self, bg=C["card"])
@@ -46,6 +53,12 @@ class AetherWidget(tk.Frame):
     Connectivity status embedded inside VitalsPanel.
     Two rows: WiFi state and Anthropic's status, each with a colored dot.
     Receives data from Kairos via update() — registered as its own panel.
+
+    V0.02:  Audited 2026-07-24 — first tests (tests/test_aether_widget_smoke.py);
+            the "own panel" / "every hour" claims verified against felhaven.py:156
+            (its own "aether" registration) and kairos.py:31 (3600 s). Tag scoped
+            to this class, not the module docstring — BarMeter/VitalsPanel are
+            session 22.
     """
 
     def __init__(self, parent):
@@ -120,6 +133,12 @@ class VitalsPanel(tk.Frame):
 
     A bare Frame tab body inside ModeratiPanel (the HEPHAESTUS tab); keeps its
     own update() and is registered with Kairos directly.
+
+    V0.02:  Audited 2026-07-25 — first Tk smoke coverage
+            (tests/test_hephaestus_panel_smoke.py): constructs (incl. the embedded
+            AetherWidget), update(None) shows "unavailable", update(data) drives
+            the CPU/RAM/DISK bars. Class-scoped tag — this file is shared with
+            AetherWidget (session 5).
     """
 
     def __init__(self, parent):

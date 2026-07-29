@@ -88,6 +88,40 @@ Rules that fall out of the table:
   the brain when a real use appears. Both directions belong in the decisions log.
   The *category* is deliberate; membership is not frozen.
 
+### The error vocabulary
+
+`{"error": ...}` was the whole rule for a long time, and six competing styles
+grew inside it. The identifier is **read by the model and branched on by
+panels**, so its shape is a contract, not a formatting preference. It is one of:
+
+- a **bare slug** — `^[a-z][a-z0-9_]*$`, e.g. `no_results`, `vault_locked`
+- **slug + human detail** — `^[a-z][a-z0-9_]*: .+$`, e.g.
+  `too_large: 4.2 MB exceeds the 1 MB cap`
+
+The **slug is the stable part**; the text after `: ` is for humans and may be
+reworded freely. `tools/herodotus.py` is the reference implementation.
+
+- **Never a bare sentence.** `"search failed"` → `search_failed`.
+- **Never raw exception text.** `str(exc)` can carry paths, URLs, or key
+  material into the LLM's context and onto the screen. At most
+  `f"slug: {type(exc).__name__}"` — the class name, never the message.
+- **Never a computed-only string.** `f"HTTP {status}"` → `f"http_error: {status}"`.
+  In an f-string the slug must come **before** any interpolation, so it stays
+  greppable and matchable.
+- Extra keys beside `error` are fine — `zeno` returns `expression` and `steps`
+  with its errors — but they never replace the slug.
+- Three or more codes in one module: lift them to `ERR_*` module constants
+  (`tools/midas.py`). Fewer than three: inline literals are fine.
+
+**Panels map the slug to human text**, never render it raw — the
+`_ERROR_TEXT` dict in `panels/echo_panel.py`, including its fallback to the raw
+code so an unmapped error is surfaced rather than swallowed.
+
+`tests/test_tool_output_contract.py` enforces all of this by parsing the AST
+(a text search cannot tell `str(e)` from a literal). Modules that predate the
+rule sit in its `_EXPECTED_VIOLATIONS` allowlist and come off as each is
+audited; a stale entry fails just as loudly as a new violation.
+
 ---
 
 ## 3. The standard tool-module shape
@@ -95,8 +129,24 @@ Rules that fall out of the table:
 Copy `tools/midas.py` or `tools/morpheus.py` as the template. In order:
 
 1. **House-style header docstring**: `Job:` · `Contract:` · `Source:` ·
-   `Upstream:` · `Downstream:` · `Requires:`, plus any module-specific section.
-   This carries the weight when the name doesn't.
+   `Upstream:` · `Downstream:` · `Requires:`, plus any module-specific section,
+   and `V0.02:` last once the module has been audited. This carries the weight
+   when the name doesn't.
+
+   **The `V0.02:` field is the audit marker**, and it is the *only* version a
+   file names — it replaces any other version line the module carried. Both a
+   tool and its panel get it in the same session:
+
+   ```
+   V0.02:       Audited 2026-07-21 — errors normalized, contract verified,
+                hermetic tests added.
+   ```
+
+   Its absence means "not yet audited", so no test asserts every module has one.
+   A version *other* than `V0.02` does fail
+   (`tests/test_tool_output_contract.py`) — one file, one version, and it is
+   this one. A version number nobody maintains is a promise you can't keep; the
+   retired `(FOE v.01)` label is the scar (§12).
 2. **`log = logging.getLogger("METIS.<name>")`** at module top. Nothing else
    touches logging config — see §5.
 3. **Path constants** anchored to `__file__` (§1).
@@ -161,9 +211,6 @@ committing one.
   "expected, recoverable." **ERROR** is "a human should look at this." Kairos
   already logs every worker fire at DEBUG and every failure at ERROR, so your
   `fetch()` rarely needs to log the happy path.
-- *Known drift:* `scribe.py` reports save errors with `print()` instead of its
-  logger, so those failures never reach Emanon. Fix it the way the rest of the
-  stack does if you touch that file.
 
 ---
 
@@ -174,8 +221,12 @@ committing one.
 > **The result queue is the only object shared between worker threads and the
 > main thread.**
 
-- **Panels are dumb display surfaces.** A panel never calls `root.after()` and
-  never spawns a thread. It exposes `update(data)` and waits to be called.
+- **Panels are dumb display surfaces.** A panel never spawns a thread and never
+  runs an `after()`-driven polling or timing **loop**; it exposes `update(data)`
+  and waits to be called. A *single* one-shot `after()` for transient UI
+  feedback — a status line that self-clears, a glyph that resets after a beat, a
+  latency-masking filler — is fine: it fires once, on the main thread, touching
+  only this panel's own widgets.
 - Kairos runs a single 500 ms tick loop on the main thread. Each tick it fires
   due workers as **daemon** threads, drains the result queue, and calls
   `panel.update(data)` **on the main thread**.
@@ -188,14 +239,26 @@ committing one.
   `Kairos.WORKERS` and wiring the panel in `felhaven.py` with
   `kairos.register_panel(name, panel)`.
 
-**Documented exceptions to "no `after()`, no threads"** — exactly three, each
-justified in code: `AmmitWidget`'s countdown, Emanon's one-shot status blink, and
-`MorpheusPanel`'s one daemon thread for the blocking `yt-dlp` search (see §12).
-That last one preserves the contract: its only shared touch is a queue `put`,
-`update()` drains on the main thread, and a single-flight guard ignores a new
-search while one is in flight.
+**Documented exceptions to "no threads, no `after()` loops"** exist, each
+justified in code — Emanon's bounded, self-terminating status-blink chain,
+`MorpheusPanel`'s one daemon thread for the blocking `yt-dlp` search (see §12),
+`EchoPanel`'s one daemon thread for a whole-document conversion plus its bounded,
+self-terminating `after()` drain chain (Echo is request-driven, not a Kairos
+worker, so it has no tick to drain the result on), and **`HomePanel`'s one daemon
+thread for the slow `pythia.ask()` call plus a persistent main-thread
+`after()`-poll to drain it** (HomePanel is event-driven — you press Enter — not a
+Kairos worker, so it runs its own standing 60 ms poll instead of riding the tick;
+the poll self-terminates when the window is destroyed, via its `winfo_exists()`
+guard). Each preserves the contract: the worker's only shared touch is a queue
+`put`, `update()` / the drain runs on the main thread, and a single-flight guard
+ignores a second job while one is in flight.
 
-If you find yourself reaching for a fourth, stop — the answer is almost always
+`AmmitWidget`'s countdown is **not** among them, despite once being listed here:
+it holds no `after()` and spawns no thread. `HoraiPanel.update()` refreshes it on
+horai's 1 s Kairos tick — the compliant path, which is exactly why it needs no
+exception.
+
+If you find yourself reaching for a new one, stop — the answer is almost always
 "give Kairos a worker."
 
 ---
@@ -340,8 +403,6 @@ and when, one line per change, so a decision worth keeping must be written here.
   *(2026-06-10.)*
 - **The Register's feed is `format: "rss"` despite a `.atom` URL** — it actually
   serves RSS 2.0. Don't "correct" the mismatch.
-- **`scribe.py` logs save errors via `print()`**, not its logger, so they don't
-  reach Emanon. Pre-existing drift, noted in §5; fix when next editing the file.
 - **Naming scheme is historical + mythological.** Historical figures of the
   classical world are in-bounds alongside deities; the names still enforce
   single-responsibility, and "goddess of X" was never the rule. *(2026-07-01.)*
@@ -423,6 +484,17 @@ and when, one line per change, so a decision worth keeping must be written here.
   lesson:** the docstrings were fixed and the conventions weren't, because nothing
   linked them — a code-local fix felt complete. A hand-maintained copy of a list
   that changes will drift. *(2026-07-20.)*
+- **The output guard now rejects `f"slug: {exc}"`** — a literal slug head no
+  longer excuses splicing the caught exception in after it; that is `str(exc)`
+  behind a hat. Found in session 1 of the walkthrough, amended in session 2.
+  Deliberately narrow: only a bare `{exc}` / `{str(exc)}` is flagged, because
+  `{exc.detail}` (zeno's own class, safe by construction) and `{exc.reason}`
+  (a foreign message) are indistinguishable statically — attribute reads stay a
+  human-audit concern on each module's session. The amendment immediately
+  caught `herodotus` interpolating `OSError`s (archive paths on screen) —
+  the §2 *reference implementation*, which is exactly why the rule is a test
+  and not a sentence in this file. Herodotus and callimachus sit in the
+  allowlist until sessions 12/13. *(2026-07-23.)*
 - **Docs trimmed to one job per layer; module inventories deleted rather than
   corrected.** The entry above prescribed treating a promotion as a three-file
   change "until something enforces it." Enforcing it is the better answer, so the
@@ -432,3 +504,83 @@ and when, one line per change, so a decision worth keeping must be written here.
   and `_DISPATCH`. **The standing rule:** if a line asserts something derivable
   from the code, delete it or generate it — prose can only be wrong about that.
   *(2026-07-20.)*
+- **`midas.fetch()` does not raise when every ticker failed *only* because the
+  Cerberus vault is locked** (vs §2's raise-on-total-failure). A sealed vault is
+  the normal pre-unlock state — the panel starts sealed and Kairos polls Midas
+  every 60 s regardless — so raising it wrote an ERROR each minute (609 in one
+  live log) and made Emanon read Midas as *failed*. Genuine failures
+  (`no_key`/`fetch_failed`/`no_data`) still raise, and the message now names the
+  dominant slug (`all tickers failed: no_key`) so the log says *why*. Found in
+  walkthrough session 7, next to a worse sibling: `_fetch_one` logged the raw
+  request exception, whose URL carries `?token=<finnhub key>`, so the
+  Vault-protected key was leaking into `logs/*.log` (which Emanon renders on
+  screen). Now it logs `type(e).__name__` + the HTTP status only — never the
+  message. The output-contract guard (`test_tool_output_contract.py`) inspects
+  `{"error": …}` return values, not `log.*()` calls, so it could not have caught
+  this; a log-call scan is a possible future guard, flagged for the logging
+  session. *(2026-07-24.)*
+- **Cerberus's Ledger is shared mutable state across threads, guarded by its own
+  lock — a second shared channel §6 doesn't name.** §6 says the Kairos result
+  queue is the *only* object shared between worker threads and the main thread,
+  but Midas reads the Finnhub key from a `ThreadPoolExecutor(max_workers=5)`
+  inside its `fetch()`, and every `vault_get` logs a Ledger entry — so up to five
+  worker threads (plus the panel, on the main thread) do a load-modify-write on
+  `cerberus_ledger.json` at once. The old `_ledger_write` was a bare
+  `open("w")` truncate+rewrite with no lock: interleaved writes corrupted the
+  file (a reader caught it mid-truncate → `Expecting value: line 1 column 1`; two
+  writes clobbered → `Extra data`) and racing count-bumps were lost, all visible
+  in `metis.log`. Fix: a module-level `_LEDGER_LOCK` around the whole
+  load→mutate→write (including the `_SESSION_READS` dedupe check-then-set), and
+  all of Cerberus's files now write atomically (tempfile + `os.replace`, §9) so a
+  lockless reader still never sees a half-written file. The Vault stays
+  lock-free — the pool only *reads* it; `vault_set` is main-thread/CLI only —
+  but its write is atomic too, for §9 crash-safety (it holds the actual
+  secrets). This doesn't break §6's model: worker threads still touch no Tk
+  object and reach the main thread only through the queue; the Ledger is a
+  private file each caller serializes on, not a hand-off channel. Found and fixed
+  in walkthrough session 8. *(2026-07-24.)*
+- **§6 narrowed: a single one-shot `after()` for transient UI feedback is no
+  longer a deviation.** The rule had quietly accumulated harmless one-shot timers
+  — MorpheusPanel's two-click-remove confirm reset, its status-line and glyph
+  auto-clears (flagged walkthrough s17), and HomePanel's latency-masking filler —
+  all of which fire once on the main thread and touch only their own panel's
+  widgets. The hazards §6 actually guards are background threads and standing
+  poll/timing loops, so the rule now targets those. Threads and
+  self-re-arming/persistent `after()` work stay documented exceptions: HomePanel's
+  per-question worker + 60 ms poll (added this session — the §6 IOU standing since
+  walkthrough s6), Echo's drain chain, Emanon's blink chain, Morpheus's search
+  thread. Retires the s17 MorpheusPanel flag. *(2026-07-26.)*
+- **Harmonia owns one persistent `sd.OutputStream`; barge-in is a buffer flush,
+  not `sd.stop()`.** The 2026-07-16 entry above had `harmonia.stop()` call
+  `sd.stop()` for instant barge-in. That used sounddevice's module-level
+  convenience functions — `sd.play()`/`sd.wait()` on the play worker, `sd.stop()`
+  on the UI thread — which share ONE global PortAudio stream and are documented as
+  unsafe for concurrent multithreaded use. Barge-in (a new question asked while
+  narration was still speaking) raced them and **segfaulted the process with no
+  traceback, no log, and no OOM dialog** — diagnosed from that exact silent-vanish
+  signature, not from a repro. Harmonia now owns a single `sd.OutputStream`, opened
+  once and left running; a callback pulls PCM from an internal lock-guarded buffer,
+  `play()` appends, and `stop()` clears it. The callback (PortAudio's own thread) is
+  the ONLY consumer of audio, so no two threads ever touch the device API at once.
+  Barge-in goes from truly-instant to near-instant — silence within ~the stream's
+  device latency (a moderate `_LATENCY` chosen so the memcpy-only callback rides out
+  CPU starvation without underrunning) — a tiny, imperceptible trade to remove a
+  hard crash. The old queue + play-worker thread + module `_epoch` are gone; stop()
+  clearing the buffer under the lock is what discards stale audio now. *(2026-07-26.)*
+- **`HomePanel._history` stores each turn's real tool exchange, not flattened
+  prose, and windows it to 3 turns.** Symptom: Pythia (gemma4:e2b, a 2B model)
+  reliably lost tool use after ~3 tool-calling turns in a session, degrading to
+  narrating intent ("I need to call the get_weather tool") or hallucinating an
+  answer instead of ever calling a tool again. Root cause: `pythia.ask()`'s
+  intra-turn loop builds a correct `user → assistant(tool_calls) → tool(result)
+  → assistant(answer)` exchange, but only the flattened `{user, assistant}` pair
+  survived into the persisted history — every tool_call and tool result was
+  discarded at the end of each turn. A small model imitates its own transcript;
+  a history of prose-only turns taught it that questions get answered without
+  calling anything, and the effect compounded turn over turn. Fix: `pythia.ask()`
+  now reports `turn_messages` (this call's own messages, tool exchange included)
+  on its stats event; `HomePanel` persists that verbatim, one list per turn, and
+  keeps only the last 3 (`_MAX_HISTORY_TURNS`) so an occasional bad turn ages out
+  instead of compounding. Not a §2/§6 deviation — a bugfix to what "the
+  conversation" means when a tool-calling model reads its own history back.
+  *(2026-07-29.)*

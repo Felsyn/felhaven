@@ -7,10 +7,31 @@ Job:         Evaluate Python arithmetic expressions safely, step by step.
              Named for Zeno of Elea (the paradoxes-of-infinity philosopher),
              not Zeno of Citium the Stoic.
 
-Contract:    Exposes TOOL_DEFINITION and handle().
-             handle() takes an expression string, returns a dict.
+Contract:    Exposes TOOL_DEFINITION, handle(), and format_number().
+             handle(expression, ans=None) returns a dict and never raises — a
+             brain tool that throws crashes Pythia's dispatcher (§2).
              No fetch() — Zeno is request-driven, not polled.
-             handle() never raises; all errors return {"error": ...}.
+             format_number() is public on purpose: zeno_panel's ANS readout
+             renders a stored result and must match the step readout exactly,
+             so the two share one formatter rather than keeping two in step.
+
+Errors:      Failure is {"expression", "error", "steps"} — the steps taken
+             before the failure are kept, so the readout still shows its work.
+             Identifiers are §2 slugs; the text after ": " is human detail:
+
+               parse_error               not valid Python expression syntax
+               no_previous_result        `ans` used before anything succeeded
+               unknown_name: X           a name outside pi/e/tau/inf/ans
+               unknown_function: X       a call outside _FUNCTIONS
+               unsupported_operation: X  a node type or operator off the
+                                         whitelist — X is what was rejected
+               division_by_zero
+               result_too_large          a magnitude guard, or _too_large()
+               math_domain_error         a whitelisted function refused its
+                                         argument (sqrt(-1), log(0))
+               evaluation_stalled        _MAX_REDUCTIONS exhausted
+               evaluation_failed: X      unforeseen; X is the exception CLASS
+                                         name, never its message (§2)
 
 Semantics:   Operands are reduced eagerly, innermost-first, so the step readout
              resolves every node. This deviates from Python in three ways, by
@@ -28,7 +49,12 @@ Semantics:   Operands are reduced eagerly, innermost-first, so the step readout
 Upstream:    pythia.py (registration + dispatch)
 Downstream:  panels/zeno_panel.py (display surface)
 
-Requires:    stdlib only: ast, math, logging
+Requires:    stdlib only: ast, sys, math, logging, typing
+
+V0.02:       Audited 2026-07-23 — error identifiers normalized to §2 slugs and
+             routed through private exceptions so each one is a literal at the
+             dict site; the AST whitelist put under test for the first time;
+             format_number promoted to a public seam.
 """
 
 import ast
@@ -38,6 +64,50 @@ import logging
 from typing import Any, Callable, cast
 
 log = logging.getLogger("METIS.zeno")
+
+# ── How failure travels ───────────────────────────────────────────────────────
+# Rejections are decided deep inside a recursive walk (_validate) or mid-loop
+# (_reduce), but the error IDENTIFIER is assembled in handle(), at the dict it
+# returns. That split is deliberate: tests/test_tool_output_contract.py reads
+# the identifiers straight out of this file's AST, so each one has to be a
+# literal where the dict is built. A code threaded back through a local
+# variable is invisible to it — which is exactly how six competing error styles
+# grew across the toolbox before §2 existed.
+#
+# One class per identifier, rather than one class carrying a code string, for
+# the same reason: `except _UnknownName` maps to a literal, `exc.code` does not.
+# Arithmetic failures need no class at all — ZeroDivisionError, OverflowError
+# and ValueError already mean the right things and propagate on their own.
+
+
+class _ZenoError(Exception):
+    """Base for Zeno's own rejections.
+
+    `detail` is the human half of the §2 identifier, and it is always something
+    from the user's own expression — a name, a function, an AST node type.
+    Never a foreign exception's message, which §2 forbids putting on screen.
+    """
+
+    def __init__(self, detail: str = "") -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+class _UnknownName(_ZenoError):
+    """A bare name that is not a Zeno constant or `ans`."""
+
+
+class _UnknownFunction(_ZenoError):
+    """A call to something outside _FUNCTIONS."""
+
+
+class _Unsupported(_ZenoError):
+    """A node type or operator the whitelist does not admit."""
+
+
+class _Stalled(_ZenoError):
+    """The reducer ran out of steps, or stopped making progress."""
+
 
 # ── Whitelists ────────────────────────────────────────────────────────────────
 
@@ -93,6 +163,11 @@ _MAX_POW_EXPONENT  = 10000        # reject ** when |exponent| exceeds this
 _MAX_COMPUTE_BITS  = 50000        # reject ** when the result would blow past this
 _MAX_FACTORIAL     = 10000        # reject factorial(n) when n exceeds this
 
+# Backstop for the reduction loop: one step per operand, so an expression this
+# large is pathological rather than slow. Reaching it is "evaluation_stalled",
+# never a partial answer presented as a whole one.
+_MAX_REDUCTIONS    = 500
+
 
 def _guard_pow(base: Any, exponent: Any) -> None:
     """Raise OverflowError if `base ** exponent` would be too costly to compute.
@@ -131,8 +206,12 @@ def _too_large(v: Any) -> bool:
     return v.bit_length() >= limit * 3
 
 # ── Number formatting ─────────────────────────────────────────────────────────
+# Public (the one non-underscore name outside the §3 API block): zeno_panel's
+# ANS readout formats a stored result and has to agree with the step readout
+# character for character. Two copies of these rules would drift — eudoxus.py
+# already keeps one, marked "kept in sync with tools/zeno.py".
 
-def _format_number(v: Any) -> str:
+def format_number(v: Any) -> str:
     if isinstance(v, bool):
         return str(v)
     if isinstance(v, float):
@@ -205,7 +284,7 @@ def _unparse(node: ast.expr) -> str:
     if isinstance(node, ast.Constant):
         v = node.value
         if isinstance(v, (int, float, bool)):
-            return _format_number(v)
+            return format_number(v)
         return repr(v)
 
     if isinstance(node, ast.Name):
@@ -254,7 +333,7 @@ def _unparse(node: ast.expr) -> str:
 
     if isinstance(node, ast.Call):
         if not isinstance(node.func, ast.Name):
-            return f"<call>"
+            return "<call>"          # unreachable — _validate rejects these first
         args = ", ".join(_unparse(a) for a in node.args)
         return f"{node.func.id}({args})"
 
@@ -282,64 +361,68 @@ def _unparse(node: ast.expr) -> str:
 
 # ── AST validation ────────────────────────────────────────────────────────────
 
-def _validate(node: ast.AST) -> str | None:
-    """Return error string if any disallowed node is found, else None."""
+def _validate(node: ast.AST) -> None:
+    """Walk the tree and raise a _ZenoError at the first disallowed node.
+
+    This is the sandbox. Everything reachable from a Zeno expression is on the
+    lists above; anything else — attribute access, subscripts, comprehensions,
+    a call to a name that is not in _FUNCTIONS — falls through to the raise at
+    the bottom. The walk is a whitelist, never a blacklist: a node type nobody
+    thought about is rejected by default rather than admitted by default.
+    """
     if isinstance(node, ast.Expression):
-        return _validate(node.body)
+        _validate(node.body)
+        return
     if isinstance(node, ast.Constant):
         if not isinstance(node.value, (int, float, bool)):
-            return f"unsupported operation: {type(node).__name__}"
+            # The value's type, not the node's: "str" says more than "Constant".
+            raise _Unsupported(type(node.value).__name__)
         # Oversized int *literals* can't reach here: CPython's parser enforces
         # the same digit cap, so ast.parse already rejected them as a SyntaxError
-        # ("could not parse expression"). Computed oversized ints are caught in
-        # _reduce via _too_large() instead.
-        return None
+        # (-> "parse_error"). Computed oversized ints are caught in _reduce via
+        # _too_large() instead.
+        return
     if isinstance(node, ast.Name):
         if node.id not in _CONSTANTS and node.id != "ans":
-            return f"unknown name: {node.id}"
-        return None
+            raise _UnknownName(node.id)
+        return
     if isinstance(node, ast.BinOp):
         if not isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div,
                                      ast.FloorDiv, ast.Mod, ast.Pow)):
-            return f"unsupported operation: {type(node.op).__name__}"
-        return _validate(node.left) or _validate(node.right)
+            raise _Unsupported(type(node.op).__name__)
+        _validate(node.left)
+        _validate(node.right)
+        return
     if isinstance(node, ast.UnaryOp):
         if not isinstance(node.op, (ast.USub, ast.UAdd, ast.Not)):
-            return f"unsupported operation: {type(node.op).__name__}"
-        return _validate(node.operand)
+            raise _Unsupported(type(node.op).__name__)
+        _validate(node.operand)
+        return
     if isinstance(node, ast.Call):
         if not isinstance(node.func, ast.Name):
-            return f"unsupported operation: {type(node.func).__name__}"
+            raise _Unsupported(type(node.func).__name__)
         if node.func.id not in _FUNCTIONS:
-            return f"unknown function: {node.func.id}"
+            raise _UnknownFunction(node.func.id)
         if node.keywords:
-            return "unsupported operation: keyword arguments"
+            raise _Unsupported("keyword arguments")
         for arg in node.args:
-            err = _validate(arg)
-            if err:
-                return err
-        return None
+            _validate(arg)
+        return
     if isinstance(node, ast.Compare):
-        err = _validate(node.left)
-        if err:
-            return err
+        _validate(node.left)
         for op in node.ops:
             if not isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.Eq, ast.NotEq)):
-                return f"unsupported operation: {type(op).__name__}"
+                raise _Unsupported(type(op).__name__)
         for comp in node.comparators:
-            err = _validate(comp)
-            if err:
-                return err
-        return None
+            _validate(comp)
+        return
     if isinstance(node, ast.BoolOp):
         if not isinstance(node.op, (ast.And, ast.Or)):
-            return f"unsupported operation: {type(node.op).__name__}"
+            raise _Unsupported(type(node.op).__name__)
         for v in node.values:
-            err = _validate(v)
-            if err:
-                return err
-        return None
-    return f"unsupported operation: {type(node).__name__}"
+            _validate(v)
+        return
+    raise _Unsupported(type(node).__name__)
 
 
 # ── Iterative AST reducer ─────────────────────────────────────────────────────
@@ -434,7 +517,10 @@ def _compute(node: ast.AST) -> Any:
             raise OverflowError("factorial argument too large")
         return fn(*args)
 
-    raise ValueError(f"cannot compute {type(node).__name__}")
+    # Unreachable: _all_const_binop vetted this node and _validate vetted its
+    # operator. RuntimeError rather than ValueError so an invariant break is
+    # reported as "evaluation_failed", not mistaken for a math domain error.
+    raise RuntimeError(f"cannot compute {type(node).__name__}")
 
 
 class _Replacer(ast.NodeTransformer):
@@ -482,49 +568,54 @@ def _find_substitutable_name(node: ast.AST) -> ast.Name | None:
     return None
 
 
-def _reduce(tree: ast.Expression, ans_val: float | None, steps: list[str]) -> tuple[Any, str | None]:
+def _lookup(name: str, ans_val: float | None) -> Any:
+    """Value behind a bare name. Raises _UnknownName if there isn't one.
+
+    Unreachable from handle(): _validate has already refused any name outside
+    _CONSTANTS/`ans`, and handle() refuses `ans` when no previous result was
+    given. Kept because the alternative to raising is `_CONSTANTS.get()`
+    returning None and a Constant(value=None) silently entering the tree.
     """
-    Run the iterative reduction loop.
-    Returns (result_value, error_string_or_None).
-    Appends to steps as it goes. tree is mutated in place via NodeTransformer.
+    val = ans_val if name == "ans" else _CONSTANTS.get(name)
+    if val is None:
+        raise _UnknownName(name)
+    return val
+
+
+def _reduce(tree: ast.Expression, ans_val: float | None, steps: list[str]) -> Any:
     """
-    for _ in range(500):  # guard against infinite loops
+    Run the iterative reduction loop and return the final value.
+
+    Appends to steps as it goes; tree is mutated in place via NodeTransformer.
+    Failures propagate as exceptions — ZeroDivisionError / OverflowError /
+    ValueError straight from the arithmetic, _ZenoError from Zeno's own checks
+    — and handle() turns each into its §2 identifier. Whatever steps were taken
+    before the failure stay in `steps`, so a failed readout still shows its work.
+    """
+    for _ in range(_MAX_REDUCTIONS):
         body = tree.body
 
         # Done if root is a Constant
         if isinstance(body, ast.Constant):
-            return body.value, None
+            return body.value
 
         # Done if root is a substitutable Name
         if isinstance(body, ast.Name):
-            name = body.id
-            val = ans_val if name == "ans" else _CONSTANTS.get(name)
-            if val is None:
-                return None, f"unknown name: {name}"
-            new_node = ast.Constant(value=val)
+            new_node = ast.Constant(value=_lookup(body.id, ans_val))
             ast.copy_location(new_node, body)
             tree.body = new_node
             steps.append(_snapshot(tree))
-            return new_node.value, None
+            return new_node.value
 
         # Try to find and reduce an all-constant node
         target = _find_reducible(body)
         if target is not None:
-            try:
-                val = _compute(target)
-            except ZeroDivisionError:
-                return None, "division by zero"
-            except OverflowError:
-                return None, "result too large"
-            except ValueError as exc:
-                return None, str(exc)
-            except Exception as exc:
-                return None, f"evaluation failed: {type(exc).__name__}"
+            val = _compute(target)
 
             # Computed fine but too big to render? Reject before it reaches a
             # snapshot (where str() would raise). Covers *, factorial, etc.
             if _too_large(val):
-                return None, "result too large"
+                raise OverflowError("result too large to display")
 
             new_node = ast.Constant(value=val)
             ast.copy_location(new_node, target)
@@ -535,19 +626,15 @@ def _reduce(tree: ast.Expression, ans_val: float | None, steps: list[str]) -> tu
         # Try to substitute a Name
         name_node = _find_substitutable_name(body)
         if name_node is not None:
-            name = name_node.id
-            val = ans_val if name == "ans" else _CONSTANTS.get(name)
-            if val is None:
-                return None, f"unknown name: {name}"
-            new_node = ast.Constant(value=val)
+            new_node = ast.Constant(value=_lookup(name_node.id, ans_val))
             ast.copy_location(new_node, name_node)
             tree.body = _Replacer(name_node, new_node).visit(tree.body)
             steps.append(_snapshot(tree))
             continue
 
-        return None, "evaluation failed: no progress"
+        raise _Stalled("no reducible node")
 
-    return None, "evaluation failed: reduction limit exceeded"
+    raise _Stalled("reduction limit exceeded")
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -589,44 +676,69 @@ def handle(expression: str, ans: float | None = None) -> dict[str, Any]:
         {"expression": ..., "result": float, "display": str, "steps": [...]}
     Failure:
         {"expression": ..., "error": str, "steps": [...]}
+
+    Every error identifier in the module is a literal in this function — see
+    the "How failure travels" note at the top for why they are assembled here
+    rather than where the failure is detected.
     """
     steps: list[str] = []
     try:
         try:
             tree = ast.parse(expression, mode="eval")
         except SyntaxError:
-            return {"expression": expression, "error": "could not parse expression", "steps": steps}
+            return {"expression": expression, "error": "parse_error", "steps": steps}
 
         # Check for ans requirement
         for node in ast.walk(tree):
             if isinstance(node, ast.Name) and node.id == "ans":
                 if ans is None:
-                    return {"expression": expression, "error": "no previous result", "steps": steps}
+                    return {"expression": expression, "error": "no_previous_result",
+                            "steps": steps}
                 break
 
-        err = _validate(tree)
-        if err:
-            return {"expression": expression, "error": err, "steps": steps}
+        try:
+            _validate(tree)
+            steps.append(_snapshot(tree))        # initial snapshot
+            result_val = _reduce(tree, ans, steps)
+        except _UnknownName as exc:
+            return {"expression": expression, "error": f"unknown_name: {exc.detail}",
+                    "steps": steps}
+        except _UnknownFunction as exc:
+            return {"expression": expression, "error": f"unknown_function: {exc.detail}",
+                    "steps": steps}
+        except _Unsupported as exc:
+            return {"expression": expression, "error": f"unsupported_operation: {exc.detail}",
+                    "steps": steps}
+        except _Stalled:
+            return {"expression": expression, "error": "evaluation_stalled", "steps": steps}
+        except ZeroDivisionError:
+            return {"expression": expression, "error": "division_by_zero", "steps": steps}
+        except OverflowError:
+            # Both magnitude hazards land here: the pre-compute guards and
+            # _too_large()'s display gate. One identifier, because the caller's
+            # move is the same either way — ask for a smaller number.
+            return {"expression": expression, "error": "result_too_large", "steps": steps}
+        except ValueError:
+            # A whitelisted math function refusing its argument: sqrt(-1),
+            # log(0), factorial(-1). The exception's own message is discarded
+            # rather than forwarded — §2 bans raw exception text outright.
+            return {"expression": expression, "error": "math_domain_error", "steps": steps}
 
-        # Initial snapshot
-        steps.append(_snapshot(tree))
-
-        result_val, error = _reduce(tree, ans, steps)
-
-        if error:
-            return {"expression": expression, "error": error, "steps": steps}
-
-        display = _format_number(result_val)
         return {
             "expression": expression,
             "result":     result_val,
-            "display":    display,
+            "display":    format_number(result_val),
             "steps":      steps,
         }
 
     except Exception as exc:
-        log.error(f"Zeno: unexpected failure: {exc}")
-        return {"expression": expression, "error": f"evaluation failed: {type(exc).__name__}", "steps": steps}
+        # The log keeps the exception's message; the returned identifier does
+        # not. §2's ban on raw exception text is about what reaches the model
+        # and the screen — the local log is where a human goes to debug, and
+        # dropping the message there would buy nothing.
+        log.error("Zeno: unexpected failure: %s: %s", type(exc).__name__, exc)
+        return {"expression": expression,
+                "error": f"evaluation_failed: {type(exc).__name__}", "steps": steps}
 
 
 # ── Standalone test ───────────────────────────────────────────────────────────

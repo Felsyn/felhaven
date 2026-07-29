@@ -19,8 +19,9 @@ Contract:    fetch() -> {"playing": bool, "files": [{"name", "duration"}, ...]}
                  couldn't be read). Durations are cached by filename (see
                  "Duration probing" below) so a Kairos tick doesn't re-probe
                  every file every 2 s.
-                 Missing ffmpeg degrades to
-                 {"playing": False, "files": [], "error": "no_ffmpeg"}.
+                 Missing ffmpeg degrades to {"playing": False, "files": [],
+                 "error": "ffmpeg_unavailable"} — the same slug play_file()
+                 and Echo use for that condition (§2's one vocabulary).
              play_file(name) -> dict
                  Decode `name` (must already be a file in local_audio/) whole
                  into RAM via ffmpeg and hand it to harmonia.play() at
@@ -83,15 +84,24 @@ Source:      One external binary, zero new pip packages — ffmpeg, already a
 Scope:       local_audio/ only (Echo's output folder) — not a general folder
              picker. "Play what Echo produced," the whole brief.
 
-Out of LLM   No handle(), no TOOL_DEFINITION for v1 (same "Local-only / plain
-scope:       functions" shape as Echo — CONVENTIONS §2). A future
-             play_briefing brain tool is left open by the module shape, not
-             built.
+Out of LLM   No handle(), no TOOL_DEFINITION for v1 — the same out-of-LLM-scope
+scope:       decision as Echo. The module *shape* differs, though: Orpheus is
+             the §2 "Polled status + UI-driven mutations" hybrid (it HAS a
+             Kairos fetch; Echo has none), not Echo's no-fetch "Local-only /
+             plain functions" flavor. A future play_briefing brain tool is left
+             open by the shape, not built.
 
 Upstream:    kairos.py (calls fetch), panels/orpheus_panel.py (UI mutations)
 Downstream:  ffmpeg (decode) -> harmonia.py (playback ownership)
 
 Requires:    ffmpeg binary (bin/ or PATH). numpy. Stdlib otherwise.
+
+V0.02:       Audited 2026-07-25 — never-raise verified across fetch/play_file/
+             stop, error slugs already conformant (never in the output
+             allowlist); fetch()'s "no_ffmpeg" renamed to "ffmpeg_unavailable"
+             to match play_file()/Echo (§2 one vocabulary); the out-of-scope
+             note corrected to the hybrid flavor, not Echo's plain-functions
+             shape.
 """
 
 import logging
@@ -279,7 +289,7 @@ def fetch() -> dict[str, Any]:
     local_audio/ listing (each row carrying its duration) so the panel's file
     list refreshes itself with no separate watcher."""
     if not available()["ffmpeg"]:
-        return {"playing": False, "files": [], "error": "no_ffmpeg"}
+        return {"playing": False, "files": [], "error": "ffmpeg_unavailable"}
     return {"playing": harmonia.is_playing(), "files": _file_rows()}
 
 

@@ -4,13 +4,23 @@ sphynx.py — Riddle-Posing Guardian (logic)
 Metis Toolbox | Anti-Legion: ONE JOB
 
 Job:         Verify a PIN against the stored hash, and track how many
-             attempts remain. The hash lives in sphynx_data.json.
-             Nothing else — no window, no
-             subprocess, no persistence.
+             attempts remain. The hash lives in config/sphynx_data.json.
+             Nothing else — no window, no subprocess. The one thing it
+             writes is that gate file, seeded by create() on first run;
+             attempt counts never touch disk (see State).
 
-Contract:    preflight()      — validate the hash file loads; raises
-                                 HashFileError if not. Lets the panel fail
-                                 closed before it draws anything.
+Contract:    preflight()      — validate the hash file loads AND carries a
+                                 PIN; raises HashFileError if not. The panel
+                                 uses it to tell a normal launch (gate) from
+                                 a first run (no file → setup screen), not to
+                                 fail closed.
+             is_disabled()    — True if the user skipped the gate on first
+                                 run. A missing/broken file reads False.
+             riddle()         — the stored riddle to pose at the gate, or a
+                                 generic prompt if none is stored.
+             create(pin, …)   — the module's ONE writer: seed the gate file
+                                 on first run with a PIN + riddle, or a
+                                 skipped-gate flag. Atomic (see First run).
              verify(pin)      — strip + utf-8 encode + sha256 pin, compare
                                  against the stored hash. Decrements the
                                  attempt counter on a miss. Returns False
@@ -40,10 +50,16 @@ First run:   sphynx_data.json is per-user now (gitignored, no longer shipped
              stored riddle and gate normally, or bypass when disabled.
 
 Upstream:    sphynx_panel.py
-Downstream:  sphynx_data.json (per-user; written by create(), read by verify)
+Downstream:  config/sphynx_data.json (per-user, gitignored; written by
+             create(), read by verify/riddle/is_disabled)
 
 Requires:    hashlib, json, os, tempfile, pathlib (stdlib only). No tkinter —
              this module stays independently unit-testable and UI-free.
+
+V0.02:       Audited 2026-07-24 — Contract completed (is_disabled/riddle/
+             create were public but undocumented), the stale "no persistence"
+             / preflight-"fail closed" lines corrected, and a read-only
+             __main__ status block added (§3.7).
 """
 
 import hashlib
@@ -159,3 +175,18 @@ def verify(pin: str) -> bool:
 def attempts_left() -> int:
     """Read-only peek for the UI to render 'x attempts remaining'."""
     return max(0, _ATTEMPTS_REMAINING)
+
+
+if __name__ == "__main__":
+    # Read-only status probe (§3.7): report the gate's current state without
+    # touching the attempt counter or writing the file. create()/verify() are
+    # side-effecting, so they are deliberately not exercised here.
+    print(f"data file:  {_DATA_PATH}")
+    print(f"disabled:   {is_disabled()}")
+    print(f"riddle:     {riddle()!r}")
+    try:
+        preflight()
+        print("gate:       a PIN is set")
+    except HashFileError as e:
+        print(f"gate:       not set ({e})")
+    print(f"attempts:   {attempts_left()}")

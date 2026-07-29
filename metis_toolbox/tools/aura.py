@@ -26,6 +26,12 @@ Location config:
     an edit takes effect on the next Kairos tick. The AURA_LOCATION env var, if
     set, OVERRIDES the file (headless/CI). Both accept a city name, ZIP, or
     lat/lon pair — e.g. "Greenwich,UK", "10001", "51.4779,0.0".
+
+V0.02:       Audited 2026-07-25 — contract verified: handle() never raises
+             (degrades to weather_timeout / weather_offline / weather_unavailable),
+             fetch() DOES raise per §2. Added test_aura_contract.py to pin that
+             public surface (the _build() shaping was already covered by the
+             sibling test_aura_* files). Error slugs conform; no dead code.
 """
 
 import logging

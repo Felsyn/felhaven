@@ -70,6 +70,13 @@ Upstream:    pythia.py (registration + dispatch — the sole registry consumer;
 Downstream:  none. Herodotus knows nothing about the rest of the stack.
 
 Requires:    stdlib only — datetime, logging, os, pathlib, re, tempfile.
+
+V0.02:       Audited 2026-07-24 — the four read/write/list error dicts stopped
+             interpolating the caught OSError (its message carries the absolute
+             archive path into the LLM context — §2); now only the class name
+             travels, the path stays in the log. search_documents grew the same
+             OSError guard list_documents already had, so its "never raises" is
+             now whole. Regression tests added; off the output-contract allowlist.
 """
 
 import datetime
@@ -160,7 +167,7 @@ def _read_utf8(path: Path) -> "str | dict[str, Any]":
     try:
         size = path.stat().st_size
     except OSError as exc:
-        return {"error": f"read_failed: {exc}"}
+        return {"error": f"read_failed: {type(exc).__name__}"}
     if size > _MAX_DOC_BYTES:
         return {"error": f"too_large: {size} bytes exceeds the {_MAX_DOC_BYTES} cap"}
     try:
@@ -168,7 +175,7 @@ def _read_utf8(path: Path) -> "str | dict[str, Any]":
     except UnicodeDecodeError:
         return {"error": "not_utf8: file is not valid UTF-8 text"}
     except OSError as exc:
-        return {"error": f"read_failed: {exc}"}
+        return {"error": f"read_failed: {type(exc).__name__}"}
 
 
 def _atomic_write(path: Path, text: str) -> "dict[str, Any] | None":
@@ -193,7 +200,7 @@ def _atomic_write(path: Path, text: str) -> "dict[str, Any] | None":
             raise
     except OSError as exc:
         log.error("Herodotus: write failed for %s: %s", path.name, exc)
-        return {"error": f"write_failed: {exc}"}
+        return {"error": f"write_failed: {type(exc).__name__}"}
     return None
 
 
@@ -344,7 +351,7 @@ def list_documents() -> "dict[str, Any]":
                 })
     except OSError as exc:
         log.warning("Herodotus.list_documents: %s", exc)
-        return {"error": f"list_failed: {exc}"}
+        return {"error": f"list_failed: {type(exc).__name__}"}
     return {"documents": docs}
 
 
@@ -352,7 +359,7 @@ def search_documents(query: str) -> "dict[str, Any]":
     """Case-insensitive substring search across every document. Never raises.
 
     Success:  {"matches": [{"filename", "matches", "snippets": [str, ...]}, ...]}
-    Errors:   {"error": "no_matches" | "missing_query"}
+    Errors:   {"error": "no_matches" | "missing_query" | "search_failed: ..."}
     """
     q = (query or "").strip().lower()
     if not q:
@@ -362,24 +369,32 @@ def search_documents(query: str) -> "dict[str, Any]":
         return {"error": "no_matches"}
 
     out: "list[dict[str, Any]]" = []
-    for p in sorted(root.iterdir(), key=lambda r: r.name.lower()):
-        if not (p.is_file() and p.suffix.lower() == ".md"):
-            continue
-        body = _read_utf8(p)
-        if isinstance(body, dict):        # unreadable file degrades to a skip
-            log.warning("Herodotus.search: skipping %s (%s)", p.name, body["error"])
-            continue
-        snippets: "list[str]" = []
-        count = 0
-        for line in body.split("\n"):
-            if q in line.lower():
-                count += 1
-                if len(snippets) < _SEARCH_MAX_LINES:
-                    snippets.append(line.strip()[:_SNIPPET_CHARS])
-        if count:
-            out.append({"filename": p.name, "matches": count, "snippets": snippets})
-            if len(out) >= _SEARCH_MAX_FILES:
-                break
+    try:
+        for p in sorted(root.iterdir(), key=lambda r: r.name.lower()):
+            if not (p.is_file() and p.suffix.lower() == ".md"):
+                continue
+            body = _read_utf8(p)
+            if isinstance(body, dict):    # unreadable file degrades to a skip
+                log.warning("Herodotus.search: skipping %s (%s)", p.name, body["error"])
+                continue
+            snippets: "list[str]" = []
+            count = 0
+            for line in body.split("\n"):
+                if q in line.lower():
+                    count += 1
+                    if len(snippets) < _SEARCH_MAX_LINES:
+                        snippets.append(line.strip()[:_SNIPPET_CHARS])
+            if count:
+                out.append({"filename": p.name, "matches": count, "snippets": snippets})
+                if len(out) >= _SEARCH_MAX_FILES:
+                    break
+    except OSError as exc:
+        # The directory enumeration itself failed (root deleted mid-scan, or a
+        # permission error listing it). list_documents guards this same walk;
+        # search must too, or its "never raises" is a half-truth. Per-file read
+        # errors above still degrade to a skip — this is whole-scan failure.
+        log.warning("Herodotus.search_documents: %s", exc)
+        return {"error": f"search_failed: {type(exc).__name__}"}
     if not out:
         return {"error": "no_matches"}
     return {"matches": out}

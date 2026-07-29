@@ -37,6 +37,14 @@ SEARCH THREADING — a documented deviation from the house rule.
     - A single-flight guard (self._search_thread) ignores Enter while a search
       is already in flight — same idea as Kairos's _running_threads.
 ─────────────────────────────────────────────────────────────────────────────
+
+V0.02: Audited 2026-07-25 — no code change. The search-error branch renders its
+own fixed "search failed" message (it checks for the error key, not its value),
+so the tool's slug rename to "search_failed" needs no lockstep here. NOTE: this
+panel also uses one-shot self.after() timers for transient UI feedback (the
+two-click-remove confirm window, status-flash auto-clear, save-glyph reset) that
+§6 does not list among its after()/thread exceptions — flagged for a §6 pass, not
+fixed here (see the walkthrough findings).
 """
 
 import queue

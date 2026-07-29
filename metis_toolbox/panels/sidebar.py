@@ -1,3 +1,27 @@
+"""
+sidebar.py — Felhaven's navigation rail
+=======================================
+Metis Toolbox | Anti-Legion: ONE JOB
+
+Job:         The left-hand nav: one clickable row per view. A click calls the
+             on_select callback (felhaven switches views); set_active lights the
+             chosen row. Rows are dumb display surfaces — no timing of their own.
+
+Special:     The "aura" row is registered with Kairos (felhaven.py) and shows the
+             live temperature in its subtitle; its update(data) is swapped for
+             _aura_update at construction. The other rows keep the no-op base
+             update() — only aura carries live data today.
+
+Upstream:    felhaven.py — constructs Sidebar(on_select=_show_view), registers
+             row("aura") with Kairos, and calls set_active()/rescale().
+Downstream:  themis.py (temperature_unit at render time), theme.py (colors/fonts).
+
+Requires:    tkinter (stdlib).
+
+V0.02: Audited 2026-07-25 — added this header docstring (the module had none) and
+       a smoke test; verified honest, no logic change.
+"""
+
 import tkinter as tk
 
 import themis

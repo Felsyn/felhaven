@@ -16,10 +16,20 @@ Exports:
                     — call on <Configure> to keep fonts proportional;
                       pass each app's own baseline geometry
     Card            — base card widget used by all panels
+    TabHost         — Card subclass: a tab bar plus one packed active body
     PhosphorScroll  — in-theme vertical scrollbar (drop-in tk.Scrollbar replacement)
+    themed_menu(parent) / popup_menu(menu, event)
+                    — build + show an in-theme right-click popup menu
 
-Upstream:    felhaven.py, scribe.py
-Downstream:  none
+Upstream:    felhaven.py and sphynx_panel.py own a tk.Tk() root and call
+             _init_fonts; felhaven also drives rescale_fonts on <Configure>.
+             Every GUI panel imports C / FONTS / Card / TabHost /
+             PhosphorScroll / the menu helpers.
+Downstream:  none (imports only tkinter)
+
+V0.02:       Audited 2026-07-26 — corrected the Upstream/rescale docstrings off
+             the retired standalone-Scribe window; extracted TabHost and
+             themed_menu/popup_menu (each was copy-pasted 3x); first tests.
 """
 
 import tkinter as tk
@@ -98,7 +108,8 @@ def rescale_fonts(width: int, height: int, base_w: int, base_h: int) -> float:
     Recompute every font's size proportionally to the current window dimensions.
 
     base_w / base_h are the app's baseline geometry (the size at scale=1.0).
-    Felhaven passes 960, 620. Scribe passes 540, 500.
+    Felhaven passes 960, 620 and is currently the only caller (Sphynx owns a
+    root too but is fixed-size, so it inits fonts without rescaling).
     Only grows — never shrinks below the base size.
     Capped at 3x to prevent 4K ballooning.
 
@@ -143,6 +154,68 @@ class Card(tk.Frame):
         panel reflect runtime-changed state — e.g. Aura re-titling to the live
         weather location after a Settings edit."""
         self._header_lbl.config(text=text.upper())
+
+
+class TabHost(Card):
+    """A thin tabbed card: a top tab bar plus one packed active body.
+
+    Base for the three tab hosts (Moderati, Cogitator, Vox Array), which used
+    to copy this verbatim. Two-phase build, because the tab bodies must be
+    children of self.body (created by Card.__init__): the subclass calls
+    super().__init__(...) first, builds its bodies, then calls
+        self._build_tabs([(key, label, body, accent), ...], default=<key>)
+
+    Not Kairos-registered: Card (a tk.Frame) has a built-in update() that takes
+    no data arg, so a Kairos dispatch would TypeError — polled tab BODIES
+    register individually under their own worker names (see felhaven.py).
+    """
+
+    def _build_tabs(self, tabs, default: str) -> None:
+        """Build the tab bar above self.body and activate `default`.
+
+        tabs is an ordered sequence of (key, label, body_widget, accent_color).
+        Each body must already be a child of self.body, constructed but unpacked
+        — _show_tab packs the active one BELOW the tab bar (packed first), so the
+        bar stays on top.
+        """
+        # key -> (body, accent), read by _show_tab
+        self._bodies = {key: (body, accent) for key, _label, body, accent in tabs}
+
+        tab_row = tk.Frame(self.body, bg=C["card"])
+        tab_row.pack(fill="x", pady=(6, 0))
+
+        self._tabs:  dict[str, tk.Label] = {}
+        self._lines: dict[str, tk.Frame] = {}
+        for key, label, _body, _accent in tabs:
+            wrap = tk.Frame(tab_row, bg=C["card"])
+            wrap.pack(side="left", padx=(0, 14))
+            lbl = tk.Label(wrap, text=label, font=FONTS["card_header"],
+                           fg=C["text3"], bg=C["card"], cursor="hand2")
+            lbl.pack()
+            line = tk.Frame(wrap, height=1, bg=C["border"])
+            line.pack(fill="x")
+            lbl.bind("<Button-1>", lambda e, k=key: self._show_tab(k))
+            self._tabs[key]  = lbl
+            self._lines[key] = line
+
+        self._active = None
+        self._show_tab(default)
+
+    def _show_tab(self, key: str) -> None:
+        if key == self._active:
+            return
+        # Hide the current body and dim its tab (skipped on the first call).
+        if self._active is not None:
+            self._bodies[self._active][0].pack_forget()
+            self._tabs[self._active].config(fg=C["text3"])
+            self._lines[self._active].config(bg=C["border"])
+
+        # Show the chosen body and light its tab.
+        body, accent = self._bodies[key]
+        body.pack(fill="both", expand=True, pady=(6, 0))
+        self._tabs[key].config(fg=C["text1"])
+        self._lines[key].config(bg=accent)
+        self._active = key
 
 
 class PhosphorScroll(tk.Canvas):
@@ -264,3 +337,27 @@ class PhosphorScroll(tk.Canvas):
     def _leave(self, _event):
         self._hover = False
         self._redraw()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Right-click context menu
+#  Two primitives the panels compose; the item set stays panel-specific.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def themed_menu(parent) -> tk.Menu:
+    """An in-theme right-click popup menu. Build it fresh per right-click so
+    item states (e.g. Copy disabled with no selection) reflect the live
+    selection, not a stale snapshot. The caller adds commands, then calls
+    popup_menu(menu, event)."""
+    return tk.Menu(parent, tearoff=0, bg=C["card"], fg=C["text1"],
+                   activebackground=C["border"], activeforeground=C["text1"],
+                   font=FONTS["small"], borderwidth=0)
+
+
+def popup_menu(menu: tk.Menu, event) -> None:
+    """Show `menu` at the event's screen coords, always releasing the grab
+    afterward — the tk idiom that keeps input from wedging on dismiss."""
+    try:
+        menu.tk_popup(event.x_root, event.y_root)
+    finally:
+        menu.grab_release()

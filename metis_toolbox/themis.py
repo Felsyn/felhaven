@@ -41,6 +41,10 @@ Downstream:  felhaven_settings.json (committed? no — it is per-user state, so
 Requires:    json, logging, os, tempfile, pathlib (stdlib only). No tkinter —
              stays independently unit-testable and UI-free, like sphynx.py /
              cerberus.py.
+
+V0.02: Audited 2026-07-25 — verified honest (never-raise load, strict atomic
+       save); deleted the unused weather_location() getter (weather_query
+       supersedes it; nothing read the raw field alone).
 """
 
 import json
@@ -143,10 +147,6 @@ def latitude() -> float:
 
 def longitude() -> float:
     return float(load()["longitude"])
-
-
-def weather_location() -> str:
-    return str(load()["weather_location"])
 
 
 def temperature_unit() -> str:

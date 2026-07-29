@@ -7,12 +7,42 @@ tab); the ANS readout that used to sit in the Card header now lives in the body.
 
 Request-driven only; no Kairos worker, no root.after(), no threading. The unit
 converter that once shared this card is now panels/eudoxus_panel.py.
+
+V0.02:  Audited 2026-07-23 — stopped rendering Zeno's raw error codes at the
+        user and mapped them to human text; first tests (tests/test_zeno.py,
+        tests/test_zeno_panel_smoke.py).
 """
 
 import tkinter as tk
 
 from theme import C, FONTS
 from tools import zeno
+
+# Human text per Zeno error slug (CONVENTIONS §2), the panels/echo_panel.py
+# precedent. Zeno's identifiers can carry detail after ": " — "unknown_function:
+# hypot" — so _error_text splits the slug off before the lookup and puts the
+# detail back afterwards; Echo's codes are all bare, so it needs no split.
+# An unmapped code is shown raw rather than swallowed.
+_ERROR_TEXT = {
+    "parse_error":           "not a valid expression",
+    "no_previous_result":    "no previous result to use as ans",
+    "unknown_name":          "unknown name",
+    "unknown_function":      "unknown function",
+    "unsupported_operation": "unsupported",
+    "division_by_zero":      "division by zero",
+    "result_too_large":      "result too large",
+    "math_domain_error":     "outside that function's domain",
+    "evaluation_stalled":    "too long to reduce",
+    "evaluation_failed":     "evaluation failed",
+}
+
+
+def _error_text(code: str) -> str:
+    """Human text for a `slug` or `slug: detail` identifier."""
+    slug, sep, detail = code.partition(": ")
+    if slug not in _ERROR_TEXT:
+        return code
+    return f"{_ERROR_TEXT[slug]}: {detail}" if sep else _ERROR_TEXT[slug]
 
 
 class ZenoPanel(tk.Frame):
@@ -23,6 +53,10 @@ class ZenoPanel(tk.Frame):
         self._history: list[dict] = []      # most-recent first, cap 5
         self._ans: float | None = None      # last successful result
         self._expanded: set = set()         # expanded history indices
+        # Where the strip starts. 1 while the current row IS _history[0]; 0
+        # after a failed evaluation, which appends nothing — otherwise the last
+        # good result is in neither the current row nor the strip.
+        self._history_start = 0
 
         # ── ANS readout (was the Card header "ANS = …"; now in the body) ──────
         self._ans_lbl = tk.Label(
@@ -102,6 +136,8 @@ class ZenoPanel(tk.Frame):
             # Shift expanded indices up by one; drop any that overflow cap
             self._expanded = {i + 1 for i in self._expanded if i + 1 < 5}
 
+        self._history_start = 1 if "error" not in result else 0
+
         self._entry.delete(0, "end")
         self._show_ph()
 
@@ -116,14 +152,14 @@ class ZenoPanel(tk.Frame):
         if self._ans is None:
             self._ans_lbl.config(text="")
         else:
-            self._ans_lbl.config(text=f"ANS = {zeno._format_number(self._ans)}")
+            self._ans_lbl.config(text=f"ANS = {zeno.format_number(self._ans)}")
 
     # ── Rendering ───────────────────────────────────────────────────────────────
 
     def _render_current(self, result: dict):
         self._expr_lbl.config(text=result.get("expression", ""))
         if "error" in result:
-            self._val_lbl.config(text=result["error"], fg=C["red"])
+            self._val_lbl.config(text=_error_text(result["error"]), fg=C["red"])
         else:
             self._val_lbl.config(text=result.get("display", ""), fg=C["amber"])
 
@@ -136,15 +172,16 @@ class ZenoPanel(tk.Frame):
             ).pack(fill="x", padx=(16, 0))
         if "error" in result:
             tk.Label(
-                self._steps_frame, text=f"  ✕ {result['error']}",
+                self._steps_frame, text=f"  ✕ {_error_text(result['error'])}",
                 font=FONTS["tiny"], fg=C["red"], bg=C["card"], anchor="w",
             ).pack(fill="x", padx=(16, 0))
 
     def _render_history(self):
         for w in self._history_frame.winfo_children():
             w.destroy()
-        for rel_idx, item in enumerate(self._history[1:]):
-            self._render_history_row(rel_idx + 1, item)
+        start = self._history_start
+        for rel_idx, item in enumerate(self._history[start:]):
+            self._render_history_row(rel_idx + start, item)
 
     def _render_history_row(self, idx: int, item: dict):
         is_open = idx in self._expanded
@@ -183,7 +220,7 @@ class ZenoPanel(tk.Frame):
                          fg=C["text3"], bg=C["card"], anchor="w").pack(
                     fill="x", padx=(24, 0))
             if "error" in item:
-                tk.Label(step_frame, text=f"  ✕ {item['error']}",
+                tk.Label(step_frame, text=f"  ✕ {_error_text(item['error'])}",
                          font=FONTS["tiny"], fg=C["red"], bg=C["card"],
                          anchor="w").pack(fill="x", padx=(24, 0))
 

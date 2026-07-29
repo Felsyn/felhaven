@@ -90,6 +90,18 @@ class TestSanitizeFilename(unittest.TestCase):
                              f"{reserved!r} should be rejected")
 
 
+class TestAvailable(unittest.TestCase):
+    """available() is the panel's build-time ffmpeg gate (mirrors orpheus)."""
+
+    def test_reports_resolved_ffmpeg(self):
+        with mock.patch.object(echo, "_resolve", return_value="C:\\bin\\ffmpeg.exe"):
+            self.assertEqual(echo.available(), {"ffmpeg": "C:\\bin\\ffmpeg.exe"})
+
+    def test_reports_none_when_missing(self):
+        with mock.patch.object(echo, "_resolve", return_value=None):
+            self.assertEqual(echo.available(), {"ffmpeg": None})
+
+
 class TestTextToAudioGuards(unittest.TestCase):
     def test_empty_filename(self):
         self.assertEqual(echo.text_to_audio("hello world.", "///"),

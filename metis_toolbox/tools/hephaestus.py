@@ -21,7 +21,14 @@ Source:      psutil (CPU / memory / disk) + platform (node, OS name). The disk
 Upstream:    kairos.py (calls fetch), pythia.py (registration + dispatch)
 Downstream:  panels/hephaestus_panel.py (VitalsPanel — display surface)
 
-Requires:    psutil (already in the Felhaven stack)
+Requires:    psutil (already in the Felhaven stack); logging, platform, datetime,
+             pathlib (stdlib).
+
+V0.02:       Audited 2026-07-25 — fetch()/handle() split verified honest: fetch()
+             raises for Kairos, handle() degrades to the vitals_unavailable slug
+             (already §2-conformant) and never raises. No dead code; the disk read
+             is §1-anchored to __file__. Requires line completed; VitalsPanel and
+             BarMeter given their first Tk smoke coverage.
 """
 
 import logging

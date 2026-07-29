@@ -29,6 +29,13 @@ Downstream:  machine_spirit.py (all persistence + the default text),
 
 Requires:    tkinter (stdlib). No JSON handling here — that is
              machine_spirit.py's job.
+
+V0.02:       Audited 2026-07-24 — the preview-only Revert, the delegate-to-
+             machine_spirit persistence boundary, and the no-update()/no-thread
+             request-driven shape all verified honest; no code change, only this
+             marker. (Save handles no I/O error, but neither does themis_panel,
+             its cited precedent — that try/except is for input validation,
+             which this editor has none of.)
 """
 
 import tkinter as tk

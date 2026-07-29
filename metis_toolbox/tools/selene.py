@@ -23,6 +23,12 @@ Requires:    stdlib only (datetime)
 
 Note: wttr.in genuinely returns 'No moonrise' / 'No moonset' on days the moon
 doesn't cross the horizon. Those (and anything unparseable) become '—'.
+
+V0.02:       Audited 2026-07-25 — tag-only. Pure interpreter verified never-raise
+             (interpret / _moon_time / _illumination, and handle() degrades to the
+             slug moon_unavailable; an unknown phase → 🌙, never a KeyError).
+             Thorough existing coverage (test_selene + test_tool_handles); no dead
+             code.
 """
 
 from datetime import datetime

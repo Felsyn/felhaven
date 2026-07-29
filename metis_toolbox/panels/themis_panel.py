@@ -27,6 +27,9 @@ Upstream:    panels/moderati_panel.py (hosts this as the fifth tab)
 Downstream:  themis.py (all persistence + validation), theme.py (colors/fonts)
 
 Requires:    tkinter (stdlib). No JSON handling here — that is themis.py's job.
+
+V0.02: Audited 2026-07-25 — verified honest; no logic change (§6-clean: no
+       threads/after; refetch hook + SettingsError handling intact).
 """
 
 from typing import Any, Callable

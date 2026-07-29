@@ -38,6 +38,13 @@ Downstream:  tools/kepler.py (imports this module for _julian_date/_altaz —
              outside this file)
 
 Requires:    math, time, json, os, logging (stdlib only).
+
+V0.02:       Audited 2026-07-25 — contract honest (fetch() RAISES on an empty
+             catalog per §2; handle() never raises → sky_unavailable). Promoted
+             _compass to public compass() as the single source shared by kepler
+             and hypatia_panel (the zeno.format_number precedent), retiring two
+             duplicate copies. set_preset() inherits _build_snapshot's empty-
+             catalog raise — a broken-install edge, flagged not fixed.
 """
 
 import json
@@ -249,8 +256,11 @@ _COMPASS_16 = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
                "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
 
 
-def _compass(az: float) -> str:
-    """Azimuth in degrees (from North, through East) -> 16-point compass name."""
+def compass(az: float) -> str:
+    """Azimuth in degrees (from North, through East) -> 16-point compass name.
+    Public seam: kepler.py's demo and hypatia_panel both reuse this one owner so
+    the LLM digest's direction and the on-screen direction never diverge (the
+    zeno.format_number precedent — one source, no copies)."""
     return _COMPASS_16[int(((az % 360.0) + 11.25) // 22.5) % 16]
 
 
@@ -281,7 +291,7 @@ def handle() -> dict[str, Any]:
 
     planets_up = [
         {"name": p["name"], "glyph": p["glyph"],
-         "altitude_deg": round(p["alt"], 1), "direction": _compass(p["az"])}
+         "altitude_deg": round(p["alt"], 1), "direction": compass(p["az"])}
         for p in snap["planets"] if p["alt"] > 0
     ]
 
@@ -289,7 +299,7 @@ def handle() -> dict[str, Any]:
     visible.sort(key=lambda s: s["mag"])        # brightest (lowest magnitude) first
     brightest = [
         {"name": s["name"] or "(unnamed)", "magnitude": s["mag"],
-         "altitude_deg": round(s["alt"], 1), "direction": _compass(s["az"])}
+         "altitude_deg": round(s["alt"], 1), "direction": compass(s["az"])}
         for s in visible[:6]
     ]
 

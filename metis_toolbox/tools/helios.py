@@ -25,6 +25,12 @@ Note on golden hours: the ±1h window is a deliberate heuristic, not a
 placeholder. Real solar-elevation math (the sun within 6° of the horizon)
 needs latitude and date; that is out of scope and out of proportion for a
 glanceable dashboard row. Do not "upgrade" it.
+
+V0.02:       Audited 2026-07-25 — tag-only. Pure interpreter verified never-raise
+             (interpret / parse_clock / golden_hours / day_length, and handle()
+             degrades to the slug sun_times_unavailable). Thorough existing
+             coverage (test_helios + test_tool_handles); no dead code — the public
+             primitives are directly-tested seams.
 """
 
 from datetime import date, datetime, time, timedelta

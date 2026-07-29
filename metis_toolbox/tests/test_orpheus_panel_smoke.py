@@ -52,7 +52,7 @@ class TestOrpheusPanelDisabled(unittest.TestCase):
     def test_disabled_no_crash_on_update(self):
         self.assertFalse(self.panel._enabled)
         for data in (None, {"playing": False, "files": []},
-                     {"playing": False, "files": [], "error": "no_ffmpeg"}):
+                     {"playing": False, "files": [], "error": "ffmpeg_unavailable"}):
             self.panel.update(data)
             self.root.update_idletasks()
 

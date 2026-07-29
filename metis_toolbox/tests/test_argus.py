@@ -15,6 +15,7 @@ state so seeding is deterministic.
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -145,6 +146,16 @@ class TestTimelineDiff(unittest.TestCase):
         self.assertEqual(events[0]["event"], "close")
         self.assertEqual(events[0]["raddr"], "1.2.3.4:443")
 
+    def test_status_transition_emits_nothing(self):
+        # A single socket moving ESTABLISHED -> TIME_WAIT during teardown is the
+        # SAME connection (same pid/raddr/laddr); it must NOT emit a phantom
+        # close+open pair. Identity excludes the TCP status.
+        argus._update_timeline([self._conn(1, "1.2.3.4:443",
+                                           status="ESTABLISHED")])   # seed
+        argus._update_timeline([self._conn(1, "1.2.3.4:443",
+                                           status="TIME_WAIT")])     # same socket
+        self.assertEqual(len(argus._timeline), 0)
+
 
 # ── fetch() shape (integration against real psutil) ───────────────────────────
 
@@ -176,6 +187,91 @@ class TestFetchShape(unittest.TestCase):
         self.assertIn(snap["firewall"]["state"], ("ok", "unavailable"))
         self.assertIsInstance(snap["connections"], list)
         self.assertIsInstance(snap["listening"], list)
+
+
+# ── handle() / fetch() §2 contract (the LLM surface + the one raise) ───────────
+
+class TestHandleContract(unittest.TestCase):
+    """handle() is the brain-facing surface: it must slim fetch()'s full snapshot
+    and never raise. fetch() is allowed exactly one raise — a wholesale
+    net_connections() failure — which Kairos turns into a stale panel. These pin
+    both, mocking the seams (the Aura precedent) so no real network read is
+    needed."""
+
+    _SNAP = {
+        "as_of": 1.0,
+        "privilege": "user",
+        "summary": {"established": 2, "listening": 1, "other": 3,
+                    "unresolved_pids": 1},
+        # 10 connections so the [:8] slim is actually exercised.
+        "connections": [
+            {"pid": i, "proc": f"p{i}.exe", "family": "IPv4",
+             "laddr": f"10.0.0.1:{5000 + i}", "raddr": f"1.2.3.{i}:443",
+             "status": "ESTABLISHED"}
+            for i in range(10)
+        ],
+        "listening": [{"pid": 9, "proc": "svc.exe", "proto": "TCP",
+                       "laddr": "0.0.0.0:445", "state": "listening"}],
+        "traffic": {"window_s": 5.0, "up_bps": 100, "down_bps": 200,
+                    "per_nic": {}},
+        "dns": {"as_of": 1.0, "state": "ok",
+                "entries": [{"name": "a.example", "records": ["1.1.1.1"]}]},
+        "firewall": {"as_of": 1.0, "state": "ok", "domain": "on",
+                     "private": "on", "public": "off"},
+        "timeline": [{"t": 1.0, "event": "open", "proc": "p0.exe",
+                      "raddr": "1.2.3.0:443"}],
+    }
+
+    def test_handle_slims_the_snapshot(self):
+        with mock.patch.object(argus, "fetch", return_value=self._SNAP):
+            out = argus.handle()
+        # Summary counts pass through (unresolved_pids -> unattributed_pids).
+        self.assertEqual(out["established"], 2)
+        self.assertEqual(out["listening"], 1)
+        self.assertEqual(out["unattributed_pids"], 1)
+        self.assertEqual(out["dns_cached_names"], 1)
+        self.assertEqual(out["firewall"]["state"], "ok")
+        # The heavy payloads never reach the model: no full connection table,
+        # no timeline. Only a capped top-8 sample of connections.
+        self.assertEqual(len(out["top_connections"]), 8)
+        self.assertNotIn("connections", out)
+        self.assertNotIn("timeline", out)
+        self.assertEqual(set(out["top_connections"][0]),
+                         {"proc", "remote", "status"})
+
+    def test_top_connections_rank_established_first(self):
+        # With no per-connection metric on Windows, "top" must at least mean
+        # "live first": a TIME_WAIT teardown entry ahead of an ESTABLISHED one in
+        # the raw table must NOT out-rank the live connection in the top-8 sample.
+        snap = dict(self._SNAP)
+        snap["connections"] = [
+            {"pid": 1, "proc": "tw.exe", "family": "IPv4",
+             "laddr": "10.0.0.1:1", "raddr": "9.9.9.9:443",
+             "status": "TIME_WAIT"},
+            {"pid": 2, "proc": "live.exe", "family": "IPv4",
+             "laddr": "10.0.0.1:2", "raddr": "8.8.8.8:443",
+             "status": "ESTABLISHED"},
+        ]
+        with mock.patch.object(argus, "fetch", return_value=snap):
+            out = argus.handle()
+        self.assertEqual(out["top_connections"][0]["status"], "ESTABLISHED")
+        self.assertEqual(out["top_connections"][0]["proc"], "live.exe")
+
+    def test_handle_never_raises_on_snapshot_failure(self):
+        # fetch() raising wholesale (the net_connections() case) must degrade to
+        # a §2 slug, not propagate — the model can recover from a dict.
+        with mock.patch.object(argus, "fetch",
+                               side_effect=OSError("net table gone")):
+            out = argus.handle()
+        self.assertEqual(out, {"error": "network_unavailable"})
+
+    def test_fetch_raises_on_wholesale_net_connections_failure(self):
+        # The documented single raise: if the connection table itself can't be
+        # read, fetch() lets it through so Kairos delivers None (panel stays stale).
+        with mock.patch.object(argus.psutil, "net_connections",
+                               side_effect=OSError("boom")):
+            with self.assertRaises(OSError):
+                argus.fetch()
 
 
 if __name__ == "__main__":

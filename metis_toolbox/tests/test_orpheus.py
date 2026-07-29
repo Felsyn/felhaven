@@ -219,9 +219,10 @@ class TestFileRows(unittest.TestCase):
 
 class TestFetch(unittest.TestCase):
     def test_no_ffmpeg_degrades(self):
+        # The slug matches play_file()/Echo — one vocabulary for "ffmpeg missing".
         with mock.patch.object(orpheus, "available", return_value={"ffmpeg": None}):
             self.assertEqual(orpheus.fetch(),
-                             {"playing": False, "files": [], "error": "no_ffmpeg"})
+                             {"playing": False, "files": [], "error": "ffmpeg_unavailable"})
 
     def test_reports_playing_and_files(self):
         rows = [{"name": "a.opus", "duration": 12.5}]

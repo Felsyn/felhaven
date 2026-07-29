@@ -32,11 +32,11 @@ Shared seam:  synthesize(), take_chunk(), save_wav(), load_wav() and SAMPLE_RATE
                  the first spoken line isn't delayed by the one-time model load.
              stop() -> None
                  Drop any queued sentences and halt current playback (barge-in,
-                 e.g. when a new question is asked). Barge-in is INSTANT now —
-                 stop() calls harmonia.stop(), which interrupts an in-flight
-                 sd.wait() rather than merely discarding what's still queued
-                 (a behavior change from the old module-local _play_lock design;
-                 see harmonia.py's docstring, decision D4).
+                 e.g. when a new question is asked). Barge-in is near-instant:
+                 stop() calls harmonia.stop(), which FLUSHES Harmonia's buffer —
+                 the owned output stream keeps running and simply emits silence,
+                 so audio falls quiet within ~its device latency with no
+                 cross-thread device call (see harmonia.py's docstring).
 
 Device:      Calliope does not touch sounddevice or own an audio queue anymore.
              Every synthesized chunk (and every filler) is handed to
@@ -68,6 +68,12 @@ Downstream:  kokoro-onnx (synthesis) → harmonia.py (playback ownership)
 
 Requires:    kokoro-onnx, numpy. Stdlib otherwise. (sounddevice is Harmonia's
              dependency now, not Calliope's.)
+
+V0.02:       Audited 2026-07-24 — never-raise contract verified across
+             speak/synthesize/stop and the two-stage pipeline; no error-dict
+             surface (infrastructure, not a brain tool, so never in the §2
+             output-contract allowlist); shared seam + call sites confirmed.
+             No code change, only this marker.
 """
 
 import hashlib
@@ -456,14 +462,14 @@ def _drain(q: "queue.Queue[Any]") -> None:
 def stop() -> None:
     """Barge-in: bump the (text-side) epoch so in-flight synthesis and any
     buffered text/release-queue chunk are discarded, then hand off to
-    harmonia.stop() to actually interrupt whatever is mid-playback. Used when
-    a new question is asked so stale narration doesn't pile up. Never raises.
+    harmonia.stop() to silence whatever is mid-playback. Used when a new
+    question is asked so stale narration doesn't pile up. Never raises.
 
-    Barge-in is now INSTANT: harmonia.stop() calls sd.stop(), which cuts off
-    an in-flight sd.wait() — unlike the old module-local design, which could
-    only discard what was still queued and had to wait out the current
-    chunk. Side effect: because Harmonia has no channels, this also stops a
-    briefing Orpheus has playing (see harmonia.py's decisions log)."""
+    Barge-in is near-instant: harmonia.stop() FLUSHES its playback buffer, so
+    the owned output stream falls silent within ~its device latency — no
+    cross-thread device call (the old sd.stop() race that crashed the app on
+    barge-in is gone; see harmonia.py + CONVENTIONS §12). Side effect: because
+    Harmonia has no channels, this also stops a briefing Orpheus has playing."""
     global _epoch, _real_audio_queued, _answer_produced, _turn_ended, _filler_active
     with _epoch_lock:
         _epoch += 1

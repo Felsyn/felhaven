@@ -126,7 +126,7 @@ class TestMorpheusHandle(unittest.TestCase):
     def test_no_results_degrades(self):
         with mock.patch("tools.morpheus.available", return_value=self._AVAIL), \
                 mock.patch("tools.morpheus.search",
-                           return_value=[{"error": "search failed"}]), \
+                           return_value=[{"error": "search_failed"}]), \
                 mock.patch("tools.morpheus.play") as play:
             self.assertEqual(morpheus.play_music("obscure")["error"], "no_results")
             play.assert_not_called()               # never play when search fails

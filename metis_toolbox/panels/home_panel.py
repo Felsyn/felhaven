@@ -21,8 +21,23 @@ Streaming:   pythia.ask() streams the answer token-by-token via an on_delta
              at once after a long wait. The worker thread pushes each delta onto
              the queue; the main-thread poll appends it to the transcript.
              pythia.ask() also reports one on_event "stats" payload per call
-             (tokens, wall time, tool counts, whether Stop cancelled it) — the
-             worker pushes that onto the same queue as a "stats" item.
+             (tokens, wall time, tool counts, whether Stop cancelled it, and
+             turn_messages — see History below) — the worker pushes that onto
+             the same queue as a "stats" item.
+
+History:     self._history is a list of TURNS, not a flat message list — each
+             entry is one completed ask() call's turn_messages verbatim (the
+             user message, every assistant/tool message its tool-calling loop
+             produced, and the final assistant reply), windowed to the last
+             _MAX_HISTORY_TURNS. _on_submit flattens it back to one list for
+             the next ask() call's `history` param. This matters because
+             gemma4:e2b (a 2B model) imitates its own transcript: storing only
+             flattened user/assistant prose (the pre-2026-07-29 shape) hid
+             every tool_call from the history the model sees, and after a few
+             turns it started narrating intent ("I need to call the
+             get_weather tool") instead of ever calling a tool again. Keeping
+             the real exchange visible — and windowing it so the poison from
+             an occasional bad turn ages out — is the fix (CONVENTIONS §12).
 
 Epochs:      Every submit AND every Refresh bumps self._epoch. Each queued item
              (delta/stats/done) carries the epoch it was produced under, so if
@@ -66,6 +81,12 @@ Downstream:  pythia.py (the oracle), calliope.py (narration),
              panels/hestia_panel.py (command surface), theme.py (colors)
 
 Requires:    tkinter, threading, queue (stdlib); pythia, calliope.
+
+V0.02: Audited 2026-07-26 — verified honest, no dead code. Added HomePanel's
+pythia.ask worker thread + persistent after()-poll to CONVENTIONS §6's threading
+exceptions, and narrowed §6 (a single one-shot UI-feedback after() — e.g. the
+latency filler below — is now permitted). Themed right-click menu is still
+copy-pasted 3× (echo/emanon_panel); consolidation is theme, session 29.
 """
 
 import queue
@@ -76,10 +97,11 @@ from typing import Any, Optional
 
 import calliope
 import pythia
-from theme import C, FONTS, PhosphorScroll
+from theme import C, FONTS, PhosphorScroll, themed_menu, popup_menu
 from panels.hestia_panel import HestiaBar
 
 _POLL_MS = 60           # how often the main thread drains the worker's queue
+_MAX_HISTORY_TURNS = 3  # how many past turns ride along in the next ask() call
 
 # A sentence ends at .!? (optionally closed by a quote/bracket) FOLLOWED by
 # whitespace — the trailing space proves the sentence is complete, so "3.5" or
@@ -107,10 +129,17 @@ class HomePanel(tk.Frame):
         self._thread: Optional[threading.Thread] = None
         self._cancel = threading.Event()
         self._epoch = 0
-        self._history: list[dict[str, Any]] = []     # running {role, content} turns
+        # Running history, one entry per completed turn — each entry is that
+        # turn's OWN full message list (pythia.ask()'s turn_messages: the user
+        # message, every assistant/tool message its tool-calling loop produced,
+        # and the final assistant reply), windowed to the last _MAX_HISTORY_TURNS.
+        # Storing the real exchange (not just prose) matters for a small model:
+        # it imitates its own transcript, so a history of flattened prose with
+        # no visible tool_calls taught it to narrate ("I need to call...")
+        # instead of actually calling tools — see CONVENTIONS §12.
+        self._history: list[list[dict[str, Any]]] = []
         self._speak_seq = 0                           # unique tag id per speak button
         # Per-turn streaming state (reset on each submit):
-        self._pending_user = ""                       # user msg awaiting its answer
         self._resp_started = False                    # printed the "pythia ›" prefix yet
         self._say_turn = False                        # narrate this turn aloud?
         self._say_buf = ""                            # unspoken tail awaiting a sentence end
@@ -178,30 +207,15 @@ class HomePanel(tk.Frame):
         pass
 
     # ── Right-click context menus (transcript: copy; entry: cut/copy/paste) ───
-    def _themed_menu(self) -> tk.Menu:
-        """One in-theme popup menu — built fresh per right-click so its item
-        states (e.g. Copy disabled with no selection) always reflect the
-        current selection rather than a stale snapshot."""
-        return tk.Menu(self, tearoff=0, bg=C["card"], fg=C["text1"],
-                       activebackground=C["border"], activeforeground=C["text1"],
-                       font=FONTS["small"], borderwidth=0)
-
-    @staticmethod
-    def _popup(menu: tk.Menu, event: "tk.Event[Any]") -> None:
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
-
     def _show_log_menu(self, event: "tk.Event[Any]") -> None:
         """Transcript is read-only, but selection + clipboard copy still work
         on a state='disabled' Text — only insert/delete are blocked."""
         has_selection = bool(self._log.tag_ranges("sel"))
-        menu = self._themed_menu()
+        menu = themed_menu(self)
         menu.add_command(label="Copy", command=self._copy_log_selection,
                          state="normal" if has_selection else "disabled")
         menu.add_command(label="Select All", command=self._select_all_log)
-        self._popup(menu, event)
+        popup_menu(menu, event)
 
     def _copy_log_selection(self) -> None:
         try:
@@ -216,7 +230,7 @@ class HomePanel(tk.Frame):
 
     def _show_entry_menu(self, event: "tk.Event[Any]") -> None:
         has_selection = self._entry.selection_present()
-        menu = self._themed_menu()
+        menu = themed_menu(self)
         menu.add_command(label="Cut", command=lambda: self._entry.event_generate("<<Cut>>"),
                          state="normal" if has_selection else "disabled")
         menu.add_command(label="Copy", command=lambda: self._entry.event_generate("<<Copy>>"),
@@ -224,7 +238,7 @@ class HomePanel(tk.Frame):
         menu.add_command(label="Paste", command=lambda: self._entry.event_generate("<<Paste>>"))
         menu.add_separator()
         menu.add_command(label="Select All", command=lambda: self._entry.select_range(0, "end"))
-        self._popup(menu, event)
+        popup_menu(menu, event)
 
     # ── Transcript helpers (main thread only) ─────────────────────────────────
     def _print(self, text: str, tag: str) -> None:
@@ -290,6 +304,14 @@ class HomePanel(tk.Frame):
             if sentence:
                 calliope.speak(sentence)
 
+    def _maybe_speak_filler(self, epoch: int, cancel: threading.Event) -> None:
+        """Play the latency-masking filler only if this turn is still live — a
+        Stop (cancel set) or a Refresh / new question (epoch advanced) during the
+        filler delay suppresses it, so a filler never blips in after the user has
+        already silenced narration."""
+        if epoch == self._epoch and not cancel.is_set():
+            calliope.speak_filler()
+
     # ── Submit → worker thread ────────────────────────────────────────────────
     def _on_submit(self, _event: "Optional[tk.Event[Any]]" = None) -> None:
         # Single-flight: ignore Enter while the oracle is still answering.
@@ -306,23 +328,30 @@ class HomePanel(tk.Frame):
         calliope.stop()
         # Reset per-turn streaming state. Snapshot auto-speak once so a mid-answer
         # lamp toggle doesn't start/stop narration halfway through.
-        self._pending_user = msg
         self._resp_started = False
         self._say_turn = calliope.auto_speak_enabled()
         self._say_buf = ""
-        # Mask the synth latency: after a short beat (so she doesn't react the
-        # instant you hit Enter), play a pre-rendered filler while the real answer
-        # generates. calliope.speak_filler() self-cancels if the real answer's
-        # audio has already started, so a fast reply is never played over.
-        if self._say_turn:
-            self.after(calliope.filler_delay_ms(), calliope.speak_filler)
-
-        history = list(self._history)          # snapshot for the worker thread
+        # Snapshot for the worker thread — flatten the windowed turns back into
+        # one flat message list, which is exactly the shape ask()'s `history`
+        # param expects.
+        history = [m for turn in self._history for m in turn]
         self._epoch += 1
         epoch = self._epoch
         self._cancel = threading.Event()
         cancel = self._cancel
         self._hestia.set_running(True)
+
+        # Mask the synth latency: after a short beat (so she doesn't react the
+        # instant you hit Enter), play a pre-rendered filler while the real answer
+        # generates — but only if THIS turn is still the live one when the beat
+        # elapses. A Stop (sets `cancel`) or a Refresh / new question (bumps the
+        # epoch) in that window suppresses it, so a filler never blips in after
+        # the user already silenced narration. calliope.speak_filler() also
+        # self-cancels once the real answer's audio has started, so a fast reply
+        # is never played over.
+        if self._say_turn:
+            self.after(calliope.filler_delay_ms(),
+                       lambda ep=epoch, cxl=cancel: self._maybe_speak_filler(ep, cxl))
 
         def _run(m: str = msg, h: "list[dict[str, Any]]" = history,
                  ep: int = epoch, cxl: threading.Event = cancel) -> None:
@@ -443,5 +472,11 @@ class HomePanel(tk.Frame):
         self._append_speak_button(answer)
         self._print("\n", "pythia")
 
-        self._history.append({"role": "user", "content": self._pending_user})
-        self._history.append({"role": "assistant", "content": answer})
+        # Persist the turn's REAL exchange (user msg + every assistant/tool
+        # message ask()'s loop produced), not just flattened prose — see the
+        # comment on self._history's declaration. Then keep only the last
+        # _MAX_HISTORY_TURNS turns so history stays bounded.
+        turn = (self._last_stats or {}).get("turn_messages") or []
+        if turn:
+            self._history.append(list(turn))
+            del self._history[:-_MAX_HISTORY_TURNS]

@@ -15,6 +15,12 @@ The panel does no astronomy: RA/Dec -> alt/az lives in tools/hypatia.py. The
 only math here is alt/az -> canvas x/y (azimuthal equidistant projection),
 plus small display lookups (cloud-cover -> star glyphs, a fixed dim ramp for
 the simulation/selection color states).
+
+V0.02: Audited 2026-07-25 — dropped this panel's duplicate _compass for the
+shared hypatia.compass, so the on-screen planet direction and the LLM digest's
+direction can never diverge. Verified ConditionsWidget is safe against aura's
+int cloud_cover_pct + string moon_illumination (no §10 string-compare bug — the
+`<=` clarity thresholds only ever see the int). No behavior change.
 """
 
 import math
@@ -68,13 +74,6 @@ _SIM_NOTICE = {
 # their canvas tag_binds are registered once at panel construction rather
 # than re-bound on every redraw (the constellation-abbr precedent).
 _PLANET_NAMES = ["Mercury", "Venus", "Mars", "Jupiter", "Saturn"]
-
-_COMPASS_16 = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
-               "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
-
-
-def _compass(az: float) -> str:
-    return _COMPASS_16[int(((az % 360.0) + 11.25) // 22.5) % 16]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -398,7 +397,7 @@ class HypatiaPanel(Card):
             if planet is not None:
                 self._info_name_lbl.config(text=f"{planet['glyph']} {planet['name']}")
                 self._info_body_lbl.config(
-                    text=f"{planet['alt']:.0f}° above the horizon, {_compass(planet['az'])}")
+                    text=f"{planet['alt']:.0f}° above the horizon, {hypatia.compass(planet['az'])}")
                 self._info_scroll.scroll_to_top()
                 return
             self._selected_planet = None   # planet dropped out of this tick's list

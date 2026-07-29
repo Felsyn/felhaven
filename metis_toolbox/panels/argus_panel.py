@@ -15,6 +15,12 @@ ago", firewall profiles → colored dots. Same split as Aura → Helios/Selene.
 
 Kairos contract (single method): update(data).
     data is None  -> summary shows "stale"; sections hold their last good state.
+
+V0.02:  Audited 2026-07-25. Report-only display verified: no after() (only the
+        user-driven ▶/▼ section toggles), None -> "stale" holds last good state,
+        per-field degradation surfaced (DNS unavailable, firewall not-ok). Health
+        dot shows visibility, never threat. No error-slug map — fetch() degrades
+        per-field, so the panel consumes state, never an {"error": ...} dict.
 """
 
 import time

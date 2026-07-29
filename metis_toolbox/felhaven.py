@@ -16,6 +16,12 @@ Drop this folder on a flash drive and run on any PC with Python 3.10+.
 
 Dependencies: psutil, requests (pip install psutil requests)
 Visual identity: theme.py (colors, fonts, Card base widget)
+
+V0.02: Audited 2026-07-25 — verified honest (banner module list accurate, no dead
+       code); the root shell keeps its prose docstring by design — it is the entry
+       point, not a tool, so it has no Job/Upstream/Downstream shape. felhaven's
+       own root.after() calls (_schedule_save debounce, _on_resize) are the
+       shell's timing, outside §6's panel rule.
 """
 
 import tkinter as tk

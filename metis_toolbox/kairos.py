@@ -9,9 +9,24 @@ No panel manages its own timing. Panels are dumb display surfaces.
 Kairos owns the clock.
 
 Thread-safety contract:
-    result_queue is the only shared object between worker threads and panels.
-    Workers write to it. _drain_queue (main thread) reads from it.
-    No other cross-thread access.
+    result_queue is the only object shared between the worker threads and the
+    main thread (§6). Workers write to it; _drain_queue (main thread) reads it
+    and calls panel.update(). A worker's fetch() may run its own concurrency
+    internally (e.g. Midas's ThreadPoolExecutor over Cerberus's lock-guarded
+    ledger, §12) — but that never crosses into Kairos or a panel, so the
+    one-queue contract holds.
+
+Upstream:    felhaven.py — constructs Kairos, registers panels, calls
+             start()/stop(), and wires refetch() to the Settings tab.
+Downstream:  each WORKERS entry's fetch() (tools.*), resolved by dotted path at
+             startup; each registered panel's update(data), called on the main
+             thread.
+
+Requires:    importlib, logging, queue, threading, time (stdlib only).
+
+V0.02: Audited 2026-07-25 — verified honest (exhaustive coverage, no dead code);
+       tightened the thread-safety contract to §6's precise worker↔main-thread
+       wording (§12); added Upstream/Downstream/Requires.
 """
 
 import importlib
@@ -125,3 +140,12 @@ class Kairos:
             elapsed = time.monotonic() - start
             log.error(f"{name} fetch failed after {elapsed:.2f}s: {type(e).__name__}: {e}")
         self.result_queue.put((name, result))
+
+
+if __name__ == "__main__":
+    # Read-only registry probe: __init__ never touches root (only start/stop/
+    # _tick do), so None is safe. Resolves all WORKERS dotted paths and prints
+    # them — a CLI complement to test_kairos's Group A registry-integrity tests.
+    k = Kairos(None)
+    print(f"[Kairos] {len(k._fetch_fns)} workers resolve: "
+          f"{', '.join(k._fetch_fns)}")

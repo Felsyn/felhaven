@@ -4,7 +4,11 @@ Echo panel — paste text, get an audio file.
 EchoPanel is a bare tk.Frame tab body inside VoxArrayPanel (the ECHO tab), the
 same shape as the Cogitator tab bodies. It is NOT registered with Kairos.
 
-Top to bottom inside self:
+If ffmpeg isn't found, the tab shows a calm placeholder and builds no convert UI
+— echo.available() is read once at build time, the OrpheusPanel / MorpheusPanel
+precedent (CONVENTIONS §7). The dashboard never crashes over a missing binary.
+
+Top to bottom inside self (only when ffmpeg is present):
     Text box       — paste the Markdown / prose to narrate (multi-line).
     Filename row    — the output name; ".opus" is appended by Echo if omitted.
     Send button     — inert (dim, unbound) until BOTH fields are non-empty after
@@ -33,6 +37,10 @@ CONVERSION THREADING + DRAIN — a documented, house-rule-aware pattern.
   A single-flight guard (self._converting) makes a second click while a
   conversion is in flight a no-op, not a queued second job.
 ─────────────────────────────────────────────────────────────────────────────
+
+V0.02: Audited 2026-07-25 — wired to echo.available() so a missing ffmpeg
+disables the tab with a placeholder (§7), matching OrpheusPanel; the daemon
+thread + bounded after() drain chain are now named in CONVENTIONS §6.
 """
 
 import queue
@@ -40,12 +48,15 @@ import threading
 import tkinter as tk
 from typing import Any
 
-from theme import C, FONTS
+from theme import C, FONTS, themed_menu, popup_menu
 
 from tools import echo
 
 # How often the drain chain polls the result queue while a conversion runs.
 _DRAIN_MS = 150
+
+# Placeholder shown when ffmpeg can't be resolved (OrpheusPanel precedent).
+_NO_BIN_MSG = "ffmpeg not found — drop ffmpeg.exe in bin\\ or install to PATH"
 
 # Human-readable status text per Echo error code (anything unknown falls back to
 # the raw code so a new code is still surfaced, never swallowed).
@@ -68,6 +79,17 @@ class EchoPanel(tk.Frame):
         self._result_q: queue.Queue = queue.Queue()
         self._converting = False
         self._drain_after_id = None
+
+        # No ffmpeg → no Opus encode is possible. Show a calm placeholder and
+        # build no convert UI (CONVENTIONS §7; the OrpheusPanel precedent).
+        # echo.available() is the single source of truth — the panel never
+        # re-implements the bin/-then-PATH resolution.
+        self._enabled = bool(echo.available()["ffmpeg"])
+        if not self._enabled:
+            tk.Label(self, text=_NO_BIN_MSG, font=FONTS["small_italic"],
+                     fg=C["text3"], bg=C["card"], anchor="w",
+                     justify="left", wraplength=560).pack(anchor="w", pady=(10, 0))
+            return
 
         # ── Text box ─────────────────────────────────────────────────────────
         tk.Label(self, text="TEXT", font=FONTS["card_header"], fg=C["text3"],
@@ -142,24 +164,9 @@ class EchoPanel(tk.Frame):
     # The text box is editable (unlike Pythia's read-only transcript), so it
     # gets the full Cut/Copy/Paste/Select All set, same as the filename entry.
 
-    def _themed_menu(self) -> tk.Menu:
-        """One in-theme popup menu — built fresh per right-click so its item
-        states (e.g. Cut/Copy disabled with no selection) always reflect the
-        current selection rather than a stale snapshot."""
-        return tk.Menu(self, tearoff=0, bg=C["card"], fg=C["text1"],
-                       activebackground=C["border"], activeforeground=C["text1"],
-                       font=FONTS["small"], borderwidth=0)
-
-    @staticmethod
-    def _popup(menu: tk.Menu, event: "tk.Event[Any]") -> None:
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
-
     def _show_text_menu(self, event: "tk.Event[Any]") -> None:
         has_selection = bool(self._text.tag_ranges("sel"))
-        menu = self._themed_menu()
+        menu = themed_menu(self)
         menu.add_command(label="Cut", command=lambda: self._text.event_generate("<<Cut>>"),
                          state="normal" if has_selection else "disabled")
         menu.add_command(label="Copy", command=lambda: self._text.event_generate("<<Copy>>"),
@@ -167,14 +174,14 @@ class EchoPanel(tk.Frame):
         menu.add_command(label="Paste", command=lambda: self._text.event_generate("<<Paste>>"))
         menu.add_separator()
         menu.add_command(label="Select All", command=self._select_all_text)
-        self._popup(menu, event)
+        popup_menu(menu, event)
 
     def _select_all_text(self) -> None:
         self._text.tag_add("sel", "1.0", "end")
 
     def _show_entry_menu(self, event: "tk.Event[Any]") -> None:
         has_selection = self._fname_entry.selection_present()
-        menu = self._themed_menu()
+        menu = themed_menu(self)
         menu.add_command(label="Cut", command=lambda: self._fname_entry.event_generate("<<Cut>>"),
                          state="normal" if has_selection else "disabled")
         menu.add_command(label="Copy", command=lambda: self._fname_entry.event_generate("<<Copy>>"),
@@ -182,7 +189,7 @@ class EchoPanel(tk.Frame):
         menu.add_command(label="Paste", command=lambda: self._fname_entry.event_generate("<<Paste>>"))
         menu.add_separator()
         menu.add_command(label="Select All", command=lambda: self._fname_entry.select_range(0, "end"))
-        self._popup(menu, event)
+        popup_menu(menu, event)
 
     # ── Status helpers ──────────────────────────────────────────────────────
 

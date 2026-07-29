@@ -1,31 +1,50 @@
 #!/usr/bin/env python3
 """
-SCRIBE — Tasks & Notes (Metis tool module, headless)
+SCRIBE — Tasks & Notes persistence (Metis tool module, headless)
 "Ex tenebris surgit lumen posteris"
 
-Job:         Store and manage the to-do list and notes. Local CRUD only.
+Job:         Store the to-do list and notes. Persist the SCRIBE tab's shared
+             data dict to scribe_data.json — read it at startup, write it back
+             atomically on save. The panel owns all task/note mutation.
 
-Pure task & notes state management for Felhaven. No GUI, no Tkinter.
-Persists to scribe_data.json at the app root, anchored to __file__.
+Contract:    Root-level persistence flavor (like themis.py): no fetch(), no
+             TOOL_DEFINITION, not a Pythia brain tool. Two plain functions:
 
-Public API:
-    handle()                -> dict   # full snapshot (read-only)
-    add_task(text)          -> dict
-    toggle_task(index)      -> dict
-    delete_task(index)      -> dict
-    set_notes(text)         -> dict
-    append_note(line)       -> dict
-    load_data()             -> dict
-    save_data(data)         -> None
+               load_data()      — read scribe_data.json, or a clean default
+                                  ({"tasks": [], "notes": ""}) when it is
+                                  missing, unreadable, or not a JSON object.
+                                  Never raises; guarantees the tasks/notes keys
+                                  the panel indexes directly.
+               save_data(data)  — write the dict atomically (tempfile in the
+                                  same dir + os.replace, §9) so a crash mid-write
+                                  can't truncate the file. Never raises: it runs
+                                  on the Tk main thread via felhaven's debounced
+                                  _flush_save, so a disk error is logged, not
+                                  thrown into the UI.
 
-DATA FILE — scribe_data.json at the app root, anchored to __file__ (portable).
-            Schema: { "tasks": [{"text": str, "done": bool}, ...], "notes": str }
+Upstream:    felhaven.py (load at startup; save through the CogitatorPanel
+             on_save callback), panels/scribe_panel.py (mutates the dict).
+Downstream:  scribe_data.json (committed? no — per-user state, gitignored, §9).
 
-Dependencies: stdlib only.
+DATA FILE:   scribe_data.json at the app root, anchored to __file__ (portable).
+             Schema: { "tasks": [{"text": str, "done": bool}, ...], "notes": str }
+
+Requires:    json, logging, os, tempfile, pathlib (stdlib only). No tkinter —
+             stays independently unit-testable and UI-free, like themis.py.
+
+V0.02: Audited 2026-07-25 — deleted the unused task/notes tool interface
+       (add_task/toggle_task/delete_task/set_notes/append_note/handle; the
+       panel owns mutation), made save_data atomic (§9), print → logger.
 """
 
 import json
+import logging
+import os
+import tempfile
 from pathlib import Path
+from typing import Any
+
+log = logging.getLogger("METIS.scribe")
 
 # ── Portable data path ───────────────────────────────────────────────────────
 # Anchored to this file, not the launching script — stable regardless of how
@@ -38,106 +57,53 @@ DATA_FILE = APP_DIR / "scribe_data.json"
 #  DATA LAYER
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_data() -> dict:
-    """Return persisted data, or a clean default if none exists."""
+def load_data() -> dict[str, Any]:
+    """Return persisted data, or a clean default when the file is missing,
+    unreadable, or not a JSON object. Never raises.
+
+    Guarantees the "tasks" and "notes" keys the panel indexes directly, so a
+    valid-but-partial file can't KeyError the panel at build time.
+    """
     if DATA_FILE.exists():
         try:
-            return json.loads(DATA_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+            raw = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+        except Exception as e:
+            log.warning("scribe: could not read %s (%s) — using empty default",
+                        DATA_FILE.name, type(e).__name__)
+        else:
+            if isinstance(raw, dict):
+                raw.setdefault("tasks", [])
+                raw.setdefault("notes", "")
+                return raw
+            log.warning("scribe: %s root is not an object — using empty default",
+                        DATA_FILE.name)
     return {"tasks": [], "notes": ""}
 
 
-def save_data(data: dict) -> None:
-    """Write data to disk. Silently logs on failure (never crashes Metis)."""
+def save_data(data: dict[str, Any]) -> None:
+    """Write *data* to scribe_data.json atomically (tempfile + os.replace, §9),
+    so a crash mid-write leaves the previous file intact.
+
+    Never raises: this runs on the Tk main thread (felhaven's debounced
+    _flush_save), so a disk error is logged and swallowed rather than thrown
+    into the UI.
+    """
     try:
-        DATA_FILE.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        directory = os.path.dirname(os.path.abspath(DATA_FILE))
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".scribe-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, DATA_FILE)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
     except Exception as e:
-        print(f"[scribe] save error: {e}")
+        log.warning("scribe: save error: %s", e)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  METIS TOOL INTERFACE
-#  All public functions load → mutate → save → return a snapshot dict.
-#  The snapshot is human- and machine-readable JSON-serialisable.
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _snapshot(data: dict) -> dict:
-    """
-    Produce the canonical Metis-readable snapshot.
-
-    {
-        "tasks":      [{"index": int, "text": str, "done": bool}, ...],
-        "open_count": int,
-        "done_count": int,
-        "notes":      str,
-        "data_file":  str   ← absolute path, for Metis context
-    }
-    """
-    tasks = [
-        {"index": i, "text": t["text"], "done": t["done"]}
-        for i, t in enumerate(data.get("tasks", []))
-    ]
-    open_count = sum(1 for t in tasks if not t["done"])
-    return {
-        "tasks":      tasks,
-        "open_count": open_count,
-        "done_count": len(tasks) - open_count,
-        "notes":      data.get("notes", ""),
-        "data_file":  str(DATA_FILE),
-    }
-
-
-def handle() -> dict:
-    """Return a full snapshot of the current tasks and notes. Read-only."""
-    return _snapshot(load_data())
-
-
-def add_task(text: str) -> dict:
-    """Append a new open task. Returns updated snapshot."""
-    text = text.strip()
-    if not text:
-        return handle()
-    data = load_data()
-    data["tasks"].append({"text": text, "done": False})
-    save_data(data)
-    return _snapshot(data)
-
-
-def toggle_task(index: int) -> dict:
-    """Flip the done/open state of task at *index*. Returns updated snapshot."""
-    data = load_data()
-    tasks = data.get("tasks", [])
-    if 0 <= index < len(tasks):
-        tasks[index]["done"] = not tasks[index]["done"]
-        save_data(data)
-    return _snapshot(data)
-
-
-def delete_task(index: int) -> dict:
-    """Remove task at *index*. Returns updated snapshot."""
-    data = load_data()
-    tasks = data.get("tasks", [])
-    if 0 <= index < len(tasks):
-        tasks.pop(index)
-        save_data(data)
-    return _snapshot(data)
-
-
-def set_notes(text: str) -> dict:
-    """Overwrite the notes field entirely. Returns updated snapshot."""
-    data = load_data()
-    data["notes"] = text
-    save_data(data)
-    return _snapshot(data)
-
-
-def append_note(line: str) -> dict:
-    """Append *line* to notes (separated by newline). Returns updated snapshot."""
-    data = load_data()
-    existing = data.get("notes", "").rstrip()
-    data["notes"] = (existing + "\n" + line.strip()) if existing else line.strip()
-    save_data(data)
-    return _snapshot(data)
+if __name__ == "__main__":
+    d = load_data()
+    print(f"[Scribe] {len(d['tasks'])} task(s), "
+          f"{len(str(d['notes']))} note char(s) — {DATA_FILE}")
