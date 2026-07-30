@@ -61,7 +61,14 @@ class _FakeStream:
         self._thread.start()
 
     def _run(self):
-        block = 32
+        # Pull a realistic PortAudio-sized block, NOT a tiny one. The drain rate
+        # is block / sleep-interval samples/sec, and it must clear the largest
+        # test buffer (20 000 samples) within _wait_until's 2 s window. On Python
+        # <=3.10 (Windows) time.sleep()'s floor is ~15 ms, not the ~0.1 ms of
+        # 3.11+, so a 32-sample block took ~625 loops (~9 s) and the drain tests
+        # timed out on 3.10 only. 1024 clears it in ~20 loops even at the coarse
+        # granularity — the size real PortAudio would request anyway.
+        block = 1024
         while not self._stop.is_set():
             out = np.zeros((block, self.channels), dtype=np.float32)
             self._callback(out, block, None, None)

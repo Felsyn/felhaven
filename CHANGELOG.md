@@ -14,6 +14,7 @@ New here? Start with [`README.md`](README.md) for what Felhaven is,
 [`SETUP.md`](SETUP.md) to run it, and [`CONVENTIONS.md`](CONVENTIONS.md) for how
 the code is put together.
 
+- `2026-07-29` — `tests/test_harmonia.py`: `_FakeStream` drains 1024-sample blocks (was 32) so the drain tests clear the 2 s window on Python 3.10 (Windows `time.sleep` floor ~15 ms) — fixes the 3.10-only CI failure.
 - `2026-07-29` — `panels/home_panel.py`: `self._history` now stores each turn's full tool_calls/tool-result exchange (not flattened prose), windowed to 3 turns — fixes gemma4:e2b losing tool use after ~3 turns by imitating its own history.
 - `2026-07-29` — `pythia.py`: `ask()`'s stats event gains `turn_messages` (this call's own user/assistant/tool messages) so callers can persist the real tool exchange as history, not just the final answer text.
 - `2026-07-29` — `harmonia.py`: `play()` now flattens incoming PCM to 1D mono, fixing silent Orpheus briefings — its 2D `(frames, 1)` decode broke the callback's 1D assignment (shape mismatch → silence); `tests/test_harmonia.py` gains coverage.
