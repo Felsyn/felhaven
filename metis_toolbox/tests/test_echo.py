@@ -121,7 +121,7 @@ class TestTextToAudioConversion(unittest.TestCase):
     def test_success_writes_path_and_concatenates_in_order(self):
         calls: list[str] = []
 
-        def fake_synth(chunk: str):
+        def fake_synth(chunk: str, *, voice=None):
             calls.append(chunk)
             # Each chunk contributes its 1-based call index as a marker sample,
             # so the concatenated array reveals both order and completeness.
@@ -149,6 +149,49 @@ class TestTextToAudioConversion(unittest.TestCase):
         # Concatenation preserved chunk order: [1.0, 2.0, ..., N].
         self.assertEqual(list(captured["pcm"]),
                          [float(i + 1) for i in range(len(calls))])
+
+    def test_voice_reaches_synthesize_on_every_chunk(self):
+        # Echo's per-conversion voice must not leak into narration: it travels
+        # as a synthesize() kwarg, never through calliope.set_voice().
+        seen: list = []
+
+        def fake_synth(chunk: str, *, voice=None):
+            seen.append(voice)
+            return np.array([0.0], dtype=np.float32)
+
+        before = calliope.narration_voice()
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(echo, "_LOCAL_AUDIO_DIR", tmp), \
+                mock.patch.object(echo, "_CHUNK_MAX_CHARS", 10), \
+                mock.patch.object(echo, "_resolve", return_value="ffmpeg"), \
+                mock.patch.object(calliope, "synthesize", side_effect=fake_synth), \
+                mock.patch.object(calliope, "save_wav"), \
+                mock.patch("tools.echo.subprocess.run",
+                           return_value=_FakeProc(0)):
+            echo.text_to_audio("one two three four five six seven.", "out",
+                               voice="bm_george")
+
+        self.assertGreaterEqual(len(seen), 2)
+        self.assertEqual(set(seen), {"bm_george"})
+        self.assertEqual(calliope.narration_voice(), before)
+
+    def test_no_voice_defers_to_calliope(self):
+        seen: list = []
+
+        def fake_synth(chunk: str, *, voice=None):
+            seen.append(voice)
+            return np.array([0.0], dtype=np.float32)
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(echo, "_LOCAL_AUDIO_DIR", tmp), \
+                mock.patch.object(echo, "_resolve", return_value="ffmpeg"), \
+                mock.patch.object(calliope, "synthesize", side_effect=fake_synth), \
+                mock.patch.object(calliope, "save_wav"), \
+                mock.patch("tools.echo.subprocess.run",
+                           return_value=_FakeProc(0)):
+            echo.text_to_audio("hello world.", "out")
+
+        self.assertEqual(seen, [None])   # None = "whatever Calliope is set to"
 
     def test_synthesis_failure(self):
         with mock.patch.object(echo, "_resolve", return_value="ffmpeg"), \

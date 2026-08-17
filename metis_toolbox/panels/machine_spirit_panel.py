@@ -11,6 +11,14 @@ Job:         Draw Pythia's system-prompt editor: a multiline text box
              machine_spirit.py; this module never reads or writes
              machine_spirit_config.json directly.
 
+Voice:       The tab also carries the NARRATION VOICE bar — a shared VoiceBar
+             (panels/voice_bar_panel.py) also mounted in the ECHO tab, where it
+             controls that tab alone. Same delegation rule as the prompt: the
+             pick goes to voices.save_pythia_voice() (persistence) and
+             calliope.set_voice() (live effect), and no JSON is touched here.
+             It sits ABOVE the editor and applies immediately — it is not a
+             field SAVE commits, and the "applies immediately" hint says so.
+
 Placement:   A bare tk.Frame tab body inside ModeratiPanel (the MACHINE
              SPIRIT tab), the same shape as ThemisPanel. NOT Kairos-
              registered — purely request-driven (the user edits and saves),
@@ -25,10 +33,13 @@ Revert:      "Revert to Default" only REPOPULATES the editor with
 
 Upstream:    panels/moderati_panel.py (hosts this as the MACHINE SPIRIT tab)
 Downstream:  machine_spirit.py (all persistence + the default text),
+             voices.py (the roster + the saved narration voice),
+             calliope.py (set_voice — live narration),
+             panels/voice_bar_panel.py (the dropdown),
              theme.py (colors/fonts/PhosphorScroll)
 
 Requires:    tkinter (stdlib). No JSON handling here — that is
-             machine_spirit.py's job.
+             machine_spirit.py's and voices.py's job.
 
 V0.02:       Audited 2026-07-24 — the preview-only Revert, the delegate-to-
              machine_spirit persistence boundary, and the no-update()/no-thread
@@ -40,7 +51,10 @@ V0.02:       Audited 2026-07-24 — the preview-only Revert, the delegate-to-
 
 import tkinter as tk
 
+import calliope
 import machine_spirit
+import voices
+from panels.voice_bar_panel import VoiceBar
 from theme import C, FONTS, PhosphorScroll
 
 
@@ -60,6 +74,18 @@ class MachineSpiritPanel(tk.Frame):
                       "restart needed.",
                  font=FONTS["small_italic"], fg=C["text3"], bg=C["card"],
                  anchor="w", wraplength=380, justify="left").pack(fill="x", pady=(0, 10))
+
+        # ── Narration voice ──────────────────────────────────────────────────
+        # Above the editor, with its own "applies immediately" hint: this is a
+        # different concern from the prompt, and must not read as a field that
+        # SAVE commits. Persistence is voices.py's — this panel only delegates.
+        voice_row = tk.Frame(self, bg=C["card"])
+        voice_row.pack(fill="x", pady=(0, 10))
+        VoiceBar(voice_row, initial=voices.pythia_voice(),
+                 on_change=self._on_voice,
+                 caption="NARRATION VOICE").pack(side="left")
+        tk.Label(voice_row, text="applies immediately", font=FONTS["tiny"],
+                 fg=C["text3"], bg=C["card"]).pack(side="left", padx=(10, 0))
 
         editor_row = tk.Frame(self, bg=C["card"])
         editor_row.pack(fill="both", expand=True)
@@ -104,6 +130,15 @@ class MachineSpiritPanel(tk.Frame):
         machine_spirit.save(text)
         self._status.config(text="Saved ✓ — takes effect on the next question.",
                             fg=C["text1"])
+
+    def _on_voice(self, voice: str) -> None:
+        """Persist the pick, then point live narration at it. Both halves are
+        needed: voices.py makes it survive a restart, calliope.set_voice() makes
+        it take effect on the next spoken line."""
+        voices.save_pythia_voice(voice)
+        calliope.set_voice(voice)
+        self._status.config(
+            text=f"Narration voice: {voices.label(voice)}.", fg=C["text1"])
 
     def _on_revert(self) -> None:
         """Preview only — repopulate the editor with the default text. The

@@ -29,6 +29,7 @@ import theme
 import cerberus
 import machine_spirit
 import themis
+import voices
 
 
 class TestModeratiPanelSmoke(unittest.TestCase):
@@ -68,6 +69,9 @@ class TestModeratiPanelSmoke(unittest.TestCase):
         machine_spirit._DATA_PATH = os.path.join(self._dir, "machine_spirit_config.json")
         self._orig_themis = themis._DATA_PATH
         themis._DATA_PATH = os.path.join(self._dir, "felhaven_settings.json")
+        # The MACHINE SPIRIT tab's narration-voice bar reads this at build time.
+        self._orig_voices = voices._DATA_PATH
+        voices._DATA_PATH = os.path.join(self._dir, "voice_config.json")
 
         self.VitalsPanel = VitalsPanel
         self.EmanonPanel = EmanonPanel
@@ -85,6 +89,7 @@ class TestModeratiPanelSmoke(unittest.TestCase):
             setattr(cerberus, k, v)
         machine_spirit._DATA_PATH = self._orig_ms
         themis._DATA_PATH = self._orig_themis
+        voices._DATA_PATH = self._orig_voices
         for f in os.listdir(self._dir):
             os.unlink(os.path.join(self._dir, f))
         os.rmdir(self._dir)

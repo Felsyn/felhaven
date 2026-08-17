@@ -134,6 +134,51 @@ class TestMorpheusPanelEnabled(unittest.TestCase):
                 if isinstance(w, tk.Frame)]
         self.assertGreaterEqual(len(rows), 2)
 
+    def _save_glyphs(self):
+        """Every '＋' save glyph in the rendered search results."""
+        return [child
+                for row in self.panel._results.inner.winfo_children()
+                for child in row.winfo_children()
+                if isinstance(child, tk.Label) and child.cget("text") == "＋"]
+
+    def _render_results(self):
+        """Render one result row synchronously, on the main thread.
+
+        Deliberately bypasses _on_search's worker thread: these tests are about
+        the save glyph, not about how the rows arrived, and joining the thread
+        made them depend on its timing (that raced on CI's 3.10 runner, where
+        this is the first test in the class to start it). The threaded path has
+        its own coverage in test_search_flow_renders_rows."""
+        self.panel._show_tab("search")
+        self.panel._build_result_row({
+            "title": "Result one", "channel": "Chan", "duration": 245,
+            "url": "https://www.youtube.com/watch?v=abc",
+        })
+        self.root.update_idletasks()
+
+    def test_failed_save_arms_a_transient_indicator(self):
+        self._orig_save = morpheus.save_playlist
+        morpheus.save_playlist = lambda label, url: False
+        self.addCleanup(lambda: setattr(morpheus, "save_playlist", self._orig_save))
+
+        self._render_results()
+        glyph = self._save_glyphs()[0]
+        self.panel._save_from_search("Result one", "https://x/", glyph)
+        self.assertEqual(glyph.cget("text"), "!")
+
+        self.panel._reset_save_glyph(glyph)
+        self.assertEqual(glyph.cget("text"), "＋")
+        self.assertEqual(str(glyph.cget("fg")), theme.C["text3"])
+
+    def test_reset_on_a_destroyed_save_glyph_is_a_no_op(self):
+        """A second search inside the 2 s window clears the result rows, so the
+        scheduled reset can fire on a destroyed glyph — the winfo_exists()
+        guard is what keeps that from raising."""
+        self._render_results()
+        glyph = self._save_glyphs()[0]
+        self.panel._clear_results()        # what a second search does
+        self.panel._reset_save_glyph(glyph)   # must not raise TclError
+
 
 class TestMorpheusFormatters(unittest.TestCase):
     def test_fmt_t(self):

@@ -54,6 +54,7 @@ class Kairos:
         ("morpheus",      2, "tools.morpheus.fetch"),
         ("orpheus",       2, "tools.orpheus.fetch"),
         ("hypatia",      60, "tools.hypatia.fetch"),
+        ("artemis",     600, "tools.artemis.fetch"),
     ]
 
     def __init__(self, root):

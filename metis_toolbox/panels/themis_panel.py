@@ -164,10 +164,10 @@ class ThemisPanel(tk.Frame):
         except themis.SettingsError as e:
             self._status.config(text=f"Not saved — {e}", fg=C["red"])
             return
-        # Nudge the location/time workers so weather, sky, planets and season
-        # follow the change on the next tick rather than waiting out Aura's
-        # 30-minute interval.
-        self._refetch("aura", "hypatia", "horai")
+        # Nudge the location/time workers so weather, sky, planets, season and
+        # the local chart follow the change on the next tick rather than
+        # waiting out Aura's 30-minute interval.
+        self._refetch("aura", "hypatia", "horai", "artemis")
         self._status.config(
             text="Saved ✓ — weather, sky, and clock will refresh shortly.",
             fg=C["text1"])

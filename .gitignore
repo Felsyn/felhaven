@@ -27,7 +27,16 @@ plutus_ledger.json
 argus_timeline.json
 morpheus_playlists.json
 morpheus_watch_later/
+# Artemis waypoints — config SHAPE, personal CONTENT (where you camp, hunt or
+# work). Same bucket as morpheus_playlists.json.
+artemis_waypoints.json
 machine_spirit_config.json
+# Voices — which kokoro voice Pythia narrates in (voices.py). Per-user.
+voice_config.json
+# Pheme — which stories have been clicked through (tools/pheme.py) and which
+# Source Fonts sections were left open (panels/pheme_panel.py). Per-user.
+pheme_read.json
+pheme_sections.json
 
 # Cerberus & Sphynx — per-user PIN files + encrypted state, all machine-local.
 # The PIN-hash files are no longer shipped: first-run onboarding writes them, so
@@ -41,6 +50,11 @@ cerberus_ledger.json
 
 # Herodotus — the Markdown knowledge archive. Personal state, not source.
 herodotus_archive/
+
+# Artemis — the local-chart cache (downloaded map data around the user's fix,
+# incl. the _reference/ county index). Machine-local state, rebuilt by ingest;
+# also where your home coordinates would leak from, so never committed.
+artemis_cache/
 
 # Calliope — kokoro-onnx model binaries (voices-v1.0.bin + kokoro-v1.0*.onnx),
 # ~350 MB. Downloaded separately; see SETUP.md section 4.

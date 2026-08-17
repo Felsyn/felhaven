@@ -71,7 +71,9 @@ Why a thread: LLM answers are slow (up to ~100s cold, seconds warm). tkinter
              and drops its tokens on a queue; a persistent after()-poll on the
              main thread picks them up and touches the widgets. Same shape
              Morpheus's search box uses — the worker only ever touches the
-             queue.
+             queue. The poll's after-id is kept on the panel and cancelled in
+             destroy() — see that method for why winfo_exists() alone isn't
+             enough to end the chain.
 
 Not Kairos-registered: this panel is event-driven (you press Enter), not
              timed, so it runs its own poll rather than riding Kairos's tick.
@@ -87,6 +89,11 @@ pythia.ask worker thread + persistent after()-poll to CONVENTIONS §6's threadin
 exceptions, and narrowed §6 (a single one-shot UI-feedback after() — e.g. the
 latency filler below — is now permitted). Themed right-click menu is still
 copy-pasted 3× (echo/emanon_panel); consolidation is theme, session 29.
+
+2026-08-10: the poll chain and the filler now store their after-ids and are
+cancelled in a destroy() override (the EchoPanel precedent). Before this, the
+suite printed ~53 Tcl `invalid command name "..._poll"` lines — the chain
+outlived the widget whose Tcl command it named. §6 updated to match.
 """
 
 import queue
@@ -144,6 +151,11 @@ class HomePanel(tk.Frame):
         self._say_turn = False                        # narrate this turn aloud?
         self._say_buf = ""                            # unspoken tail awaiting a sentence end
         self._last_stats: Optional[dict[str, Any]] = None
+        # Pending after() ids, so destroy() can cancel them (see destroy()).
+        # The poll chain is a singleton; so is the filler, because _on_submit
+        # cancels the previous one before arming a new one.
+        self._poll_after_id: Optional[str] = None
+        self._filler_after_id: Optional[str] = None
         # Session totals (Hestia readouts) — reset on Refresh.
         self._sess_tokens = 0
         self._sess_tools = 0
@@ -200,7 +212,7 @@ class HomePanel(tk.Frame):
         self._print("Pythia is listening. Ask a question and press Enter.\n",
                     "pythia")
 
-        self.after(_POLL_MS, self._poll)
+        self._arm_poll()
 
     # ── Kairos contract (unused — this panel isn't registered/ticked) ─────────
     def update(self, data: Any) -> None:
@@ -309,6 +321,10 @@ class HomePanel(tk.Frame):
         Stop (cancel set) or a Refresh / new question (epoch advanced) during the
         filler delay suppresses it, so a filler never blips in after the user has
         already silenced narration."""
+        # Deliberately does NOT clear self._filler_after_id: the smoke tests call
+        # this directly, and clearing here would orphan a genuinely-pending timer.
+        # _on_submit cancels before re-arming, and destroy() cancels what's left;
+        # cancelling an id that already fired is a harmless no-op.
         if epoch == self._epoch and not cancel.is_set():
             calliope.speak_filler()
 
@@ -349,9 +365,17 @@ class HomePanel(tk.Frame):
         # the user already silenced narration. calliope.speak_filler() also
         # self-cancels once the real answer's audio has started, so a fast reply
         # is never played over.
+        # A filler still pending from the previous turn is already a no-op (its
+        # epoch is stale), so cancelling it here loses nothing — and it keeps at
+        # most ONE filler outstanding, which is what lets destroy() clear it with
+        # a single stored id instead of a set.
+        if self._filler_after_id is not None:
+            self.after_cancel(self._filler_after_id)
+            self._filler_after_id = None
         if self._say_turn:
-            self.after(calliope.filler_delay_ms(),
-                       lambda ep=epoch, cxl=cancel: self._maybe_speak_filler(ep, cxl))
+            self._filler_after_id = self.after(
+                calliope.filler_delay_ms(),
+                lambda ep=epoch, cxl=cancel: self._maybe_speak_filler(ep, cxl))
 
         def _run(m: str = msg, h: "list[dict[str, Any]]" = history,
                  ep: int = epoch, cxl: threading.Event = cancel) -> None:
@@ -399,9 +423,21 @@ class HomePanel(tk.Frame):
                     "pythia")
 
     # ── Poll: drain queued events onto the transcript (main thread) ──────────
+    def _arm_poll(self) -> None:
+        """(Re-)arm the drain chain, keeping exactly ONE poll outstanding.
+
+        Cancels first because _poll can be entered without its scheduled timer
+        having fired — the smoke tests call panel._poll() directly to drain the
+        queue without a mainloop. Re-arming blind would orphan the pending id,
+        and an orphan is precisely what destroy() can no longer cancel.
+        Cancelling an id that already fired is a harmless no-op."""
+        if self._poll_after_id is not None:
+            self.after_cancel(self._poll_after_id)
+        self._poll_after_id = self.after(_POLL_MS, self._poll)
+
     def _poll(self) -> None:
         if not self.winfo_exists():            # window closed mid-flight
-            return
+            return                             # destroy() cancels the pending id
         while True:
             try:
                 kind, payload, epoch = self._q.get_nowait()
@@ -415,7 +451,7 @@ class HomePanel(tk.Frame):
                 self._on_stats(payload)
             else:                               # "done"
                 self._on_done(payload)
-        self.after(_POLL_MS, self._poll)
+        self._arm_poll()
 
     def _on_delta(self, piece: str) -> None:
         """A streamed token arrived: show it, and buffer it for narration."""
@@ -480,3 +516,22 @@ class HomePanel(tk.Frame):
         if turn:
             self._history.append(list(turn))
             del self._history[:-_MAX_HISTORY_TURNS]
+
+    # ── Teardown ──────────────────────────────────────────────────────────────
+    def destroy(self) -> None:
+        """Cancel the poll chain and any pending filler before teardown (the
+        EchoPanel precedent).
+
+        The winfo_exists() guard inside _poll is NOT enough on its own: Tk
+        deletes a widget's registered Tcl commands as it destroys the widget, so
+        an already-scheduled after script has nothing left to call and Tcl
+        reports `invalid command name "..._poll"` before Python is ever reached.
+        Cancelling the pending id is what actually stops it; the guard only
+        covers the callback that is already mid-flight."""
+        self._cancel.set()                     # let any in-flight ask() wind down
+        for after_id in (self._poll_after_id, self._filler_after_id):
+            if after_id is not None:
+                self.after_cancel(after_id)
+        self._poll_after_id = None
+        self._filler_after_id = None
+        super().destroy()

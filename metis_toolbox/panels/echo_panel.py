@@ -10,6 +10,12 @@ precedent (CONVENTIONS §7). The dashboard never crashes over a missing binary.
 
 Top to bottom inside self (only when ffmpeg is present):
     Text box       — paste the Markdown / prose to narrate (multi-line).
+    Voice row       — a shared VoiceBar (panels/voice_bar_panel.py), also mounted
+                      in the MACHINE SPIRIT tab. SESSION-ONLY and independent:
+                      it is seeded from voices.pythia_voice() at build time, is
+                      never persisted, and never touches calliope.set_voice() —
+                      rendering a file in another voice must not change how
+                      Pythia's answers are read aloud.
     Filename row    — the output name; ".opus" is appended by Echo if omitted.
     Send button     — inert (dim, unbound) until BOTH fields are non-empty after
                       echo.sanitize_filename; runs the conversion off the UI thread.
@@ -48,6 +54,8 @@ import threading
 import tkinter as tk
 from typing import Any
 
+import voices
+from panels.voice_bar_panel import VoiceBar
 from theme import C, FONTS, themed_menu, popup_menu
 
 from tools import echo
@@ -105,6 +113,15 @@ class EchoPanel(tk.Frame):
         self._text.bind("<KeyRelease>", lambda e: self._refresh_gate())
         self._text.bind("<Button-3>", self._show_text_menu)
 
+        # ── Voice row ────────────────────────────────────────────────────────
+        # Session-only, seeded from Pythia's saved pick: which voice a one-off
+        # file is rendered in is a per-job choice, not a preference, so nothing
+        # here is persisted and every launch starts from the narration voice.
+        # Its own row — the filename row below is already full.
+        self._voice = voices.pythia_voice()
+        VoiceBar(self, initial=self._voice,
+                 on_change=self._set_voice).pack(fill="x", pady=(8, 0))
+
         # ── Filename row ─────────────────────────────────────────────────────
         row = tk.Frame(self, bg=C["card"])
         row.pack(fill="x", pady=(8, 0))
@@ -135,6 +152,12 @@ class EchoPanel(tk.Frame):
         self._status.pack(fill="x", pady=(8, 2))
 
         self._refresh_gate()
+
+    def _set_voice(self, voice: str) -> None:
+        """Remember the pick for the next conversion. Deliberately does NOT
+        persist and does NOT touch calliope.set_voice() — Echo's voice is this
+        tab's alone; Pythia keeps narrating in hers."""
+        self._voice = voice
 
     # ── Button gating ───────────────────────────────────────────────────────
 
@@ -216,8 +239,11 @@ class EchoPanel(tk.Frame):
         self._set_status("converting…", working=True)
 
         # The worker's only shared touch is self._result_q.put(...) — no Tk.
+        voice = self._voice          # snapshot: a mid-conversion re-pick must
+                                     # not change the job already in flight
         threading.Thread(
-            target=lambda: self._result_q.put(echo.text_to_audio(text, filename)),
+            target=lambda: self._result_q.put(
+                echo.text_to_audio(text, filename, voice=voice)),
             daemon=True,
         ).start()
         self._drain_after_id = self.after(_DRAIN_MS, self._drain)

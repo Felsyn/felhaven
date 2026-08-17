@@ -14,8 +14,10 @@ on_event stats payload's turn_messages (the real tool exchange a caller should
 persist as history, excluding the system prompt and prior history, present
 even on the friendly-degrade error paths), graceful network-failure text, the
 TOOLS/_DISPATCH registry invariant, the §2 error-slug shape of the dispatcher's
-own returns, and that a caught exception's raw message never reaches the LLM
-context or the transcript (only its class).
+own returns, that a caught exception's raw message never reaches the LLM
+context or the transcript (only its class), and that a `thinking` trace is
+dropped (never shown, never forwarded) while still being named in the log as
+the reason a round came back empty.
 """
 
 import json
@@ -50,6 +52,16 @@ def _final(content: str, prompt_tokens: int = 5, output_tokens: int = 3) -> dict
             "done": True, "done_reason": "stop",
             "prompt_eval_count": prompt_tokens, "eval_count": output_tokens,
             "eval_duration": 2_000_000}
+
+
+def _final_thinking(thinking: str, content: str = "") -> dict:
+    """A terminal chunk that carries a `thinking` trace — what Ollama sends when
+    the model reasons (measured against gemma4:e2b with think=True: eval_count
+    446, content empty, ~2000 chars of thinking). Pythia asks for think=False,
+    so this is the shape to guard against, not today's normal traffic."""
+    chunk = _final(content)
+    chunk["message"]["thinking"] = thinking
+    return chunk
 
 
 class TestPythiaRegistry(unittest.TestCase):
@@ -183,9 +195,166 @@ class TestPythiaAsk(unittest.TestCase):
         self.assertIn("timed out", out.lower())
 
     def test_empty_content_does_not_return_blank(self):
-        with mock.patch("pythia.requests.post", return_value=_stream(_final(""))):
+        # Two empty rounds: the first is retried, the second exhausts the budget.
+        with mock.patch("pythia.requests.post",
+                        side_effect=[_stream(_final("")), _stream(_final(""))]):
             out = pythia.ask("hi")
-        self.assertTrue(out)   # falls back to a placeholder, never an empty string
+        self.assertTrue(out.strip())      # readable line, never an empty string
+        self.assertNotIn("(no answer)", out)   # and never a bare placeholder
+
+    def test_empty_reply_is_retried_and_the_retry_wins(self):
+        # gemma4:e2b sometimes ends a turn with no content at all.
+        with mock.patch("pythia.requests.post",
+                        side_effect=[_stream(_final("")),
+                                     _stream(_final("the real answer"))]) as post:
+            out = pythia.ask("hi")
+        self.assertEqual(out, "the real answer")
+        self.assertEqual(post.call_count, 2)
+
+    def test_blank_retry_carries_the_nudge(self):
+        # Re-asking the IDENTICAL context reproduces the same silence (measured
+        # 8/8 blank); the nudge is the part that actually changes the outcome.
+        # ask() mutates one messages list in place, and mock records it by
+        # reference — so snapshot each call's messages as they were sent.
+        sent: list[list[dict]] = []
+        streams = [_stream(_final("")), _stream(_final("answer"))]
+
+        def _post(*args, **kwargs):
+            sent.append([dict(m) for m in kwargs["json"]["messages"]])
+            return streams.pop(0)
+
+        with mock.patch("pythia.requests.post", side_effect=_post):
+            pythia.ask("hi")
+
+        self.assertEqual(sent[1][-1]["content"], pythia._BLANK_NUDGE)
+        # ...and the empty assistant turn is gone from the retry's context.
+        self.assertNotIn("", [m.get("content") for m in sent[1][1:]])
+
+    def test_nudge_is_dropped_even_when_the_retry_round_fails(self):
+        # The error handlers still emit turn_messages, so a nudged round that
+        # dies mid-flight must not leave the synthetic message behind.
+        events: list[dict] = []
+        with mock.patch("pythia.requests.post",
+                        side_effect=[_stream(_final("")),
+                                     requests.ConnectionError()]):
+            pythia.ask("hi", on_event=events.append)
+        contents = [m.get("content") for m in events[0]["turn_messages"]]
+        self.assertNotIn(pythia._BLANK_NUDGE, contents)
+
+    def test_nudge_never_reaches_turn_messages(self):
+        # turn_messages is persisted as history — a user message the user never
+        # typed must not end up in it.
+        events: list[dict] = []
+        with mock.patch("pythia.requests.post",
+                        side_effect=[_stream(_final("")), _stream(_final("answer"))]):
+            pythia.ask("hi", on_event=events.append)
+        contents = [m.get("content") for m in events[0]["turn_messages"]]
+        self.assertNotIn(pythia._BLANK_NUDGE, contents)
+        self.assertEqual(contents, ["hi", "answer"])
+
+    def test_blank_retry_is_bounded(self):
+        # One try plus one retry, then it degrades — it must not burn the whole
+        # _MAX_TOOL_ROUNDS budget re-asking a model that keeps going silent.
+        with mock.patch("pythia.requests.post",
+                        side_effect=[_stream(_final("")) for _ in range(5)]) as post:
+            pythia.ask("hi")
+        self.assertEqual(post.call_count, 1 + pythia._MAX_BLANK_RETRIES)
+
+    def test_empty_turn_never_reaches_turn_messages(self):
+        # The caller persists turn_messages as history, so an empty assistant
+        # turn left in place would teach the model that a blank reply is a valid
+        # turn — the transcript-imitation trap documented in home_panel.py.
+        events: list[dict] = []
+        with mock.patch("pythia.requests.post",
+                        side_effect=[_stream(_final("")),
+                                     _stream(_final("real answer"))]):
+            pythia.ask("hi", on_event=events.append)
+        contents = [m.get("content") for m in events[0]["turn_messages"]]
+        self.assertEqual(contents, ["hi", "real answer"])
+
+    def test_degraded_blank_answer_is_what_gets_persisted(self):
+        # When it stays silent, history must show the line the user actually saw.
+        events: list[dict] = []
+        with mock.patch("pythia.requests.post",
+                        side_effect=[_stream(_final("")), _stream(_final(""))]):
+            out = pythia.ask("hi", on_event=events.append)
+        contents = [m.get("content") for m in events[0]["turn_messages"]]
+        self.assertEqual(contents, ["hi", out])
+
+    def test_thinking_is_never_shown_and_never_forwarded(self):
+        # A round of pure reasoning must not become the answer, must not stream
+        # to the UI, and must not ride back into the next round's context — the
+        # transcript is for answers, not for the model's internal monologue.
+        reasoning = "First I should check the time, then work out the sunset..."
+        sent: list[list[dict]] = []
+        streams = [_stream(_final_thinking(reasoning)), _stream(_final("Sunset is 8:41pm."))]
+
+        def _post(*args, **kwargs):
+            sent.append([dict(m) for m in kwargs["json"]["messages"]])
+            return streams.pop(0)
+
+        deltas: list[str] = []
+        with mock.patch("pythia.requests.post", side_effect=_post):
+            out = pythia.ask("when is sunset?", on_delta=deltas.append)
+
+        self.assertEqual(out, "Sunset is 8:41pm.")
+        self.assertNotIn("First I should", out)
+        self.assertNotIn("First I should", "".join(deltas))
+        retry_context = json.dumps(sent[1])
+        self.assertNotIn("First I should", retry_context)
+        self.assertNotIn("thinking", retry_context)
+
+    def test_thinking_only_round_is_logged_as_the_reason_it_was_blank(self):
+        # The whole point: a thinking-only round is indistinguishable from a
+        # model that said nothing, unless the log says which one happened.
+        reasoning = "x" * 1992     # the measured 2026-07-31 shape
+        with mock.patch("pythia.requests.post",
+                        side_effect=[_stream(_final_thinking(reasoning)),
+                                     _stream(_final("answer"))]):
+            with self.assertLogs("METIS.pythia", level="WARNING") as logs:
+                pythia.ask("hi")
+        blob = "\n".join(logs.output)
+        self.assertIn("thinking", blob)
+        self.assertIn("1992", blob)             # the size, so it's diagnosable
+        # _chat names the cause, and ask()'s retry warning carries it too.
+        self.assertTrue(any("think=False" in r for r in logs.output), logs.output)
+        self.assertTrue(any("retrying with nudge" in r and "thinking" in r
+                            for r in logs.output), logs.output)
+
+    def test_thinking_alongside_an_answer_is_not_flagged(self):
+        # Only the blank case is confusing. A round that thinks AND answers is
+        # a normal round; it must not spam the log.
+        with mock.patch("pythia.requests.post",
+                        return_value=_stream(_final_thinking("musing", "the answer"))):
+            with self.assertLogs("METIS.pythia", level="INFO") as logs:
+                out = pythia.ask("hi")
+        self.assertEqual(out, "the answer")
+        self.assertFalse([r for r in logs.output if "thinking" in r], logs.output)
+
+    def test_thinking_on_a_tool_round_is_not_flagged(self):
+        # Tool rounds legitimately carry no content — that's not a blank turn.
+        tool_round = {"message": {"role": "assistant", "content": "",
+                                  "thinking": "I need the weather tool",
+                                  "tool_calls": [{"function": {"name": "get_weather",
+                                                               "arguments": {}}}]},
+                      "done": True}
+        stub = {"get_weather": lambda **_: {"temp_f": 70}}
+        with mock.patch("pythia.requests.post",
+                        side_effect=[_stream(tool_round), _stream(_final("70F."))]), \
+                mock.patch.dict(pythia._DISPATCH, stub):
+            with self.assertLogs("METIS.pythia", level="INFO") as logs:
+                out = pythia.ask("weather?")
+        self.assertEqual(out, "70F.")
+        self.assertFalse([r for r in logs.output if "thinking" in r], logs.output)
+
+    def test_chat_reports_thinking_chars_in_round_stats(self):
+        # ask() reads this to explain WHY a round came back empty.
+        with mock.patch("pythia.requests.post",
+                        return_value=_stream(_final_thinking("abcde"))):
+            reply, stats = pythia._chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(stats["thinking_chars"], 5)
+        self.assertEqual(reply["content"], "")      # and it stayed out of content
+        self.assertNotIn("thinking", reply)
 
     def test_unexpected_failure_keeps_exception_text_off_the_transcript(self):
         # The catch-all in ask() prints to the transcript verbatim, so it must

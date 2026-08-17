@@ -63,6 +63,33 @@ C = {
     "season_bg": "#0C240C",
     "season_fg": "#7CFC7C",
     "bar_bg":    "#0E160E",
+    # ── Artemis chart — the one place hue carries meaning ──────────────────
+    # A map's layers have to be told apart at a glance, so these deliberately
+    # do NOT fold into the phosphor ramp above: cyan water and amber roads are
+    # near-complementary, both separate cleanly from green terrain, and the
+    # set survives common red-green colour deficiencies. Nothing reaches text
+    # brightness, so the phosphor text still sits on top of the map.
+    #
+    # These are the WORLD's colours. The chart's INSTRUMENT — range rings,
+    # bearing ticks, the porthole rim and its range label, the cardinals, the
+    # centre fix — draws in text1 instead, so brightness says what kind of
+    # thing you are looking at. That is why these keys stay muted rather than
+    # being brightened to match.
+    # tools/demeter.py carries the three terrain colours again as RGB tuples
+    # (it renders the raster headless and must not import Tk);
+    # tests/test_artemis_palette.py holds the two in lockstep.
+    "map_terrain_lo":  "#0B2E18",   # valley — barely above background
+    "map_terrain_mid": "#1A5C31",
+    "map_terrain_hi":  "#2C8A4A",   # peak — ~30% of text luminance
+    "map_water":       "#2E8B99",   # named runs, creeks, rivers
+    "map_water_minor": "#1F5F69",   # unnamed drainage, ditches, canals
+    "map_water_area":  "#17454D",   # lakes/ponds fill, no outline
+    "map_road_hi":     "#E0A94A",   # primary — brightest non-text element
+    "map_road_mid":    "#B9862F",   # secondary
+    "map_road_lo":     "#8A6524",   # local streets
+    "map_road_track":  "#6B4F1E",   # vehicular trail / private, dashed
+    "map_ring":        "#264A33",   # dim chrome — the scale bar's metric line
+    "map_compass":     "#3E7A55",   # the compass rose and the scale bar
 }
 
 

@@ -89,6 +89,30 @@ class _FakeStream:
             self._thread.join(timeout=1.0)
 
 
+class _ManualStream(_FakeStream):
+    """A _FakeStream whose daemon never starts — the test pulls blocks itself,
+    on the main thread.
+
+    Order assertions need a deterministic pull. With the daemon running, the
+    only completion signal a test has is is_playing(), and that falls false the
+    instant the callback returns — strictly BEFORE _run records what the
+    callback produced. The main thread can win that window and snapshot a
+    recording that is still empty, which is how test_plays_multiple_items_in_
+    order failed on CI's slower 3.10 leg (run 31112638613) while asserting
+    nothing about ordering at all. Pulling by hand closes the window; the
+    threaded drain keeps its coverage in the is_playing()/drain tests."""
+
+    def start(self):
+        pass
+
+    def pull(self, frames: int = 1024) -> None:
+        """Run one callback block on the calling thread, and record it."""
+        out = np.zeros((frames, self.channels), dtype=np.float32)
+        self._callback(out, frames, None, None)
+        with self._emit_lock:
+            self._emitted.extend(out[:, 0].tolist())
+
+
 class _HarmoniaBase(unittest.TestCase):
     """Fully tear down the stream and reset the buffer around every test, so a
     leftover callback thread or stale sample count can't leak into the next."""
@@ -161,12 +185,21 @@ class TestPlayRoundTrip(_HarmoniaBase):
         harmonia.play(pcm_2d, 24000, tag="orpheus")
         self.assertTrue(harmonia.is_playing())                            # buffered
         self.assertTrue(_wait_until(lambda: not harmonia.is_playing()))   # and drains
-        self.assertIn(7.0, harmonia._stream.snapshot())   # real samples, not silence
+        # Wait on the recording itself, not on is_playing(): the callback drains
+        # the buffer before _run records the block it produced, so is_playing()
+        # going false does NOT mean the samples are in the snapshot yet.
+        self.assertTrue(_wait_until(lambda: 7.0 in harmonia._stream.snapshot()),
+                        "real samples never reached the device (only silence)")
 
     def test_plays_multiple_items_in_order(self):
+        # Pull the block by hand on the main thread (see _ManualStream). What
+        # this test asserts is the ORDER samples leave the buffer, which needs a
+        # deterministic pull — not a race between is_playing() and the recorder.
+        self._sd_stub.OutputStream = _ManualStream
         for v in (11.0, 22.0, 33.0):
             harmonia.play(np.full(100, v, dtype=np.float32), 24000)
-        self.assertTrue(_wait_until(lambda: not harmonia.is_playing()))
+        harmonia._stream.pull()             # one 1024 block takes all 300 samples
+        self.assertFalse(harmonia.is_playing())
         seen = [s for s in harmonia._stream.snapshot() if s != 0.0]
         firsts: list = []                          # collapse each contiguous run
         for s in seen:

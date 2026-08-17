@@ -644,11 +644,13 @@ TOOL_DEFINITION = {
     "function": {
         "name": "calculate",
         "description": (
-            "Evaluates a Python arithmetic expression safely using an AST reducer. "
-            "Returns the numeric result along with a 'steps' array showing each "
-            "reduction step — useful for explaining how a calculation was done. "
-            "Supports: +, -, *, /, //, %, **, and math functions (sin, cos, sqrt, log, etc.). "
-            "Named constants: pi, e, tau, inf. Use 'ans' to refer to the previous result."
+            "Evaluate an arithmetic expression and return the result plus the "
+            "reduction steps that produced it. Call whenever the user asks for a "
+            "calculation, or when a number has to be worked out from values a "
+            "tool returned — do not do the arithmetic yourself. "
+            "Supports +, -, *, /, //, %, ** and math functions (sin, cos, sqrt, "
+            "log, etc.), the constants pi, e, tau, inf, and 'ans' for the "
+            "previous result."
         ),
         "parameters": {
             "type": "object",

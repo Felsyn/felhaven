@@ -33,6 +33,18 @@ Contract:    fetch() -> {"playing": bool, "files": [{"name", "duration"}, ...]}
                  {"error": ...} dict.
              stop() -> None
                  harmonia.stop(). Mutation, UI-driven only. Never raises.
+             delete_file(name) -> dict
+                 Send `name` (must already be a file in local_audio/) to the
+                 Recycle Bin. Mutation — fires only from the two-click confirm
+                 glyph in OrpheusPanel; never polled, never LLM-facing. Never
+                 raises: a bad name or a failed shell operation degrades to a
+                 logged no-op and a stable {"error": ...} dict.
+                 Recycle Bin, not os.remove: unlike Morpheus's remove (which
+                 drops a JSON row you can re-add by pasting the URL back), this
+                 destroys an audio file Echo spent real synthesis time on. The
+                 two-click confirm is the primary guard; the undo is the
+                 backstop for the misfire that gets past it. Costs no new
+                 dependency — SHFileOperationW via stdlib ctypes.
              available() -> {"ffmpeg": path_or_None}
                  Mirrors morpheus.available() / echo.available(). The panel
                  reads this once at build time to show a placeholder.
@@ -82,7 +94,8 @@ Source:      One external binary, zero new pip packages — ffmpeg, already a
              whole app down, not just Orpheus.
 
 Scope:       local_audio/ only (Echo's output folder) — not a general folder
-             picker. "Play what Echo produced," the whole brief.
+             picker. "Play what Echo produced, and throw away what you no
+             longer want," the whole brief. No rename, no move, no subfolders.
 
 Out of LLM   No handle(), no TOOL_DEFINITION for v1 — the same out-of-LLM-scope
 scope:       decision as Echo. The module *shape* differs, though: Orpheus is
@@ -104,6 +117,7 @@ V0.02:       Audited 2026-07-25 — never-raise verified across fetch/play_file/
              shape.
 """
 
+import ctypes
 import logging
 import os
 import re
@@ -164,6 +178,73 @@ def _resolve(name: str) -> Optional[str]:
 def available() -> dict[str, Optional[str]]:
     """Report whether ffmpeg is resolvable. {"ffmpeg": path_or_None}."""
     return {"ffmpeg": _resolve("ffmpeg")}
+
+
+# ── Recycle Bin (SHFileOperationW — stdlib ctypes, no new dependency) ──────────
+#
+# Guarded by sys.platform, NOT imported bare: `from ctypes import wintypes`
+# raises on non-Windows, and this module is a Kairos worker resolved via
+# importlib at startup — an import-time raise takes the whole dashboard down,
+# not just Orpheus (see "Import-safety is load-bearing" above). Same
+# defensiveness as _NO_WINDOW's getattr below.
+
+_FO_DELETE          = 0x0003   # wFunc: delete the files named in pFrom
+_FOF_SILENT         = 0x0004   # no progress dialog
+_FOF_NOCONFIRMATION = 0x0010   # no "are you sure" — the glyph already asked
+_FOF_ALLOWUNDO      = 0x0040   # THE point of this call: Recycle Bin, not erase
+_FOF_NOERRORUI      = 0x0400   # report failure through the return code only
+
+if sys.platform == "win32":
+    from ctypes import wintypes
+
+    class _SHFILEOPSTRUCTW(ctypes.Structure):
+        """shell32's SHFILEOPSTRUCTW. Only wFunc/pFrom/fFlags are set; the
+        rest must still be present and zeroed for the layout to match."""
+
+        _fields_ = [
+            ("hwnd",                  wintypes.HWND),
+            ("wFunc",                 wintypes.UINT),
+            ("pFrom",                 wintypes.LPCWSTR),
+            ("pTo",                   wintypes.LPCWSTR),
+            ("fFlags",                ctypes.c_uint16),   # FILEOP_FLAGS = WORD
+            ("fAnyOperationsAborted", wintypes.BOOL),
+            ("hNameMappings",         wintypes.LPVOID),
+            ("lpszProgressTitle",     wintypes.LPCWSTR),
+        ]
+
+
+def _send_to_recycle_bin(path: str) -> bool:
+    """Move `path` to the Recycle Bin. True on success, False on any failure
+    (logged, never raised).
+
+    Non-Windows falls back to os.remove — a permanent delete with no undo.
+    Felhaven is a Windows app; that branch exists so the module stays
+    importable and testable elsewhere, not as a supported configuration."""
+    if sys.platform != "win32":
+        try:
+            os.remove(path)
+            return True
+        except OSError as e:
+            log.error("Orpheus: delete failed for %r: %s", path, e)
+            return False
+
+    op = _SHFILEOPSTRUCTW()
+    op.wFunc = _FO_DELETE
+    # Double-NUL terminated: pFrom is a LIST of paths, so shell32 keeps reading
+    # past a single terminator until it finds an empty one. One NUL here would
+    # hand it whatever follows in memory.
+    op.pFrom = os.path.abspath(path) + "\0\0"
+    op.fFlags = (_FOF_ALLOWUNDO | _FOF_NOCONFIRMATION
+                 | _FOF_NOERRORUI | _FOF_SILENT)
+    try:
+        res = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+    except OSError as e:
+        log.error("Orpheus: SHFileOperationW failed to run for %r: %s", path, e)
+        return False
+    if int(res) != 0:
+        log.error("Orpheus: SHFileOperationW returned %s for %r", res, path)
+        return False
+    return True
 
 
 # ── local_audio/ listing ───────────────────────────────────────────────────────
@@ -279,6 +360,28 @@ def play_file(name: str) -> dict[str, Any]:
 def stop() -> None:
     """Stop whatever Harmonia is playing. UI-driven only. Never raises."""
     harmonia.stop()
+
+
+def delete_file(name: str) -> dict[str, Any]:
+    """Send `name` (a file already in local_audio/) to the Recycle Bin — see
+    the module "Contract" section for why the bin and not os.remove. Fires
+    only from OrpheusPanel's two-click confirm glyph. Never raises.
+    Error codes: bad_name, delete_failed.
+
+    Deleting a file that is currently playing is safe and deliberately not
+    blocked: play_file() decodes the whole file into RAM before handing it to
+    Harmonia, so nothing holds an open handle on disk."""
+    path = _safe_path(name)
+    if path is None:
+        log.warning("Orpheus: refusing to delete %r — not a file in local_audio/", name)
+        return {"error": "bad_name"}
+    if not _send_to_recycle_bin(path):
+        return {"error": "delete_failed"}
+    # The cache is keyed by filename and never evicted, so a later file created
+    # under this same name would otherwise inherit the dead file's duration.
+    _duration_cache.pop(name, None)
+    log.info("Orpheus: recycled %r", name)
+    return {"deleted": name}
 
 
 # ── Kairos entry point ─────────────────────────────────────────────────────────

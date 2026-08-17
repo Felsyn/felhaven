@@ -15,6 +15,7 @@ touched either.
 
 import os
 import sys
+import tempfile
 import time
 import unittest
 from unittest import mock
@@ -23,7 +24,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import tkinter as tk
 
+import calliope
 import theme
+import voices
 from tools import morpheus
 from tools import echo
 from tools import orpheus
@@ -113,11 +116,20 @@ class TestEchoPanelSmoke(unittest.TestCase):
         # regardless of the host — the conversion itself is mocked per test.
         self._orig_echo_avail = echo.available
         echo.available = lambda: {"ffmpeg": "ffmpeg.exe"}
+        # The voice bar seeds itself from the saved narration voice — point that
+        # at a temp dir so no real user state is read or written.
+        self._dir = tempfile.mkdtemp(prefix="echo_panel_")
+        self._orig_voices = voices._DATA_PATH
+        voices._DATA_PATH = os.path.join(self._dir, "voice_config.json")
         self.panel = EchoPanel(self.root)
         self.panel.pack()
 
     def tearDown(self):
         echo.available = self._orig_echo_avail
+        voices._DATA_PATH = self._orig_voices
+        for f in os.listdir(self._dir):
+            os.unlink(os.path.join(self._dir, f))
+        os.rmdir(self._dir)
         self.panel.destroy()
 
     def test_disabled_when_ffmpeg_missing(self):
@@ -127,6 +139,9 @@ class TestEchoPanelSmoke(unittest.TestCase):
         try:
             self.assertFalse(panel._enabled)
             self.assertFalse(hasattr(panel, "_send_btn"))
+            # The voice bar is built after the gate too — a disabled tab is a
+            # bare placeholder, not a placeholder with a dropdown under it.
+            self.assertFalse(hasattr(panel, "_voice"))
         finally:
             panel.destroy()
 
@@ -197,6 +212,41 @@ class TestEchoPanelSmoke(unittest.TestCase):
             self._pump_until(lambda: not self.panel._converting)
         self.assertEqual(self.panel._text.get("1.0", "end").strip(), "hello world")
         self.assertEqual(self.panel._fname_var.get(), "out")
+
+    # ── Voice bar (session-only, independent of narration) ──────────────────
+
+    def test_voice_starts_at_the_saved_narration_voice(self):
+        self.assertEqual(self.panel._voice, voices.pythia_voice())
+
+    def test_selected_voice_reaches_the_conversion(self):
+        self.panel._set_voice("bm_george")
+        self._fill()
+        with mock.patch.object(echo, "text_to_audio",
+                               return_value={"path": "C:\\x\\out.opus"}) as m:
+            self.panel._on_send()
+            self._pump_until(lambda: not self.panel._converting)
+        self.assertEqual(m.call_args.kwargs["voice"], "bm_george")
+
+    def test_picking_a_voice_never_changes_narration(self):
+        # Echo's bar controls the ECHO tab alone — Pythia keeps her voice.
+        before = calliope.narration_voice()
+        self.panel._set_voice("bf_isabella")
+        self.assertEqual(calliope.narration_voice(), before)
+
+    def test_voice_is_not_persisted(self):
+        # Session-only by design: a pick must leave no file behind.
+        self.panel._set_voice("am_onyx")
+        self.assertFalse(os.path.exists(voices._DATA_PATH))
+
+    def test_mid_conversion_repick_does_not_change_the_job_in_flight(self):
+        self.panel._set_voice("bm_george")
+        self._fill()
+        with mock.patch.object(echo, "text_to_audio",
+                               return_value={"path": "C:\\x\\out.opus"}) as m:
+            self.panel._on_send()
+            self.panel._set_voice("af_bella")     # user re-picks while it runs
+            self._pump_until(lambda: not self.panel._converting)
+        self.assertEqual(m.call_args.kwargs["voice"], "bm_george")
 
     # ── Right-click context menus (Pythia home_panel precedent) ─────────────
 

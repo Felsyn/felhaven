@@ -248,8 +248,8 @@ worker, so it has no tick to drain the result on), and **`HomePanel`'s one daemo
 thread for the slow `pythia.ask()` call plus a persistent main-thread
 `after()`-poll to drain it** (HomePanel is event-driven — you press Enter — not a
 Kairos worker, so it runs its own standing 60 ms poll instead of riding the tick;
-the poll self-terminates when the window is destroyed, via its `winfo_exists()`
-guard). Each preserves the contract: the worker's only shared touch is a queue
+the poll is cancelled in the panel's `destroy()` — see the teardown rule below).
+Each preserves the contract: the worker's only shared touch is a queue
 `put`, `update()` / the drain runs on the main thread, and a single-flight guard
 ignores a second job while one is in flight.
 
@@ -260,6 +260,34 @@ exception.
 
 If you find yourself reaching for a new one, stop — the answer is almost always
 "give Kairos a worker."
+
+**Every `after()` you schedule, you cancel on teardown.** Keep the id and cancel
+it in a `destroy()` override before `super().destroy()` — the `EchoPanel` /
+`ArtemisPanel` shape. This applies to the permitted one-shots too, not just the
+chains above.
+
+A `winfo_exists()` guard inside the callback is *not* a substitute. Tk deletes a
+widget's registered Tcl commands as it destroys the widget, so an
+already-scheduled after script has no command left to call: Tcl reports
+`invalid command name "..._poll"` on stderr and Python is never reached. The
+guard only covers a callback that is already mid-flight (a glyph destroyed
+while the panel lives); it can do nothing once the panel itself is gone.
+Cancelling the pending id is the only thing that actually ends the chain.
+
+Two shapes, picked by how many can be outstanding at once:
+
+- **One at a time** → a single `self._xxx_after_id` attribute (`EchoPanel`'s
+  drain, `HomePanel`'s poll and latency filler). Re-arm through a helper that
+  cancels the stored id first: a callback can be entered *without* its timer
+  having fired — the smoke tests call `panel._poll()` directly — and re-arming
+  blind orphans an id that `destroy()` can then never reach.
+- **Several at a time** → a `self._pending_after` set plus an `_after_once()`
+  helper that discards its own id when it fires (`MorpheusPanel`,
+  `OrpheusPanel`, where every armed remove glyph owns its own confirm window).
+  A single slot would forget all but the last.
+
+Cancelling an id that already fired is a harmless no-op, so neither shape needs
+to track whether the timer is still live.
 
 ---
 
@@ -282,6 +310,12 @@ If you find yourself reaching for a new one, stop — the answer is almost alway
   highlight flipping `fg` to `C["amber"]` on `<Enter>` and back on `<Leave>`.
 - **Collapsible sub-widgets**: collapsed by default, toggled with a `▶`/`▼`
   label — copy the `AmmitWidget` section-toggle.
+- **Grouping views in the nav rail**: a family of related views goes in
+  `Sidebar._GROUPS` (`panels/sidebar.py`), never in a tab host. The group header
+  is a `GroupRow` that selects nothing; each child stays a full entry in
+  `felhaven._views` with the whole content area and the ordinary lit-row active
+  state. Adding one is a child tuple plus a `_views` entry —
+  `test_sidebar_view_parity` fails if you do only one of the two.
 - **Placeholders, not crashes**: if a tool can't run (no API key, missing
   binary), render a calm placeholder and disable controls — never raise from a
   panel constructor.
@@ -584,3 +618,287 @@ and when, one line per change, so a decision worth keeping must be written here.
   instead of compounding. Not a §2/§6 deviation — a bugfix to what "the
   conversation" means when a tool-calling model reads its own history back.
   *(2026-07-29.)*
+- **Pheme owns read state; no separate deity was minted for it.** The Scrapstream
+  restructure needed a seen-set shared by both surfaces, and the obvious
+  Anti-Legion reading — one job per module, so read state is its own module —
+  is the wrong one here. Read state is an attribute OF a headline: meaningful
+  only next to one, derived from a story's URL, with exactly one consumer. A
+  module for it would have no independent job, and would hand Pheme a
+  shared-state coupling back to itself across a file boundary. So `tools/pheme.py`
+  gained `read_key`/`read_keys`/`mark_read` and its `Job:` line was left
+  unchanged: the module still aggregates headlines, and now remembers which ones
+  you opened. The panel keeps presentation only — merge order, the per-source
+  cap, collapse state, dimming. *(2026-08-02.)*
+- **Read-state identity strips a DENYLIST of tracking parameters, not the whole
+  query string.** Blanket query-stripping is the obvious normalization and it is
+  wrong for the shipped feeds: a Hacker News text post (Ask HN / Show HN) carries
+  its entire identity in the query — `news.ycombinator.com/item?id=NNNNN` — so
+  dropping every parameter collapses every text post onto one key, and reading
+  one would dim every other. That is news the user has never seen, silently
+  greyed out. BBC pulls the other way: it appends `at_medium`/`at_campaign` to
+  every link, which must go or the same story keys differently between fetches.
+  The denylist (`_TRACKING_PARAMS` + any `utm_` prefix) satisfies both. Its cost
+  is that an unrecognized non-tracking parameter re-brightens an item once —
+  cosmetic, and deliberately preferred over a silent collision. The key is the
+  URL alone, never url+title, so a corrected headline doesn't re-brighten.
+  *(2026-08-02.)*
+- **Pheme keeps the parsed datetime as `ts`, and `handle()` strips it back out.**
+  `_short_date()` built a `datetime` and discarded everything but "Jul 24" one
+  line later, which is why the Brain's merge was round-robin: there was nothing
+  to sort on. A day-level key across seven feeds is a wall of ties with arbitrary
+  intra-day order, so the sort key had to be the full timestamp. `_parse_date()`
+  now returns what the feed wrote and two thin formatters split off it —
+  `_short_date()` (display, in the feed's own zone, unchanged behavior) and
+  `_timestamp()` (sort, always UTC). Naive datetimes are assumed UTC rather than
+  left naive: comparing naive against aware raises `TypeError`, and the river
+  sorts across feeds that need not agree about offsets. `ts` is a fixed-width
+  string, not a `datetime`, so the Kairos payload stays JSON-serialisable (§9)
+  and `""` (undated) sorts last under `reverse=True`. `handle()` strips the key
+  before returning — the Brain's story shape is deliberately untouched.
+  *(2026-08-02.)*
+- **Celestarium became a *grouped row*, not a tab in a host panel.** A tab reads
+  as part of a panel, and these are first-class destinations. The mechanical
+  payoff is larger than the visual one: `HypatiaPanel` stays a `Card` and
+  `felhaven.py` needed no edit at all. A tab body must be a plain `tk.Frame` (a
+  `Card` inside a `Card` double-borders), so hosting it would have meant demoting
+  the panel and reaching *through* the host for its two Kairos registrations and
+  its `rescale()`. A grouped row changes only how the rail is drawn. Group
+  headers keep the ordinary bordered-card chrome — the rail has to read as one
+  column — and stay distinguishable by the ▼/▶ glyph in the dot's slot plus a
+  label that never lights green. *(2026-08-08.)*
+- **Groups are collapsed on open (§7), and `set_active()` force-expands.** The
+  collapsed default is what keeps the rail inside the window: collapsed, a group
+  costs one row however many children it holds, so the rail stops growing with
+  the view count. The force-expand is the necessary counterpart — a lit row
+  hidden inside a collapsed group would leave the nav lying about where you are.
+  *(2026-08-08.)*
+- **The Artemis chart draws from TIGER/USGS, not OpenStreetMap — a licensing
+  call, not a technical one.** OSM has what TIGER lacks (trails, two-tracks,
+  surface type, gates) and would be the better map; it is also ODbL
+  share-alike, a knot against an MIT repo meant to be cloned. TIGER/Line and
+  USGS products are public domain, so the stack stays clean end to end. The
+  cost — weak trail coverage, not-survey-grade geometry — is accepted and
+  stated in the panel footer. The layer modules keep the fetch/parse/normalize
+  seams separate so an OSM adapter stays possible without an architectural
+  change; it is architecture now, implementation later or never. *(2026-08-09.)*
+- **Artemis render operations never perform network I/O; ingest always does.**
+  The API shape is the enforcement: each layer exposes `ingest()` (online,
+  slow, explicit, writes into `<area>.partial/` promoted by one `os.replace`)
+  and `load()` (offline, pure read) — and `load()` on a missing cache RAISES;
+  it does not helpfully fetch. The failure mode being guarded is a reader that
+  quietly grows an `if not cached: fetch()` branch eighteen months from now,
+  which would make the offline field case dependent on a connection exactly
+  when it matters. A socket-seam test hardening this is planned with the
+  search milestone. *(2026-08-09.)*
+- **Terrain is best-effort inside an otherwise all-or-nothing ingest.** Roads
+  and water failing aborts the area — a chart missing its road network is not
+  a chart. Elevation is different: it is the only layer behind an API key, and
+  failing the whole ingest over a sealed vault or an absent OpenTopography key
+  would mean a user without a key loses the roads-and-water map that shipped
+  before terrain existed. So `ingest_area` catches `IngestError` from Demeter
+  alone, commits the area without it, and records `terrain_skipped: <slug>` in
+  the manifest so the panel says what is missing instead of implying a flat
+  county. Cancellation is explicitly NOT absorbed — it propagates and discards
+  the partial, or a cancelled ingest would commit a half-area. *(2026-08-09.)*
+- **The Artemis palette is the one place hue carries meaning, and it lives in
+  two files on purpose.** §7's rule is that colours come from `theme.C`, and
+  the theme deliberately folds its accents into a monochrome phosphor ramp. A
+  map cannot: terrain, water and roads have to be told apart at a glance, so
+  the `map_*` keys introduce cyan and amber (near-complementary, and the set
+  survives common red-green colour deficiencies), with nothing reaching text
+  brightness so the phosphor still reads on top. The three terrain colours
+  then exist *twice* — `theme.C` for the panel's vectors and RGB tuples in
+  `tools/demeter.py`, which renders the raster headless and must not import
+  Tk. Duplication is the lesser evil against dragging Tk into `tools/`;
+  `tests/test_artemis_palette.py` holds the two in lockstep so they cannot
+  drift silently. *(2026-08-09.)*
+- **The terrain raster is resampled to the canvas, not zoomed by Tk.**
+  `PhotoImage` rescales only by integer factors, and the cached raster is
+  1024² over the ingest square: at native scale the 5-mile ring is ~931 px
+  (overflowing a typical canvas) and at `subsample(2)` it is ~465 px in an
+  ~810 px canvas, wasting half the view. Either way the vectors would have to
+  adopt the raster's scale and the map would stop filling the panel. So the
+  panel nearest-neighbour-samples the cached PPM to exactly the drawable span
+  once per area change or debounced resize — a few hundred ms, rare — and the
+  vector scale is derived from that same span, which makes the layers aligned
+  by construction. The cached 1024² PPM stays authoritative and regenerable;
+  M4's zoom stops become a factor on the destination size rather than a
+  second rendering path. *(2026-08-09.)*
+- **The 5-mile ring mask is eight plain shapes, not one keyhole polygon.** The
+  usual trick for "fill everything except this circle" is a single polygon
+  that traces the rectangle, runs down a zero-width slit into the circle, and
+  comes back — which relies on the renderer's winding rule and on a degenerate
+  edge behaving. It probably works in Tk; "probably" is the problem, since the
+  failure mode is a visible artifact on someone else's machine that no test
+  would catch. Four rectangles outside the ring's bounding box plus four
+  corner wedges between the box and the arc are all simple, non-self-
+  intersecting polygons that fill identically under either rule. Eight canvas
+  items against one is not a cost worth reasoning about. *(2026-08-09.)*
+- **Zoom crops the cached raster before scaling it, and the fix stays
+  centred.** Given the M3 decision to resample to the canvas, a zoom stop is
+  just "sample a smaller centred square of the source to the same span" — so
+  the work is constant at every stop, where scaling first and cropping after
+  would build a 4x-larger intermediate for 4x (~31 MB and seconds of Python).
+  The stops only magnify: at 1x the whole ingest square is already visible and
+  the cache is a hard edge on how much world exists, so a zoom-out stop would
+  show nothing but background. There is no free panning either — this is a
+  range display centred on you, and moving the centre is search's job (M5).
+  *(2026-08-09.)*
+- **Hover tolerance is set in pixels and converted to metres; the test itself
+  stays in geometry space.** The spec asks for a fixed ~40 m tolerance,
+  explicitly "not pixels" — but that contrast was aimed at `find_closest()`,
+  which answers "which canvas item is nearest" and can lose to an unrelated
+  layer that happened to drop a vertex closer. That concern is about where the
+  comparison happens, and geometry space is preserved: cursor pixels are
+  back-projected to local metres, ~9 index cells supply candidates, and exact
+  point-to-segment distance decides. Only the tolerance's *size* is derived
+  from pixels, because at the shipped display scale 40 m is under two pixels
+  and a hover that demands two-pixel precision reads as broken. Ten pixels'
+  worth of metres tracks how precisely a hand can actually point, and tightens
+  automatically as you zoom in. *(2026-08-09.)*
+- **"The source has no such file" and "the download failed" must never be the
+  same branch.** Poseidon tolerates a missing AREAWATER file because plenty of
+  inland counties genuinely publish none — but the first version caught every
+  exception there, so a `TimeoutError` on one county's lakes was recorded as
+  "this county has no lakes" and the ingest committed a chart missing real
+  water with nothing on screen, and only an INFO line in the log, to say so.
+  Found by reading the log after a slow cache looked like a hang. Now only an
+  HTTP 404 means absence; anything else raises, and every county download
+  retries once first since a stalled TIGER fetch is usually transient. The
+  general rule: when a failure path is *tolerated*, the tolerance must be
+  narrowed to the exact condition that is genuinely benign — a broad `except`
+  under a permissive branch turns every unrelated fault into silent data loss.
+  The follow-on: all three ingest downloads now go through one
+  `artemis.download()` rather than a copy per layer. The bug was possible
+  *because* the logic was duplicated — Hecate's copy was right and Poseidon's
+  was wrong — so the fix is one implementation, with 404-means-absence behind
+  an explicit `allow_missing` that only the optional AREAWATER fetch passes.
+  *(2026-08-10.)*
+- **Artemis search moves the VIEW; it never writes the fix.** Themis's
+  latitude/longitude feed Atmospherics, Celestarium, Helios/Selene and the
+  season as well as the chart, so a search box that wrote through would mean
+  looking up a trailhead silently relocated the weather and the star map. The
+  searched place becomes a panel-local view centre, ⌂ HOME snaps back to the
+  fix, and a Kairos tick deliberately does NOT reclaim the view — otherwise
+  typing a place would be undone within ten minutes. Caching the searched area
+  stays a separate explicit click; nothing about panning downloads anything.
+  This is also why the spec's "Pharos" (a module owning the fix Felhaven-wide)
+  was dropped rather than built: Themis already held that job, and the part
+  that was genuinely missing — turning text into coordinates — is what
+  `tools/eratosthenes.py` does and all it does. *(2026-08-10.)*
+- **`tests/test_artemis_offline.py` is the stack's first socket-level
+  hermeticism test, and it patches with a context manager.** Every other
+  module mocks its own named seam (`requests.get`, `_OPENER.open`), which is
+  enough when the rule is about one function. Artemis's rule is about a whole
+  category — no render path anywhere may touch the network — so the block goes
+  at `socket.socket`/`socket.create_connection` and a real cached area is
+  driven through load, render, zoom and hover beneath it. Two things make it
+  trustworthy: `mock.patch` as a context manager, never assignment to the
+  socket module's globals (that poisons every later test in the process and
+  the fallout reads as network flakiness), and a `test_the_block_is_real` case
+  proving the guard actually raises — a hermeticism test that cannot fail
+  reports safety it never checked. *(2026-08-10.)*
+- **ArtemisPanel runs one daemon ingest thread with a bounded `after()` drain
+  chain — the Echo pattern, now a listed §6 exception.** A cache ingest is a
+  multi-minute, multi-county network job: request-driven (never automatic, a
+  two-click confirm), so there is no Kairos tick to drain on, and the panel's
+  own `artemis` worker fires only every 600 s. The worker thread's only shared
+  touch is `queue.put`; an epoch counter discards messages from a cancelled
+  run; a `threading.Event` cancels between counties and the tools side
+  guarantees a cancelled or failed ingest leaves no partial directory.
+  *(2026-08-09.)*
+- **The Artemis porthole is fixed-size chrome; the world moves under it.**
+  Canvas items now carry one of two family tags. `world` (terrain raster,
+  water, roads, range rings, the fix crosshair) is anchored to `_view()`'s
+  origin, drawn *under* the mask so the glass clips it, and is the only thing a
+  drag moves. `chrome` (mask, rim, bearing ticks, cardinals, compass, scale
+  bar) is anchored to the canvas and never moves. `_porthole_r` is
+  `DISPLAY_RADIUS_M * min(scale, scale/zoom)`, which is `0.4546 * span` at
+  every stop — so the round frame is the same size at 1x, 2x and 4x, and
+  `_draw_mask`'s old "nothing to hide when zoomed in" early return was
+  provably unreachable and is gone. What forced this: the terrain raster is a
+  `span × span` square while vectors span the full canvas width, so dropping
+  the mask at 2x/4x exposed the raster's straight edge as a hard seam with
+  roads floating on black beyond it. Range rings that no longer fit are
+  replaced by the rim, labelled with the radius actually visible (5 / 2.5 /
+  1.25 mi) so zooming never removes the chart's only distance reference. Note
+  `DISPLAY_RADIUS_M` (8047 m) exceeds the true 5-mile ring (8046.72 m), so the
+  fits-inside test needs a two-pixel margin or it draws ring and rim as a
+  doubled hairline. *(2026-08-16.)*
+- **Artemis pans by drag, superseding the 2026-08-09 entry that said the fix
+  stays centred.** That entry was right for a chart with no mask beyond the
+  ring and no way to look off-centre; the porthole change above made a
+  centred-only view the thing that *showed* the raster seam, and zoom without
+  pan only ever magnifies the middle. The pan is stored in world metres and
+  enters `_view()` alone, so vectors, rings, the fix mark and the hit test
+  follow it with no second code path — a panned chart and a panned hit test
+  cannot disagree. It clamps to `DISPLAY_RADIUS_M * (1 - 1/zoom)`: exactly
+  zero at 1x (everything is already on screen, so off-centre would be
+  arbitrary) and, since the porthole's world radius is `DISPLAY_RADIUS_M/zoom`,
+  the furthest reach is exactly `DISPLAY_RADIUS_M` — inside the cached square,
+  so there is always data under the glass. A drag moves the `world` tag and
+  never rebuilds the raster; a `_PAN_MS` pause re-crops it, which is needed
+  because the raster reaches only ~4.5% of the span past the glass. Click and
+  drag are told apart by `_CLICK_PX = 4` (the Windows `SM_CXDRAG` threshold) —
+  deliberately not `_HOVER_PX`, which measures how precisely a hand can point
+  rather than how far one slips while clicking. *(2026-08-16.)*
+- **A cached area's name is optional manifest metadata, and the recycle-bin
+  helper is copied rather than shared.** The name can only be metadata:
+  `area_id` is a deterministic function of the centre coordinates, so the
+  directory name is not available to rename. It rides as an optional
+  `manifest["label"]` with no `MANIFEST_SCHEMA` bump — optional keys are
+  already how schema 2 carries `terrain_skipped` and `grid` — and
+  `ingest_area` reads it back immediately *before* the commit, not at the top,
+  so a rename made *during* a download still survives. On the helper:
+  `orpheus.delete_file()` is NOT reusable (its `_safe_path` demands
+  `os.path.isfile` and is hard-wired to `local_audio/`), and unlike the
+  `download()` consolidation this is a copy worth making — the Windows call is
+  identical but the non-Windows fallback cannot be (`os.remove` raises on a
+  directory), and the download bug came from a duplicated *policy* branch
+  where this has no policy at all. Rule of three: lift it to a shared home if
+  a third caller appears. `delete_area`'s guard is the real work — bare name,
+  not `_`-prefixed, not `.partial`, `isdir`, and a `realpath` parent check,
+  which is what a basename test cannot do since a junction inside the cache
+  would otherwise pass. *(2026-08-16.)*
+- **A refresh keeps the terrain it already had — best-effort must not mean
+  best-effort-on-re-ingest.** Terrain was made best-effort so a missing
+  OpenTopography key could not cost you the roads and water that already
+  downloaded (§12, 2026-08-09). That reasoning holds for a FIRST ingest and
+  inverts for a refresh: `ingest_area` replaces the whole area directory, so
+  a re-ingest with a sealed vault silently downgraded a complete area to a
+  terrain-less one — the user paying for a road update with elevation they
+  already owned. Found in the field within minutes of shipping the per-row ⟳.
+  `_carry_terrain` now copies the committed `terrain.bin` into the partial
+  dir and restores the `grid`/`sources.elevation` entries, recording
+  `terrain_kept` rather than `terrain_skipped`; topography does not change,
+  so an older grid is strictly better than none, and carrying the grid whole
+  is not datum mixing. Only `terrain.bin` is copied — `derived/` already
+  holds the freshly built spatial index for the NEW roads and water, and
+  `demeter.raster()` rebuilds the raster on demand. This is the Poseidon 404
+  lesson recurring: **a tolerated failure must never degrade data that is
+  already committed.** Ask of any such branch not just "is this failure
+  survivable" but "survivable compared to what was already there".
+  *(2026-08-16.)*
+- **The Cached Locations overlay is `place()`d on the canvas, expanded by
+  default, and does not scroll — three deliberate deviations.** (1) It is a
+  child of the canvas positioned with `place()`, never
+  `canvas.create_window()`: a canvas window is a canvas *item*, and
+  `_redraw()` opens with `canvas.delete("all")`, so the overlay would be
+  destroyed on every zoom, resize and area load. A test redraws and asserts
+  the box still exists, so converting it back fails immediately rather than
+  mysteriously. (2) §7 says collapsible sub-widgets start collapsed; this one
+  starts expanded because it is map chrome in the same class as the compass
+  and scale bar, which are already permanent — the ▶/▼ toggle is still there
+  for anyone who disagrees. (3) §7 says scrolling lists reuse `_ScrollFrame`;
+  this is not a scrolling list. Rows are few by construction (each is a
+  deliberate 10–30 MB download), a seventh copy of that pattern is heavy
+  machinery for two to six rows, and its `bind_all` wheel handling would
+  fight a canvas that now pans. Recorded so none of the three reads as an
+  oversight. *(2026-08-16.)*
+- **`Sidebar._relayout()` forgets the whole rail and re-packs it** rather than
+  packing/forgetting just the group box. `pack()` appends to the bottom of its
+  container, so re-expanding a group would drop its children below Cogitator
+  instead of back into their slot. Forget-all-then-pack-in-declaration-order is
+  the same idiom `felhaven._show_view` uses, and it is order-correct by
+  construction rather than by remembering a `before=` neighbor.
+  *(2026-08-08.)*

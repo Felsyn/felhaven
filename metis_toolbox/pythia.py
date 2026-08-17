@@ -114,6 +114,16 @@ _MODEL = os.environ.get("PYTHIA_MODEL", "gemma4:e2b")
 # First call cold-loads the model (~100s on this box); later calls are quick.
 _REQUEST_TIMEOUT = 180          # seconds
 _MAX_TOOL_ROUNDS = 5            # cap tool→answer loops so a confused model can't spin
+# gemma4:e2b sometimes ends its turn with nothing at all — no tool call, empty
+# content — typically when the tool result it just received doesn't actually
+# answer the question (it fetched the time but needs sunset, say). Retrying the
+# IDENTICAL request does not help: measured 8/8 blank on a context that blanks,
+# because nothing about the request changed. The retry only works if it carries
+# a nudge asking the model to answer or name what's missing — measured 0/8 blank
+# with one. One retry, bounded by the _MAX_TOOL_ROUNDS budget so it can't spin.
+_MAX_BLANK_RETRIES = 1
+_BLANK_NUDGE = ("Answer the user's question now, using the tool results above. "
+                "If they are not enough, say plainly what information is missing.")
 _NUM_CTX = 8192                 # context window (tokens) — starting point for Obelisk's RAM
 _NUM_PREDICT = 1024             # max output tokens per round trip — same
 # keep_alive=-1 pins gemma4:e2b resident in Ollama's memory instead of letting it
@@ -155,9 +165,18 @@ def _chat(
     JSON stream, calls on_delta(piece) for each content token as it arrives, and
     returns (assembled_message, round_stats). assembled_message carries `content`
     plus any `tool_calls`; round_stats carries this round's prompt_tokens/
-    output_tokens/eval_ms (0 for any count Ollama's `done` chunk omits). Raises
-    on HTTP/connection error — the caller in ask() converts that to a friendly
-    string. Logs time-to-first-token and total round-trip time.
+    output_tokens/eval_ms (0 for any count Ollama's `done` chunk omits) plus
+    thinking_chars. Raises on HTTP/connection error — the caller in ask()
+    converts that to a friendly string. Logs time-to-first-token and total
+    round-trip time.
+
+    A chunk's `message` can also carry `thinking` — the model's reasoning trace,
+    which is NOT an answer. It is deliberately dropped: never streamed to
+    on_delta, never concatenated into `content` (raw reasoning in the user's
+    transcript is bad UX), and never carried back into the next round's context.
+    Only its length survives, as round_stats["thinking_chars"], because a round
+    that is all thinking and no content otherwise looks like an unexplained
+    blank turn to ask() and to whoever is reading the log.
 
     If `cancel` is set mid-stream, the read loop breaks immediately: exiting the
     `with requests.post(...)` block closes the connection, which makes Ollama
@@ -168,16 +187,21 @@ def _chat(
         "messages": messages,
         "tools": TOOLS,
         "stream": True,
-        "think": False,     # skip gemma4's reasoning trace — we want the answer
+        # Skip gemma4's reasoning trace — we want the answer. If a round returns
+        # `thinking` anyway (this flipped, or a model that thinks regardless),
+        # it is dropped, not shown; see the docstring.
+        "think": False,
         "keep_alive": _KEEP_ALIVE,
         "options": {"num_ctx": _NUM_CTX, "num_predict": _NUM_PREDICT},
     }
     content_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
+    thinking_chars = 0
     role = "assistant"
     t0 = time.perf_counter()
     first_token_at: Optional[float] = None
-    stats = {"prompt_tokens": 0, "output_tokens": 0, "eval_ms": 0}
+    stats = {"prompt_tokens": 0, "output_tokens": 0, "eval_ms": 0,
+             "thinking_chars": 0}
 
     with requests.post(
         _CHAT_URL, json=payload, stream=True, timeout=_REQUEST_TIMEOUT
@@ -199,6 +223,8 @@ def _chat(
                 content_parts.append(piece)
                 if on_delta is not None:
                     on_delta(piece)
+            # Counted, never kept — see the `thinking` paragraph above.
+            thinking_chars += len(message.get("thinking") or "")
             calls = message.get("tool_calls")
             if calls:
                 tool_calls.extend(calls)
@@ -212,7 +238,21 @@ def _chat(
                     f"ttft={ttft} round={_ms(t0)}"
                 )
 
-    assembled: dict[str, Any] = {"role": role, "content": "".join(content_parts)}
+    stats["thinking_chars"] = thinking_chars
+    content = "".join(content_parts)
+    # All reasoning, no answer, no tool call — the round is blank to everyone
+    # downstream. Say so here, or it looks like the model returned nothing at
+    # all. (A tool round with empty content is normal, hence the tool_calls
+    # guard.) Reached today only if someone flips `think` above, or a future
+    # PYTHIA_MODEL thinks anyway.
+    if thinking_chars and not content.strip() and not tool_calls:
+        log.warning(
+            f"Pythia: round returned no content and {thinking_chars} chars of "
+            f"`thinking` (request think={payload['think']}). Reasoning is dropped "
+            f"by design, so this round counts as an empty reply."
+        )
+
+    assembled: dict[str, Any] = {"role": role, "content": content}
     if tool_calls:
         assembled["tool_calls"] = tool_calls
     return assembled, stats
@@ -260,7 +300,14 @@ def ask(
     text has streamed so far. Never raises for this either.
 
     Never raises: network/LLM problems come back as a short readable string so
-    the panel can print the result straight to the transcript.
+    the panel can print the result straight to the transcript. An empty reply
+    (no content, no tool call — including a round that produced only a dropped
+    `thinking` trace, which the log names as such) is retried once, carrying a
+    nudge to answer or name what's missing — a bare re-ask of the same context
+    reproduces the same silence, so the nudge is the part that works. Neither
+    the empty turn nor the nudge survives into `turn_messages`. Only if that
+    retry is also silent does it degrade to a readable string. The return value
+    is never empty and never a bare placeholder.
     """
     t_start = time.perf_counter()
     system_prompt = machine_spirit.effective_prompt()
@@ -295,9 +342,21 @@ def ask(
             })
         return answer_text
 
+    blank_rounds = 0
+    nudge_pending = False
+
     try:
-        for _ in range(_MAX_TOOL_ROUNDS):
-            reply, stats = _chat(messages, on_delta=on_delta, cancel=cancel)
+        for round_i in range(_MAX_TOOL_ROUNDS):
+            try:
+                reply, stats = _chat(messages, on_delta=on_delta, cancel=cancel)
+            finally:
+                # Drop the nudge the moment its round is over — including a round
+                # that raised, whose handler below still persists turn_messages.
+                # The caller stores those as history, and a user message the user
+                # never typed does not belong there.
+                if nudge_pending:
+                    messages.pop()
+                    nudge_pending = False
             prompt_tokens += stats["prompt_tokens"]
             output_tokens += stats["output_tokens"]
             eval_ms += stats["eval_ms"]
@@ -309,8 +368,38 @@ def ask(
 
             tool_calls = reply.get("tool_calls") or []
             if not tool_calls:
-                log.info(f"Pythia: ask() total {_ms(t_start)}")
-                return _emit((reply.get("content") or "").strip() or "(no answer)")
+                answer = (reply.get("content") or "").strip()
+                if answer:
+                    log.info(f"Pythia: ask() total {_ms(t_start)}")
+                    return _emit(answer)
+                # The model ended its turn with nothing to say. Drop that empty
+                # turn before retrying: left in place it would both prime the
+                # retry with its own silence and — because the caller persists
+                # turn_messages as history — teach the model that a blank reply
+                # is a valid turn, which is the same transcript-imitation trap
+                # documented in home_panel.py.
+                messages.pop()
+                blank_rounds += 1
+                # A round can be empty because the model said nothing at all, or
+                # because it spent the round reasoning (`thinking`), which we
+                # drop. Same retry either way, but the log should say which.
+                thought = stats.get("thinking_chars", 0)
+                why = f" (round was {thought} chars of thinking)" if thought else ""
+                if (blank_rounds <= _MAX_BLANK_RETRIES
+                        and round_i < _MAX_TOOL_ROUNDS - 1):
+                    log.warning(
+                        f"Pythia: empty reply{why}, retrying with nudge "
+                        f"({blank_rounds}/{_MAX_BLANK_RETRIES})"
+                    )
+                    messages.append({"role": "user", "content": _BLANK_NUDGE})
+                    nudge_pending = True
+                    continue
+                log.warning(
+                    f"Pythia: still empty after {blank_rounds} round(s){why}"
+                )
+                silent = "The oracle answered but said nothing. Try asking again."
+                messages.append({"role": "assistant", "content": silent})
+                return _emit(silent)
 
             # Run each requested tool, feed the JSON result back as a tool turn.
             for call in tool_calls:

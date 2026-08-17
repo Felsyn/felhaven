@@ -8,10 +8,13 @@ Job:         Turn text into an audio file on disk. Typically Markdown, and
              an audio engine (that is Morpheus), and does not decide WHAT to
              narrate — it is handed text + a filename and writes one .opus file.
 
-Contract:    text_to_audio(text, filename) -> dict
+Contract:    text_to_audio(text, filename, *, voice=None) -> dict
                  Strip the Markdown to readable prose, chunk it, synthesize each
                  chunk via Calliope's shared model, concatenate the PCM, and
-                 encode it to an Opus file in local_audio/. Returns
+                 encode it to an Opus file in local_audio/. `voice` names a
+                 kokoro voice for this one conversion (None = Calliope's current
+                 narration voice), so rendering a file in a different voice never
+                 disturbs how Pythia's answers are read aloud. Returns
                  {"path": "<abs .opus path>"} on success, or {"error": "<code>"}
                  on any failure. NEVER raises — a missing model, a missing or
                  mis-built ffmpeg, empty text, or a bad filename all degrade to an
@@ -215,9 +218,15 @@ def _encode_opus(ffmpeg: str, wav_path: str, out_path: str) -> dict[str, str]:
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
-def text_to_audio(text: str, filename: str) -> dict[str, str]:
+def text_to_audio(text: str, filename: str, *,
+                  voice: Optional[str] = None) -> dict[str, str]:
     """Markdown text + filename -> one .opus file in local_audio/. Returns
     {"path": abs} or {"error": code}. Never raises; never leaves a partial file.
+
+    `voice` is a kokoro voice id for this conversion only; None uses Calliope's
+    current narration voice. An id kokoro doesn't know surfaces as
+    synthesis_failed like any other synthesis failure — voices.CATALOG is the
+    gate, and the panel only ever offers ids from it.
 
     Error codes: empty_filename, empty_text, ffmpeg_unavailable,
     synthesis_failed, ffmpeg_encode_failed, echo_failed (catch-all)."""
@@ -240,7 +249,7 @@ def text_to_audio(text: str, filename: str) -> dict[str, str]:
 
         pcms: list[np.ndarray] = []
         for chunk in chunks:
-            pcm = calliope.synthesize(chunk)
+            pcm = calliope.synthesize(chunk, voice=voice)
             if pcm is None:
                 return {"error": "synthesis_failed"}
             pcms.append(pcm)

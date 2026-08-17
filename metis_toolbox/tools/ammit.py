@@ -131,9 +131,11 @@ TOOL_DEFINITION = {
     "function": {
         "name": "manage_timer",
         "description": (
-            "Manage a single countdown timer. "
-            "Actions: start (requires duration_minutes), "
-            "stop (pause), reset (clear), query (read state)."
+            "Start, stop, reset, or read the state of a single countdown timer. "
+            "Call when the user wants to be timed or reminded after a set number "
+            "of minutes, or asks how long is left on a running timer. "
+            "This changes timer state — do not call it to answer a question "
+            "about the current time or date."
         ),
         "parameters": {
             "type": "object",
@@ -141,14 +143,15 @@ TOOL_DEFINITION = {
                 "action": {
                     "type": "string",
                     "enum": ["start", "stop", "reset", "query"],
-                    "description": "Operation to perform.",
+                    "description": (
+                        "start begins a countdown (needs duration_minutes), "
+                        "stop pauses it, reset clears it, query reads its state."
+                    ),
                 },
-                "slot": {
-                    "type": "integer",
-                    "description": "Timer slot (always 1).",
-                    "minimum": 1,
-                    "maximum": 1,
-                },
+                # No `slot` parameter: there is exactly one timer, so declaring it
+                # only asks the model to reason about a value that can never vary.
+                # handle() still defaults slot=1. If MAX_SLOTS ever grows, it
+                # comes back.
                 "duration_minutes": {
                     "type": "number",
                     "description": "Duration in minutes. Required for start action.",

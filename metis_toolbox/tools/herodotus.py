@@ -540,9 +540,11 @@ READ_TOOL_DEFINITION: "dict[str, Any]" = {
     "function": {
         "name": "read_document",
         "description": (
-            "Read one Markdown document from the local knowledge archive by "
-            "its exact filename (e.g. 'notes.md'). Use list_documents or "
-            "search_documents first if you don't know the filename."
+            "Read one Markdown document from the local knowledge archive by its "
+            "exact filename (e.g. 'notes.md'). Call when the user refers to "
+            "something they saved earlier, or when a document's contents are "
+            "needed to answer. Call list_documents or search_documents first if "
+            "the filename isn't known."
         ),
         "parameters": {
             "type": "object",
@@ -583,14 +585,15 @@ EDIT_TOOL_DEFINITION: "dict[str, Any]" = {
     "function": {
         "name": "edit_document",
         "description": (
-            "Edit part of an existing archive document without rewriting it. "
-            "operation is one of: 'append' or 'prepend' (content only); "
-            "'replace' (target = exact existing text, occurring once; content "
-            "= its replacement); 'insert_after_heading' / "
-            "'insert_before_heading' (target = a heading's text, content = "
-            "lines to insert); 'replace_heading' (target = current heading "
-            "text, content = its new text)."
+            "Change part of an existing archive document without rewriting the "
+            "whole file. Call when the user wants to add to, correct, or "
+            "restructure a document that already exists; prefer this over "
+            "write_document, which replaces the entire file. This modifies a "
+            "stored document."
         ),
+        # `target` and `content` mean different things per operation, which JSON
+        # Schema can't express — so that matrix lives on the parameters it
+        # describes rather than in the function description above.
         "parameters": {
             "type": "object",
             "properties": {
@@ -598,10 +601,15 @@ EDIT_TOOL_DEFINITION: "dict[str, Any]" = {
                 "operation": {
                     "type": "string",
                     "enum": list(_EDIT_OPERATIONS),
-                    "description": "Which edit to perform.",
+                    "description": (
+                        "append/prepend add content at the end/start; replace "
+                        "swaps target for content; insert_after_heading and "
+                        "insert_before_heading put content around the heading "
+                        "named by target; replace_heading renames it."
+                    ),
                 },
-                "target":  {"type": "string", "description": "Existing text or heading to anchor on (not used by append/prepend)."},
-                "content": {"type": "string", "description": "New text (may be empty only for replace, to delete the target)."},
+                "target":  {"type": "string", "description": "The anchor: for replace, the exact existing text (must occur once); for the heading operations, the heading's text. Unused by append/prepend."},
+                "content": {"type": "string", "description": "The new text. May be empty only for replace, which then deletes the target."},
             },
             "required": ["filename", "operation"],
         },

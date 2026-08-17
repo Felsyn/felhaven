@@ -22,11 +22,18 @@ Covers:
      per-feed story cap.
   4. _interleave, handle() (mix, narrowing, cap, and its own §2 errors),
      and fetch()'s raise-only-on-unreadable-config contract.
+  5. The Scrapstream additions — `ts` (the UTC sort key kept alongside the
+     display date), read_key's normalization, and the read-state file.
 """
 
+import json
 import os
+import shutil
 import sys
+import tempfile
 import unittest
+from collections import deque
+from datetime import datetime
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -361,8 +368,10 @@ class TestInterleave(unittest.TestCase):
 
 
 def _story_n(fid, n):
+    # Same shape _story() produces, `ts` included — a fake that omitted it
+    # would let handle()'s strip pass without ever removing anything.
     return {"title": f"{fid}{n}", "url": "", "author": "", "date": "",
-            "domain": ""}
+            "domain": "", "ts": f"2026-07-{n + 1:02d}T00:00:00Z"}
 
 
 def _fake_fetch_feed(feed):
@@ -449,6 +458,255 @@ class TestFetch(unittest.TestCase):
         self.assertEqual(set(result["feeds"]), {"a", "b", "dead"})
         self.assertEqual(result["feeds"]["dead"], {"error": "feed_timeout"})
         self.assertEqual(len(result["feeds"]["a"]["stories"]), 2)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  5. Scrapstream — the UTC sort key
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestTimestamp(unittest.TestCase):
+    def test_offsets_are_normalized_to_utc(self):
+        self.assertEqual(pheme._timestamp("2026-07-22T17:15:06-04:00"),
+                         "2026-07-22T21:15:06Z")
+
+    def test_a_naive_date_is_assumed_utc_rather_than_left_naive(self):
+        # _parse_date hands back exactly what the feed wrote...
+        self.assertIsNone(pheme._parse_date("2026-07-23T14:30:00").tzinfo)
+        # ...and _timestamp is where the zone is decided.
+        self.assertEqual(pheme._timestamp("2026-07-23T14:30:00"),
+                         "2026-07-23T14:30:00Z")
+
+    def test_named_gmt_zone_is_normalized(self):
+        self.assertEqual(pheme._timestamp("Fri, 24 Jul 2026 02:10:00 GMT"),
+                         "2026-07-24T02:10:00Z")
+
+    def test_fractional_seconds_are_dropped_to_keep_the_key_fixed_width(self):
+        self.assertEqual(pheme._timestamp("2026-07-23T14:30:00.123456+00:00"),
+                         "2026-07-23T14:30:00Z")
+        self.assertEqual(len(pheme._timestamp("2026-07-23T14:30:00")), 20)
+
+    def test_garbage_and_empty_give_an_empty_key(self):
+        self.assertEqual(pheme._timestamp("yesterday-ish"), "")
+        self.assertEqual(pheme._timestamp(""), "")
+
+    def test_mixed_naive_and_aware_feeds_sort_without_raising(self):
+        # The crash this normalization exists to prevent: comparing a naive
+        # datetime against an aware one raises TypeError, and the merged river
+        # sorts across seven feeds that need not agree about offsets.
+        keys = [pheme._timestamp(r) for r in
+                ("2026-07-23T14:30:00",                  # naive
+                 "Thu, 23 Jul 2026 20:47:33 +0000",      # aware
+                 "2026-07-22T17:15:06-04:00",            # aware, offset
+                 "not a date")]                          # unparseable
+        self.assertEqual(sorted(keys, reverse=True),
+                         ["2026-07-23T20:47:33Z", "2026-07-23T14:30:00Z",
+                          "2026-07-22T21:15:06Z", ""])
+
+    def test_string_order_matches_time_order(self):
+        earlier = pheme._timestamp("Thu, 23 Jul 2026 20:47:33 +0000")
+        later   = pheme._timestamp("Thu, 23 Jul 2026 20:47:34 +0000")
+        self.assertLess(earlier, later)
+
+    def test_the_display_date_still_reads_in_the_feeds_own_zone(self):
+        # Deliberately divergent: a story datelined Wednesday evening in New
+        # York shows "Jul 22" but sorts as the UTC Jul 23 it actually is.
+        raw = "2026-07-22T21:00:00-04:00"
+        self.assertEqual(pheme._short_date(raw), "Jul 22")
+        self.assertEqual(pheme._timestamp(raw), "2026-07-23T01:00:00Z")
+
+
+class TestStoriesCarryTheSortKey(unittest.TestCase):
+    def test_rss_parser_fills_ts(self):
+        from xml.etree import ElementTree as ET
+        stories = pheme._parse_rss(ET.fromstring(_BBC_RSS))
+        self.assertEqual(stories[0]["ts"], "2026-07-24T02:10:00Z")
+        self.assertEqual(stories[0]["date"], "Jul 24")
+
+    def test_atom_parser_fills_ts_from_published(self):
+        from xml.etree import ElementTree as ET
+        stories = pheme._parse_atom(ET.fromstring(_VERGE_ATOM))
+        self.assertEqual(stories[0]["ts"], "2026-07-22T21:15:06Z")
+
+    def test_a_dateless_item_gets_an_empty_ts_and_is_not_dropped(self):
+        from xml.etree import ElementTree as ET
+        stories = pheme._parse_rss(ET.fromstring(_FALLBACK_RSS))
+        self.assertEqual(len(stories), 3)
+        self.assertEqual(stories[0]["ts"], "")
+
+    def test_handle_strips_ts_so_its_output_shape_is_unchanged(self):
+        # The Brain's story shape is deliberately out of scope for Scrapstream.
+        with mock.patch.object(pheme, "_load_config", return_value=_TWO_FEEDS), \
+             mock.patch.object(pheme, "_fetch_feed", _fake_fetch_feed):
+            story = pheme.handle()["stories"][0]
+        self.assertEqual(set(story),
+                         {"title", "url", "author", "date", "domain"})
+
+    def test_fetch_keeps_ts_for_the_panel(self):
+        with mock.patch.object(pheme, "_load_config", return_value=_TWO_FEEDS), \
+             mock.patch.object(pheme, "_fetch_feed", _fake_fetch_feed):
+            story = pheme.fetch()["feeds"]["a"]["stories"][0]
+        self.assertIn("ts", story)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  6. Read state — identity (I2) and the runtime file
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestReadKey(unittest.TestCase):
+    def test_tracking_params_are_stripped(self):
+        # BBC appends these to every link in the real feed.
+        bare = "https://www.bbc.co.uk/news/articles/cvgj61j6l08o"
+        self.assertEqual(
+            pheme.read_key(bare + "?at_medium=RSS&at_campaign=rss"),
+            pheme.read_key(bare))
+
+    def test_utm_prefixed_params_are_stripped(self):
+        self.assertEqual(pheme.read_key("https://a.com/x?utm_source=rss"),
+                         pheme.read_key("https://a.com/x"))
+
+    def test_hacker_news_text_posts_keep_distinct_keys(self):
+        # The reason this is a denylist and not a blanket query strip: an
+        # Ask HN post's whole identity is its query. Stripping it would
+        # collapse every text post onto one key, so reading one would dim
+        # every other — news the user has never seen, silently greyed out.
+        self.assertNotEqual(
+            pheme.read_key("https://news.ycombinator.com/item?id=44123456"),
+            pheme.read_key("https://news.ycombinator.com/item?id=44123457"))
+
+    def test_an_unrecognized_param_is_kept(self):
+        self.assertNotEqual(pheme.read_key("https://a.com/x?id=1"),
+                            pheme.read_key("https://a.com/x"))
+
+    def test_the_fragment_is_always_dropped(self):
+        self.assertEqual(pheme.read_key("https://a.com/x#comments"),
+                         pheme.read_key("https://a.com/x"))
+
+    def test_host_case_and_www_are_normalized(self):
+        self.assertEqual(pheme.read_key("HTTPS://WWW.A.com/x"),
+                         pheme.read_key("https://a.com/x"))
+
+    def test_a_different_path_is_a_different_story(self):
+        self.assertNotEqual(pheme.read_key("https://a.com/x"),
+                            pheme.read_key("https://a.com/y"))
+
+    def test_the_key_is_bounded_and_a_malformed_url_does_not_raise(self):
+        for url in ("", "not a url", "http://[oops", "https://a.com/x"):
+            self.assertEqual(len(pheme.read_key(url)), 16)
+
+
+class _ReadStateTestCase(unittest.TestCase):
+    """Redirects _READ_PATH into a tmpdir and empties the in-memory seen-set,
+    so no test reads or writes the developer's own pheme_read.json."""
+
+    def setUp(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        self.path = os.path.join(d, "pheme_read.json")
+        p = mock.patch.object(pheme, "_READ_PATH", self.path)
+        p.start()
+        self.addCleanup(p.stop)
+        self._clear()
+        self.addCleanup(self._clear)
+
+    def _clear(self):
+        pheme._read_order.clear()
+        pheme._read_set.clear()
+
+    def _use_cap(self, cap):
+        """Shrink the seen-set cap. The deque's maxlen is fixed at construction,
+        so the cap can't be patched on its own — the deque is replaced too."""
+        for target, value in (("_READ_MAX", cap),
+                              ("_read_order", deque(maxlen=cap))):
+            p = mock.patch.object(pheme, target, value)
+            p.start()
+            self.addCleanup(p.stop)
+        pheme._read_set.clear()
+
+
+class TestReadState(_ReadStateTestCase):
+    def test_round_trip_survives_a_reload(self):
+        url = "https://a.com/story"
+        pheme.mark_read(url)
+        self.assertIn(pheme.read_key(url), pheme.read_keys())
+        self._clear()
+        self.assertNotIn(pheme.read_key(url), pheme.read_keys())
+        pheme._load_read()
+        self.assertIn(pheme.read_key(url), pheme.read_keys())
+
+    def test_marking_twice_does_not_duplicate_or_reorder(self):
+        pheme.mark_read("https://a.com/1")
+        pheme.mark_read("https://a.com/2")
+        pheme.mark_read("https://a.com/1")
+        with open(self.path, encoding="utf-8") as f:
+            stored = json.load(f)["read"]
+        self.assertEqual(stored, [pheme.read_key("https://a.com/1"),
+                                  pheme.read_key("https://a.com/2")])
+
+    def test_an_empty_url_is_a_no_op(self):
+        pheme.mark_read("")
+        self.assertEqual(pheme.read_keys(), set())
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_read_keys_is_a_copy_not_the_live_set(self):
+        pheme.mark_read("https://a.com/1")
+        snapshot = pheme.read_keys()
+        pheme.mark_read("https://a.com/2")
+        self.assertEqual(len(snapshot), 1)
+
+    def test_the_set_is_evicted_oldest_first_at_the_cap(self):
+        self._use_cap(3)
+        for n in range(4):
+            pheme.mark_read(f"https://a.com/{n}")
+        keys = pheme.read_keys()
+        self.assertEqual(len(keys), 3)
+        # The oldest fell out of BOTH halves — a key left in the set but not
+        # the deque would stay "read" forever and never be evicted again.
+        self.assertNotIn(pheme.read_key("https://a.com/0"), keys)
+        self.assertIn(pheme.read_key("https://a.com/3"), keys)
+        self.assertEqual(len(pheme._read_order), len(pheme._read_set))
+
+    def test_only_the_last_cap_entries_are_loaded_from_an_oversized_file(self):
+        self._use_cap(2)
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"read": ["k0", "k1", "k2"]}, f)
+        pheme._load_read()
+        self.assertEqual(pheme.read_keys(), {"k1", "k2"})
+
+    def test_the_write_is_atomic_and_leaves_no_tmp_behind(self):
+        pheme.mark_read("https://a.com/1")
+        leftovers = [n for n in os.listdir(os.path.dirname(self.path))
+                     if n.endswith(".tmp")]
+        self.assertEqual(leftovers, [])
+
+
+class TestReadStateDegrades(_ReadStateTestCase):
+    def test_a_missing_file_means_everything_is_unread(self):
+        pheme._load_read()
+        self.assertEqual(pheme.read_keys(), set())
+
+    def test_corrupt_json_means_everything_is_unread_and_does_not_raise(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write("{not json")
+        pheme._load_read()
+        self.assertEqual(pheme.read_keys(), set())
+
+    def test_a_payload_that_is_not_a_list_is_ignored(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"read": {"nope": True}}, f)
+        pheme._load_read()
+        self.assertEqual(pheme.read_keys(), set())
+
+    def test_non_string_entries_are_skipped_not_fatal(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"read": ["good", 7, None]}, f)
+        pheme._load_read()
+        self.assertEqual(pheme.read_keys(), {"good"})
+
+    def test_an_unwritable_path_costs_persistence_not_the_render(self):
+        with mock.patch.object(pheme, "_atomic_write_json",
+                               side_effect=OSError("read-only")):
+            pheme.mark_read("https://a.com/1")      # must not raise
+        self.assertIn(pheme.read_key("https://a.com/1"), pheme.read_keys())
 
 
 if __name__ == "__main__":

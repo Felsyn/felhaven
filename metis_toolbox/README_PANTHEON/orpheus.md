@@ -1,7 +1,7 @@
 # Orpheus
 
-Play back one audio file from local_audio/ — the folder Echo writes to. Play and
-stop only.
+Play back one audio file from local_audio/ — the folder Echo writes to. Play,
+stop, and remove (two-click ✕ → Recycle Bin). No pause, no seek, no playlists.
 
 - **UI:** Vox Array card → ORPHEUS tab
 - **Brain tool:** none

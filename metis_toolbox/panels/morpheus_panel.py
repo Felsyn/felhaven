@@ -45,6 +45,27 @@ panel also uses one-shot self.after() timers for transient UI feedback (the
 two-click-remove confirm window, status-flash auto-clear, save-glyph reset) that
 §6 does not list among its after()/thread exceptions — flagged for a §6 pass, not
 fixed here (see the walkthrough findings).
+
+NOTE (2026-08-06, post-audit): that flag is retired — the §6 pass happened and
+narrowed the rule instead of the code (CONVENTIONS §6, recorded in §12 dated
+2026-07-26). §6 now permits by name what the audit flagged: "a single one-shot
+after() for transient UI feedback — a status line that self-clears, a glyph that
+resets after a beat". All three timers here are that kind. Each is scheduled
+once, from a click handler, and its callback only reverts a label on the main
+thread: the confirm window disarms the remove glyph, the status flash blanks the
+add-form line, and the save glyph goes ! → ＋. None re-arms itself, so none is
+a chain. Both glyph timers guard winfo_exists(), because either row can be
+destroyed inside the window — a confirmed delete re-renders the playlists, and
+a second search clears the result rows. This panel's real §6 deviation remains
+the one documented above — the single daemon thread for the blocking yt-dlp
+search.
+
+2026-08-10: all three timers now go through _after_once() and are cancelled in a
+destroy() override. §6 still permits them; this is only teardown hygiene — an
+uncancelled timer outlives the Tcl command it names and makes Tcl print
+`invalid command name` on stderr. Note the winfo_exists() guards described above
+do NOT cover this case: they protect against a destroyed *glyph* while the panel
+lives, and never run at all once the panel itself is gone.
 """
 
 import queue
@@ -145,8 +166,38 @@ class MorpheusPanel(tk.Frame):
         self._search_q: queue.Queue = queue.Queue()
         self._search_thread: "threading.Thread | None" = None
 
+        # Pending one-shot after() ids (see _after_once / destroy).
+        self._pending_after: "set[str]" = set()
+
         self._build_transport()
         self._build_tabs()
+
+    # ── one-shot timers ─────────────────────────────────────────────────────
+
+    def _after_once(self, ms: int, fn) -> None:
+        """Schedule a one-shot UI-feedback timer, remembering its id so destroy()
+        can cancel it.
+
+        A set, not a single `_xxx_after_id` attribute like EchoPanel's: several
+        of these can be outstanding at the same time (each armed remove glyph
+        owns its own confirm window), so a single slot would forget all but the
+        last and leave the rest to fire into a dead widget. The callbacks'
+        winfo_exists() guards do not help there — Tk deletes a widget's Tcl
+        commands as it destroys the widget, so a still-scheduled after script
+        fails with `invalid command name` before Python is reached."""
+        def run() -> None:
+            self._pending_after.discard(after_id)
+            fn()
+
+        after_id = self.after(ms, run)
+        self._pending_after.add(after_id)
+
+    def destroy(self) -> None:
+        """Cancel every pending one-shot timer before teardown."""
+        for after_id in list(self._pending_after):
+            self.after_cancel(after_id)
+        self._pending_after.clear()
+        super().destroy()
 
     # ── time formatting ─────────────────────────────────────────────────────
 
@@ -394,7 +445,7 @@ class MorpheusPanel(tk.Frame):
         if not glyph._armed:
             glyph._armed = True
             glyph.config(text="remove?", fg=C["amber"])
-            self.after(2500, lambda g=glyph: self._disarm_remove(g))
+            self._after_once(2500, lambda g=glyph: self._disarm_remove(g))
             return
 
         if morpheus.remove_playlist(index):
@@ -439,7 +490,7 @@ class MorpheusPanel(tk.Frame):
             text=msg,
             fg=C["text1"] if ok else C["amber"],
         )
-        self.after(2500, lambda: self._pl_status_lbl.config(text=""))
+        self._after_once(2500, lambda: self._pl_status_lbl.config(text=""))
 
     # ── SEARCH tab ──────────────────────────────────────────────────────────
 
@@ -558,7 +609,16 @@ class MorpheusPanel(tk.Frame):
         else:
             # Transient failure indicator — resets after 2 s.
             glyph.config(text="!", fg=C["amber"])
-            self.after(2000, lambda: glyph.config(text="＋", fg=C["text3"]))
+            self._after_once(2000, lambda g=glyph: self._reset_save_glyph(g))
+
+    @staticmethod
+    def _reset_save_glyph(glyph: tk.Label) -> None:
+        """Revert a failed save glyph once the 2 s indicator lapses. Guards
+        winfo_exists() for the same reason _disarm_remove does: a second search
+        landing inside those 2 s clears the result rows out from under the
+        scheduled callback, destroying this glyph before it fires."""
+        if glyph.winfo_exists():
+            glyph.config(text="＋", fg=C["text3"])
 
     @staticmethod
     def _fmt_dur(sec) -> str:

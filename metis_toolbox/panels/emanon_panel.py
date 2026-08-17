@@ -131,6 +131,14 @@ class EmanonPanel(tk.Frame):
         self._dot.itemconfig(self._dot_id, fill=C["red"] if on else C["card"])
         self._flash_after_id = self.after(180, lambda: self._flash(remaining - 1))
 
+    def destroy(self) -> None:
+        """Cancel a blink still in flight before teardown. The winfo_exists()
+        guard in _flash is not enough on its own: Tk deletes the widget's Tcl
+        commands as it destroys the widget, so an already-scheduled after script
+        fails with `invalid command name` before Python is reached."""
+        self._cancel_flash()
+        super().destroy()
+
     # ── Right-click context menu (Pythia home_panel transcript precedent) ────
 
     def _show_log_menu(self, event: "tk.Event[Any]") -> None:

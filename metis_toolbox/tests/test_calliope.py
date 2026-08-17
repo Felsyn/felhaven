@@ -21,6 +21,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -49,7 +50,8 @@ class _CalliopeBase(unittest.TestCase):
     def setUp(self):
         self._saved = (calliope._model, calliope._model_tried,
                        calliope._auto_speak, calliope._epoch,
-                       calliope._FIRST_CHUNK_MAX_CHARS, calliope._CHUNK_MAX_CHARS)
+                       calliope._FIRST_CHUNK_MAX_CHARS, calliope._CHUNK_MAX_CHARS,
+                       calliope._voice)
         calliope._model = None
         calliope._model_tried = False
         calliope._real_audio_queued = False
@@ -61,7 +63,7 @@ class _CalliopeBase(unittest.TestCase):
     def tearDown(self):
         (calliope._model, calliope._model_tried, calliope._auto_speak,
          calliope._epoch, calliope._FIRST_CHUNK_MAX_CHARS,
-         calliope._CHUNK_MAX_CHARS) = self._saved
+         calliope._CHUNK_MAX_CHARS, calliope._voice) = self._saved
         self._drain()
 
     @staticmethod
@@ -170,9 +172,20 @@ class TestSynthesize(_CalliopeBase):
             calliope.synthesize("**read** this")
         args, kwargs = fake.create.call_args
         self.assertEqual(args[0], "read this")          # markdown stripped before synth
-        self.assertEqual(kwargs["voice"], calliope._CONFIG["voice"])
+        self.assertEqual(kwargs["voice"], calliope.narration_voice())
         self.assertEqual(kwargs["speed"], float(calliope._CONFIG["speed"]))
         self.assertEqual(kwargs["lang"], calliope._CONFIG["lang"])
+
+    def test_voice_kwarg_overrides_the_narration_voice(self):
+        # Echo's seam: one call renders in another voice without changing what
+        # Calliope narrates in.
+        pcm = np.zeros(10, dtype=np.float32)
+        fake = _fake_model(pcm)
+        before = calliope.narration_voice()
+        with mock.patch("calliope._load_model", return_value=fake):
+            calliope.synthesize("hello", voice="bm_george")
+        self.assertEqual(fake.create.call_args.kwargs["voice"], "bm_george")
+        self.assertEqual(calliope.narration_voice(), before)
 
     def test_empty_text_is_none_and_loads_nothing(self):
         with mock.patch("calliope._load_model") as lm:
@@ -190,6 +203,55 @@ class TestSynthesize(_CalliopeBase):
         broken.create.side_effect = RuntimeError("onnx blew up")
         with mock.patch("calliope._load_model", return_value=broken):
             self.assertIsNone(calliope.synthesize("boom"))   # must not raise
+
+
+class TestNarrationVoice(_CalliopeBase):
+    """Runtime narration voice — the _auto_speak precedent, plus a filler-cache
+    invalidation the flag doesn't have."""
+
+    def test_seeded_from_the_config(self):
+        self.assertEqual(calliope.configured_voice(), calliope._CONFIG["voice"])
+
+    def test_set_voice_changes_what_synthesize_uses(self):
+        pcm = np.zeros(10, dtype=np.float32)
+        fake = _fake_model(pcm)
+        with mock.patch("calliope.generate_fillers"):
+            calliope.set_voice("bf_emma")
+        self.assertEqual(calliope.narration_voice(), "bf_emma")
+        with mock.patch("calliope._load_model", return_value=fake):
+            calliope.synthesize("hello")
+        self.assertEqual(fake.create.call_args.kwargs["voice"], "bf_emma")
+
+    def test_set_voice_does_not_rewrite_the_config(self):
+        # Runtime only — voices.save_pythia_voice() is what persists a pick.
+        before = calliope._CONFIG["voice"]
+        with mock.patch("calliope.generate_fillers"):
+            calliope.set_voice("bm_lewis")
+        self.assertEqual(calliope._CONFIG["voice"], before)
+
+    def test_a_real_change_regenerates_the_filler_cache(self):
+        # _filler_path hashes the voice, so the cached WAVs belong to the OLD
+        # voice; without this speak_filler() silently finds nothing.
+        with mock.patch("calliope.generate_fillers") as gen:
+            calliope.set_voice("am_onyx")
+            for t in threading.enumerate():          # let the daemon finish
+                if t.name == "calliope-fillers":
+                    t.join(timeout=5)
+        gen.assert_called_once()
+
+    def test_a_no_op_change_regenerates_nothing(self):
+        with mock.patch("calliope.generate_fillers") as gen:
+            calliope.set_voice(calliope.narration_voice())
+            calliope.set_voice("")
+        gen.assert_not_called()
+
+    def test_filler_path_is_keyed_to_the_voice(self):
+        with mock.patch("calliope.generate_fillers"):
+            calliope.set_voice("af_bella")
+            a = calliope._filler_path("one moment")
+            calliope.set_voice("bm_daniel")
+            b = calliope._filler_path("one moment")
+        self.assertNotEqual(a, b)
 
 
 class TestSpeakEnqueues(_CalliopeBase):

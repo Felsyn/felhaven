@@ -1,10 +1,11 @@
 """
 test_orpheus.py — hermetic tests for tools/orpheus.py.
 
-No real ffmpeg process, no real audio device, no network: subprocess.run and
-harmonia.play/stop/is_playing are all mocked. Covers available(), the
-local_audio/ listing, the safe-path guard (bad names never reach ffmpeg),
-decode success/failure/timeout, duration probing (+ its cache), and fetch()'s
+No real ffmpeg process, no real audio device, no network, no real Recycle Bin:
+subprocess.run, harmonia.play/stop/is_playing and SHFileOperationW are all
+mocked. Covers available(), the local_audio/ listing, the safe-path guard (bad
+names never reach ffmpeg or the shell), decode success/failure/timeout, duration
+probing (+ its cache), delete_file()'s refusals/cache purge, and fetch()'s
 never-raise / no-ffmpeg shape.
 
     python -X utf8 -m unittest tests.test_orpheus
@@ -215,6 +216,112 @@ class TestFileRows(unittest.TestCase):
                 mock.patch.object(orpheus, "_probe_duration") as probe:
             self.assertEqual(orpheus._file_rows(), [{"name": "a.opus", "duration": None}])
         probe.assert_not_called()
+
+
+class TestDeleteFile(unittest.TestCase):
+    """_send_to_recycle_bin is mocked throughout — no test ever touches the
+    real Recycle Bin, and the shell call is never made."""
+
+    def setUp(self):
+        self._saved_cache = dict(orpheus._duration_cache)
+        orpheus._duration_cache.clear()
+
+    def tearDown(self):
+        orpheus._duration_cache.clear()
+        orpheus._duration_cache.update(self._saved_cache)
+
+    def test_bad_names_are_refused_before_the_shell_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            open(os.path.join(tmp, "real.opus"), "wb").close()
+            with mock.patch.object(orpheus, "_LOCAL_AUDIO_DIR", tmp), \
+                    mock.patch.object(orpheus, "_send_to_recycle_bin") as recycle:
+                for bad in ("../real.opus", "..\\real.opus", "sub/real.opus",
+                            "/real.opus", "", "nope.opus"):
+                    self.assertEqual(orpheus.delete_file(bad), {"error": "bad_name"},
+                                     f"{bad!r} should be refused")
+                recycle.assert_not_called()
+
+    def test_success_recycles_the_absolute_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "a.opus")
+            open(path, "wb").close()
+            with mock.patch.object(orpheus, "_LOCAL_AUDIO_DIR", tmp), \
+                    mock.patch.object(orpheus, "_send_to_recycle_bin",
+                                      return_value=True) as recycle:
+                self.assertEqual(orpheus.delete_file("a.opus"), {"deleted": "a.opus"})
+            recycle.assert_called_once_with(path)
+
+    def test_recycle_failure_is_reported_not_raised(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            open(os.path.join(tmp, "a.opus"), "wb").close()
+            with mock.patch.object(orpheus, "_LOCAL_AUDIO_DIR", tmp), \
+                    mock.patch.object(orpheus, "_send_to_recycle_bin",
+                                      return_value=False):
+                self.assertEqual(orpheus.delete_file("a.opus"),
+                                 {"error": "delete_failed"})
+
+    def test_success_purges_the_duration_cache(self):
+        # Left behind, a stale entry would give a later same-named file the
+        # dead one's duration.
+        with tempfile.TemporaryDirectory() as tmp:
+            open(os.path.join(tmp, "a.opus"), "wb").close()
+            orpheus._duration_cache["a.opus"] = 12.5
+            with mock.patch.object(orpheus, "_LOCAL_AUDIO_DIR", tmp), \
+                    mock.patch.object(orpheus, "_send_to_recycle_bin",
+                                      return_value=True):
+                orpheus.delete_file("a.opus")
+        self.assertNotIn("a.opus", orpheus._duration_cache)
+
+    def test_failure_leaves_the_duration_cache_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            open(os.path.join(tmp, "a.opus"), "wb").close()
+            orpheus._duration_cache["a.opus"] = 12.5
+            with mock.patch.object(orpheus, "_LOCAL_AUDIO_DIR", tmp), \
+                    mock.patch.object(orpheus, "_send_to_recycle_bin",
+                                      return_value=False):
+                orpheus.delete_file("a.opus")
+        self.assertEqual(orpheus._duration_cache.get("a.opus"), 12.5)
+
+
+class TestSendToRecycleBin(unittest.TestCase):
+    """The shell call itself — mocked at the ctypes boundary, so no file is
+    ever really binned and the suite stays hermetic."""
+
+    @unittest.skipUnless(sys.platform == "win32", "SHFileOperationW is Windows-only")
+    def test_passes_a_double_nul_terminated_abspath_with_allowundo(self):
+        captured = {}
+
+        def fake_shfileop(ref):
+            op = ref._obj
+            captured["pFrom"] = op.pFrom
+            captured["fFlags"] = op.fFlags
+            captured["wFunc"] = op.wFunc
+            return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "a.opus")
+            open(path, "wb").close()
+            with mock.patch("ctypes.windll.shell32.SHFileOperationW",
+                            side_effect=fake_shfileop):
+                self.assertTrue(orpheus._send_to_recycle_bin(path))
+
+        # ctypes strips the trailing NULs off a LPCWSTR read-back, so assert on
+        # the flags and the path proper; the terminator is set in the source.
+        self.assertEqual(captured["wFunc"], orpheus._FO_DELETE)
+        self.assertTrue(os.path.isabs(captured["pFrom"].rstrip("\0")))
+        self.assertTrue(captured["fFlags"] & orpheus._FOF_ALLOWUNDO,
+                        "ALLOWUNDO must be set or the file is erased, not binned")
+
+    @unittest.skipUnless(sys.platform == "win32", "SHFileOperationW is Windows-only")
+    def test_nonzero_return_is_false_not_an_exception(self):
+        with mock.patch("ctypes.windll.shell32.SHFileOperationW", return_value=124):
+            self.assertFalse(orpheus._send_to_recycle_bin("C:\\nope\\a.opus"))
+
+    @unittest.skipUnless(sys.platform == "win32", "SHFileOperationW is Windows-only")
+    def test_oserror_is_swallowed(self):
+        with mock.patch("ctypes.windll.shell32.SHFileOperationW",
+                        side_effect=OSError("boom")):
+            self.assertFalse(orpheus._send_to_recycle_bin("C:\\nope\\a.opus"))
 
 
 class TestFetch(unittest.TestCase):

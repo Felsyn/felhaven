@@ -32,6 +32,7 @@ import harmonia
 import pythia
 import scribe
 import themis
+import voices
 from kairos import Kairos
 from metis_logging import setup_logging
 from tools import morpheus
@@ -42,6 +43,7 @@ from panels.horai_panel      import HoraiPanel
 from panels.moderati_panel   import ModeratiPanel
 from panels.aura_panel       import WeatherPanel
 from panels.hypatia_panel    import HypatiaPanel
+from panels.artemis_panel    import ArtemisPanel
 from panels.midas_panel      import MidasPanel
 from panels.pheme_panel      import PhemePanel
 from panels.vox_array_panel  import VoxArrayPanel
@@ -148,6 +150,7 @@ class FelhavenApp:
             "moderati":   ModeratiPanel(self._content_area),
             "aura":       WeatherPanel(self._content_area),
             "hypatia":    HypatiaPanel(self._content_area),
+            "artemis":    ArtemisPanel(self._content_area),
             "midas":      MidasPanel(self._content_area),
             "pheme":      PhemePanel(self._content_area),
             "morpheus":   VoxArrayPanel(self._content_area),
@@ -166,6 +169,7 @@ class FelhavenApp:
         self.kairos.register_panel("aura",       self._sidebar.row("aura"))
         self.kairos.register_panel("aura",       self._views["hypatia"].conditions)
         self.kairos.register_panel("hypatia",    self._views["hypatia"])
+        self.kairos.register_panel("artemis",    self._views["artemis"])
         self.kairos.register_panel("midas",      self._views["midas"])
         self.kairos.register_panel("pheme",      self._views["pheme"])
         # Reach through the Vox Array host to the Morpheus/Orpheus tab bodies —
@@ -183,6 +187,10 @@ class FelhavenApp:
         # question/answer isn't stalled by a cold load: Calliope's kokoro-onnx
         # model (one-time ONNX load) and Pythia's gemma4:e2b (~100s Ollama cold
         # load). Both are best-effort and silent if unavailable.
+        # Point narration at the user's saved voice BEFORE prewarm: prewarm
+        # renders the filler cache, whose key includes the voice, so seeding
+        # afterwards would render the config default and immediately re-render.
+        calliope.set_voice(voices.pythia_voice())
         calliope.prewarm()
         pythia.prewarm()
 

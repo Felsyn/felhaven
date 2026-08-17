@@ -65,7 +65,7 @@ class TestThemisPanelSmoke(unittest.TestCase):
         self.assertEqual(s["temperature_unit"], "C")
         self.assertTrue(s["clock_24h"])
         self.assertEqual(s["weather_location"], "Sydney")
-        self.assertEqual(calls, [("aura", "hypatia", "horai")])
+        self.assertEqual(calls, [("aura", "hypatia", "horai", "artemis")])
 
     def test_non_numeric_coord_shows_error_and_no_write(self):
         panel = ThemisPanel(self.root)

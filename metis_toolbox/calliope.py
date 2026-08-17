@@ -16,10 +16,12 @@ Contract:    speak(text) -> None
                  can feed sentences in as an LLM streams them. NEVER raises: a
                  missing model file, a busy audio device, or a synthesis error
                  all degrade to a logged no-op.
-             synthesize(text) -> np.ndarray | None
+             synthesize(text, *, voice=None) -> np.ndarray | None
                  The pure, hardware-free half: text in, 24 kHz float32 PCM out
                  (or None on any failure). This is the hermetic-testable seam —
                  mock _load_model() and no audio device or model file is touched.
+                 `voice` names a kokoro voice for THIS call only; None means the
+                 narration voice (see "Voice" below).
 
 Shared seam:  synthesize(), take_chunk(), save_wav(), load_wav() and SAMPLE_RATE
               are the public kokoro-audio helpers. Echo (tools/echo.py) reuses
@@ -53,9 +55,26 @@ Auto-speak:  Calliope also owns the single source of truth for the "read every
              panel reads it. The default lives in calliope_config.json, never in
              code.
 
-Config:      config/calliope_config.json — voice, speed, lang, model
-             paths, and the auto_speak default. Voice-switching later is a config
-             edit, not a code change (the Pheme / Morpheus precedent).
+Voice:       Two different things are called "the voice", and they are not the
+             same knob:
+               - the NARRATION voice (narration_voice / set_voice) — runtime
+                 state, seeded from the config, mutated by the MACHINE SPIRIT
+                 tab. Everything Calliope speaks aloud uses it. Runtime only:
+                 Calliope does not rewrite the config, and does not know that
+                 voices.py persists the pick (the auto_speak precedent).
+               - a PER-CALL voice — synthesize(text, voice="am_adam"). Used by
+                 Echo, which renders a file in whatever voice that one job asked
+                 for without disturbing narration. This is why the voice is a
+                 parameter and not just a global: the two selections are
+                 independent by design.
+             set_voice() re-renders the filler cache on a background thread —
+             the cache key includes the voice, so a switch would otherwise leave
+             speak_filler() silently empty until the next launch.
+
+Config:      config/calliope_config.json — the DEFAULT voice, speed, lang, model
+             paths, and the auto_speak default. The configured voice is the
+             seed, not the law: configured_voice() exposes it read-only so
+             voices.py can offer it as the fallback pick.
 
 Model files: kokoro-onnx needs two binaries (a *.onnx voice model and
              voices-v1.0.bin), downloaded separately and gitignored. Paths are
@@ -63,7 +82,9 @@ Model files: kokoro-onnx needs two binaries (a *.onnx voice model and
              SETUP.md section 4 for the one-time download step.
 
 Upstream:    panels/home_panel.py (per-response speak button + auto-speak),
-             panels/narrator_panel.py (the header toggle)
+             panels/narrator_panel.py (the header toggle),
+             panels/machine_spirit_panel.py (set_voice via the voice bar),
+             felhaven.py (seeds set_voice from voices.pythia_voice() at startup)
 Downstream:  kokoro-onnx (synthesis) → harmonia.py (playback ownership)
 
 Requires:    kokoro-onnx, numpy. Stdlib otherwise. (sounddevice is Harmonia's
@@ -137,6 +158,11 @@ _CONFIG = _load_config()
 # Auto-speak is runtime-mutable state seeded from the config default.
 _auto_speak: bool = bool(_CONFIG.get("auto_speak", False))
 
+# So is the narration voice. felhaven.py overwrites this at startup with the
+# user's saved pick (voices.pythia_voice()); the config value is only the seed
+# for a fresh install and for a bare `python calliope.py` run.
+_voice: str = str(_CONFIG["voice"])
+
 
 def _resolve(path_str: str) -> Path:
     """Resolve a config path against the app dir unless it's absolute. Anchored
@@ -177,7 +203,7 @@ def _load_model() -> Any:
             from kokoro_onnx import Kokoro
             log.info("Calliope: loading kokoro-onnx (%s)...", model_path.name)
             _model = Kokoro(str(model_path), str(voices_path))
-            log.info("Calliope: narrator ready (voice=%s).", _CONFIG["voice"])
+            log.info("Calliope: narrator ready (voice=%s).", _voice)
         except Exception as e:  # noqa: BLE001 — import/model failure = silent narrator
             log.error("Calliope: failed to load kokoro-onnx: %s", e)
             _model = None
@@ -208,9 +234,13 @@ def _clean_for_speech(text: str) -> str:
     return re.sub(r"\s+", " ", _STRIP_CHARS.sub("", text)).strip()
 
 
-def synthesize(text: str) -> Optional[np.ndarray]:
+def synthesize(text: str, *, voice: Optional[str] = None) -> Optional[np.ndarray]:
     """Render `text` to 24 kHz float32 PCM samples, or None on any failure.
-    Hardware-free — this is the half the hermetic test exercises."""
+    Hardware-free — this is the half the hermetic test exercises.
+
+    `voice` overrides the narration voice for THIS call only and is never
+    validated here — voices.CATALOG is the gate, and an unknown id degrades to
+    a logged None like any other synthesis failure."""
     cleaned = _clean_for_speech(text) if text else ""
     if not cleaned:
         return None
@@ -222,7 +252,7 @@ def synthesize(text: str) -> Optional[np.ndarray]:
         with _synth_lock:       # onnxruntime is thread-safe, but the tokenizer isn't
             audio, _sample_rate = model.create(
                 cleaned,
-                voice=_CONFIG["voice"],
+                voice=voice or _voice,
                 speed=float(_CONFIG["speed"]),
                 lang=_CONFIG["lang"],
             )
@@ -496,7 +526,7 @@ def stop() -> None:
 
 def _filler_path(phrase: str) -> Path:
     # Include the model so switching models (e.g. int8 -> fp32) regenerates fillers.
-    key = f"{phrase}|{_CONFIG['voice']}|{_CONFIG['speed']}|{_CONFIG['model_path']}"
+    key = f"{phrase}|{_voice}|{_CONFIG['speed']}|{_CONFIG['model_path']}"
     digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
     return _FILLER_DIR / f"filler_{digest}.wav"
 
@@ -607,11 +637,42 @@ def toggle_auto_speak() -> bool:
     return _auto_speak
 
 
+# ── Narration voice (runtime state; voices.py owns the roster + persistence) ──
+
+def configured_voice() -> str:
+    """The voice named in calliope_config.json — read-only, so voices.py can
+    offer it as the fallback pick without reaching into _CONFIG."""
+    return str(_CONFIG["voice"])
+
+
+def narration_voice() -> str:
+    """The voice everything Calliope speaks aloud is rendered in."""
+    return _voice
+
+
+def set_voice(voice: str) -> None:
+    """Set the narration voice (runtime only — does not rewrite the config;
+    voices.save_pythia_voice() is what makes a pick survive a restart).
+
+    A real change re-renders the filler cache on a daemon thread: _filler_path()
+    hashes the voice, so the cached WAVs are keyed to the OLD voice and
+    speak_filler() would find none and silently no-op. Backgrounded because each
+    phrase is a full kokoro synthesis and this is called from the UI thread."""
+    global _voice
+    voice = str(voice)
+    if not voice or voice == _voice:
+        return
+    _voice = voice
+    log.info("Calliope: narration voice set to %s", voice)
+    threading.Thread(target=generate_fillers, name="calliope-fillers",
+                     daemon=True).start()
+
+
 # ── Standalone demo ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    print(f"[Calliope] config={_CONFIG_FILE.name} voice={_CONFIG['voice']} "
+    print(f"[Calliope] config={_CONFIG_FILE.name} voice={_voice} "
           f"speed={_CONFIG['speed']} auto_speak={_auto_speak}")
     print("[Calliope] speaking a two-sentence line (chunked)...")
     speak("Ex tenebris surgit lumen posteris. Calliope is online.")

@@ -145,6 +145,34 @@ These are **your** keys; none are shipped in the repo.
   ```
   (`<PIN>` is your Cerberus PIN — see §7.) No key → web search returns a clean
   "search unavailable" error; the rest of the chat is unaffected.
+- **OpenTopography** — Demeter's terrain for the Cartograph map (Navigation →
+  Cartograph). Get a free key at
+  <https://portal.opentopography.org/requestService?service=api>, then:
+  ```
+  python cerberus.py set <PIN> opentopography_api_key <your-opentopo-key>
+  ```
+  (`<PIN>` is your Cerberus PIN — see §7.) The key is read only while caching
+  an area, never while drawing one. No key, or a vault that was sealed at
+  ingest → the area still caches its roads and water and simply has no
+  terrain; the panel says so, and re-caching later fills it in.
+
+### Waypoints (optional, no key, offline)
+
+The Cartograph's **GO TO** box takes coordinates in three forms
+(`38.8895, -77.0353`, `38 53.370 N 077 02.118 W`, `38 53 22 N 077 02 07 W`),
+street addresses (online, via the Census geocoder), and your own saved places.
+Saved places live in `metis_toolbox/config/artemis_waypoints.json` — gitignored,
+because where you camp is yours. Create it if you want it:
+
+```json
+[
+  {"name": "HOME",       "lat": 38.8895, "lon": -77.0353},
+  {"name": "CAMP RIDGE", "lat": 38.7350, "lon": -77.2400}
+]
+```
+
+Searching only moves the map's view; it never changes the location in Settings,
+so your weather and star map stay put. **⌂ HOME** returns to your fix.
 
 ## 7. First run — the boot gates set themselves up
 

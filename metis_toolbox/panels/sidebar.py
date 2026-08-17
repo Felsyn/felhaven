@@ -3,9 +3,20 @@ sidebar.py — Felhaven's navigation rail
 =======================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         The left-hand nav: one clickable row per view. A click calls the
-             on_select callback (felhaven switches views); set_active lights the
-             chosen row. Rows are dumb display surfaces — no timing of their own.
+Job:         The left-hand nav: one clickable row per view, plus optional group
+             headers that expand to show indented child rows. A click on a row
+             calls the on_select callback (felhaven switches views); set_active
+             lights the chosen row. Rows are dumb display surfaces — no timing
+             of their own.
+
+Groups:      A name listed in _GROUPS is a header, NOT a view — clicking it only
+             expands/collapses its children and never calls on_select, so
+             felhaven._views needs no entry for it. Children are ordinary
+             SidebarRows (same dot, same lit-border active state) that happen to
+             be indented, so a grouped view stays a first-class destination with
+             the whole content area — not a tab inside a host panel. Groups open
+             collapsed (§7), which is also what keeps the rail from outgrowing
+             the window as more views join a group.
 
 Special:     The "aura" row is registered with Kairos (felhaven.py) and shows the
              live temperature in its subtitle; its update(data) is swapped for
@@ -78,30 +89,122 @@ class SidebarRow(tk.Frame):
         pass
 
 
+class GroupRow(tk.Frame):
+    """A section header for a group of child rows. Selects nothing — a click
+    only toggles its children.
+
+    Carries the same bordered-card chrome as a SidebarRow so the rail reads as
+    one column, but stays distinguishable where it counts: a ▼/▶ glyph in the
+    slot SidebarRow gives its dot, and a label that never lights C["green"]
+    because it selects nothing.
+    """
+
+    def __init__(self, parent, name: str, label: str, subtitle: str, on_toggle):
+        super().__init__(parent, bg=C["bg"],
+                         highlightbackground=C["border"], highlightthickness=2)
+
+        inner = tk.Frame(self, bg=C["bg"])
+        inner.pack(side="left", fill="both", expand=True, padx=(8, 8), pady=6)
+
+        self._glyph = tk.Label(inner, text="▶", font=FONTS["tiny"],
+                               fg=C["text3"], bg=C["bg"])
+        self._glyph.pack(side="left", padx=(0, 8))
+
+        text_frame = tk.Frame(inner, bg=C["bg"])
+        text_frame.pack(side="left", fill="both", expand=True)
+
+        self._label_lbl = tk.Label(
+            text_frame, text=label, font=FONTS["small_bold"],
+            fg=C["text2"], bg=C["bg"], anchor="w",
+        )
+        self._label_lbl.pack(anchor="w")
+
+        subtitle_lbl = tk.Label(
+            text_frame, text=subtitle, font=FONTS["tiny"],
+            fg=C["text3"], bg=C["bg"], anchor="w",
+        )
+        subtitle_lbl.pack(anchor="w")
+
+        # §7 clickable-row idiom: hand cursor, amber on hover, back on leave.
+        # Every widget in the row is bound, so the hover doesn't drop out when
+        # the pointer crosses from a frame onto a label. Tk delivers the
+        # <Leave>/<Enter> pair before the next idle redraw, so the momentary
+        # "off" between them never reaches the screen.
+        _cb = lambda e, n=name: on_toggle(n)
+        for w in (self, inner, self._glyph, text_frame,
+                  self._label_lbl, subtitle_lbl):
+            w.bind("<Button-1>", _cb)
+            w.bind("<Enter>", lambda e: self._set_hover(True))
+            w.bind("<Leave>", lambda e: self._set_hover(False))
+            w.configure(cursor="hand2")
+
+    def _set_hover(self, on: bool) -> None:
+        self._glyph.configure(fg=C["amber"] if on else C["text3"])
+        self._label_lbl.configure(fg=C["amber"] if on else C["text2"])
+
+    def set_expanded(self, expanded: bool) -> None:
+        self._glyph.configure(text="▼" if expanded else "▶")
+
+
 class Sidebar(tk.Frame):
-    BASE_WIDTH = 200   # px at scale 1.0; rescale() grows it to match the fonts
+    BASE_WIDTH  = 200   # px at scale 1.0; rescale() grows it to match the fonts
+    BASE_INDENT = 14    # px at scale 1.0; child-row inset, matches Card's padx
 
     _ROWS = [
         ("felhaven",   "Felhaven",        "Home"),
         ("horai",      "Chronometry",     "Temporal Awareness"),
         ("moderati",   "Moderati",        "Vitals · Logs"),
         ("aura",       "Atmospherics",    "—°F Weather"),
-        ("hypatia",    "Celestarium",     "Star Map"),
+        ("navigation", "Navigation",      "Charts · Maps"),   # group header — NOT a view
         ("midas",      "Dynastic Vault",  "Finance"),
         ("pheme",      "Scriptorium",     "Rumors"),
         ("morpheus",   "Vox Array",       "Audio"),
         ("cogitator",  "Cogitator",       "Tasks · Calc · Convert"),
     ]
 
+    # A name in _ROWS that also appears here is a group header rather than a
+    # view; its value is the child rows, in the same (name, label, subtitle)
+    # shape. Each child IS a full felhaven view — add one here and one to
+    # felhaven._views (test_sidebar_view_parity asserts the two agree).
+    _GROUPS = {
+        "navigation": [
+            ("hypatia", "Celestarium", "Star Map"),
+            ("artemis", "Cartograph",  "Local Map"),
+        ],
+    }
+
     def __init__(self, parent, on_select):
         super().__init__(parent, bg=C["bg"], width=self.BASE_WIDTH)
         self.pack_propagate(False)
-        self._rows: dict[str, SidebarRow] = {}
+        self._indent = self.BASE_INDENT
+
+        self._rows:        dict[str, SidebarRow] = {}   # selectable rows only
+        self._groups:      dict[str, GroupRow]   = {}
+        self._group_boxes: dict[str, tk.Frame]   = {}
+        self._expanded:    dict[str, bool]       = {}
+        self._parent_of:   dict[str, str]        = {}   # child name -> group name
 
         for name, label, subtitle in self._ROWS:
-            row = SidebarRow(self, name, label, subtitle, on_select)
-            row.pack(fill="x", pady=3)        # pady gives the bordered cards breathing room
-            self._rows[name] = row
+            if name in self._GROUPS:
+                self._groups[name] = GroupRow(self, name, label, subtitle,
+                                              self._toggle_group)
+                # Children are packed into this box ONCE and never re-packed;
+                # collapsing forgets the box, which leaves them untouched inside.
+                box = tk.Frame(self, bg=C["bg"])
+                self._group_boxes[name] = box
+                # Collapsed on open (§7). set_expanded keeps the glyph in step
+                # with the flag, so the two can't drift if this default changes.
+                self._expanded[name] = False
+                self._groups[name].set_expanded(False)
+                for c_name, c_label, c_sub in self._GROUPS[name]:
+                    row = SidebarRow(box, c_name, c_label, c_sub, on_select)
+                    row.pack(fill="x", pady=3, padx=(self._indent, 0))
+                    self._rows[c_name] = row
+                    self._parent_of[c_name] = name
+            else:
+                self._rows[name] = SidebarRow(self, name, label, subtitle, on_select)
+
+        self._relayout()
 
         aura_row = self._rows["aura"]
 
@@ -115,13 +218,49 @@ class Sidebar(tk.Frame):
 
         aura_row.update = _aura_update
 
+    def _relayout(self) -> None:
+        """Re-pack the rail top-to-bottom in _ROWS order.
+
+        Forget-all-then-pack, the same idiom felhaven._show_view uses. A bare
+        pack() on a re-expanded group box would append it to the BOTTOM of the
+        rail rather than back into its slot, so the whole rail is rebuilt in
+        declaration order instead. Only direct children of self are touched —
+        the child rows live inside their group box and are never disturbed."""
+        for w in self.pack_slaves():
+            w.pack_forget()
+        for name, _label, _subtitle in self._ROWS:
+            if name in self._GROUPS:
+                # pady gives the bordered cards breathing room; the header takes
+                # the same spacing so the rail keeps one rhythm.
+                self._groups[name].pack(fill="x", pady=3)
+                if self._expanded[name]:
+                    self._group_boxes[name].pack(fill="x")
+            else:
+                self._rows[name].pack(fill="x", pady=3)
+
+    def _toggle_group(self, name: str) -> None:
+        self._expanded[name] = not self._expanded[name]
+        self._groups[name].set_expanded(self._expanded[name])
+        self._relayout()
+
     def rescale(self, scale: float) -> None:
         """Grow the fixed sidebar width in lockstep with the fonts so the nav
         labels never outgrow their box. Uses the same scale theme.rescale_fonts
-        applied to the fonts, so the text-to-box fit stays constant at any size."""
+        applied to the fonts, so the text-to-box fit stays constant at any size.
+        The child-row indent scales with it so the nesting stays legible."""
         self.configure(width=int(round(self.BASE_WIDTH * scale)))
+        self._indent = int(round(self.BASE_INDENT * scale))
+        for name in self._parent_of:
+            self._rows[name].pack_configure(padx=(self._indent, 0))
 
     def set_active(self, name: str) -> None:
+        """Light the named row. Expands its group first if collapsed — the lit
+        row must never be hidden."""
+        parent = self._parent_of.get(name)
+        if parent is not None and not self._expanded[parent]:
+            self._expanded[parent] = True
+            self._groups[parent].set_expanded(True)
+            self._relayout()
         for row_name, row in self._rows.items():
             row.set_active(row_name == name)
 

@@ -335,16 +335,20 @@ TOOL_DEFINITION = {
     "function": {
         "name": "convert_unit",
         "description": (
-            "Convert a value from one unit to another. "
+            "Convert a value from one unit to another. Call when the user asks "
+            "how much one unit is in another, or to restate a measurement in "
+            "different units. "
             "Supports length (in/ft/yd/mi/mm/cm/m/km), "
             "volume (tsp/tbsp/cup/fl_oz/pint/quart/gallon/ml/l), "
             "weight (oz/lb/st/mg/g/kg), "
             "temperature (f/c/k), "
             "and time (s/min/hr/day/week). "
-            "US-customary defaults: gallon = US gallon (3.785 L), "
-            "cup = US cup (236.6 mL), pint/quart = US. "
-            "Pass unit names or common abbreviations (e.g. 'miles', 'mi', 'kilometers')."
+            "Unit names or common abbreviations both work ('miles', 'mi')."
         ),
+        # The US-customary reference values (gallon = 3.785 L, cup = 236.6 mL,
+        # US pint/quart) live in this module's header docstring. They are how the
+        # conversion behaves, not something the model can act on when deciding to
+        # call — and in here they were billed on every request.
         "parameters": {
             "type": "object",
             "properties": {

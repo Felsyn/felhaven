@@ -9,14 +9,19 @@ the module's own docstring, where it cannot drift from the code.
 | [Aether](aether.md) | Report whether WiFi and the Anthropic API are reachable. |
 | [Ammit](ammit.md) | Manage a single countdown timer. |
 | [Argus](argus.md) | Report what this computer is communicating with on the network. |
+| [Artemis](artemis.md) | Own the local-chart cache: projection, area manifest, county reference, and the shared vector format. |
 | [Aura](aura.md) | Report current weather: temperature, sky, wind, and forecast. |
+| [Cadmus](cadmus.md) | Decode ESRI shapefile bytes (.shp/.dbf) into geometry and attribute records. |
 | [Callimachus](callimachus.md) | Ask the web a question and return trimmed text. |
 | [Calliope](calliope.md) | Turn a string of text into speech and play it. |
 | [Cerberus](cerberus.md) | Guard the toolbox's secrets behind one PIN — the sole encryption authority. |
+| [Demeter](demeter.md) | Fetch, resample and cache local elevation, and render the terrain raster. |
 | [Echo](echo.md) | Turn text into an audio file on disk. |
 | [Emanon](emanon.md) | Watch the stack's logs and report what broke — read-only, never act. |
+| [Eratosthenes](eratosthenes.md) | Resolve a typed location query to a latitude and longitude. |
 | [Eudoxus](eudoxus.md) | Convert between units of length, volume, weight, temperature, and time. |
 | [Harmonia](harmonia.md) | Own the one audio output device. |
+| [Hecate](hecate.md) | Fetch and cache TIGER/Line roads for an area as tiered Features. |
 | [Helios](helios.md) | Report sunrise, sunset, golden-hour windows, and day length. |
 | [Hephaestus](hephaestus.md) | Report CPU, RAM, and disk health. |
 | [Herodotus](herodotus.md) | Manage a local archive of Markdown documents. |
@@ -30,11 +35,13 @@ the module's own docstring, where it cannot drift from the code.
 | [Orpheus](orpheus.md) | Play back one audio file from local_audio/ — the folder Echo writes to. |
 | [Pheme](pheme.md) | Aggregate headlines from the configured RSS/Atom news feeds. |
 | [Plutus](plutus.md) | Track stock buys and sells; derive shares held and cost invested. |
+| [Poseidon](poseidon.md) | Fetch and cache TIGER/Line water for an area as tiered Features. |
 | [Pythia](pythia.md) | Answer a question by talking to the local LLM, using toolbox tools for live data. |
 | [Scribe](scribe.md) | Store the to-do list and notes. |
 | [Selene](selene.md) | Report the moon's phase, illumination, moonrise, and moonset. |
 | [Sphynx](sphynx.md) | Verify a PIN against the stored hash, and track how many attempts remain. |
 | [Themis](themis.md) | Own the per-install user preferences (location, temperature unit, clock format). |
+| [Voices](voices.md) | Resolve the voice Felhaven should speak in. |
 | [Zeno](zeno.md) | Evaluate Python arithmetic expressions safely, step by step. |
 
 Most tool modules run standalone for a smoke check: `python tools/<module>.py`.
