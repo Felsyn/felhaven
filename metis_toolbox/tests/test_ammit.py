@@ -90,6 +90,53 @@ class TestRemainingFreezesAtZero(_TempState):
         self.assertTrue(t["expired"])
         self.assertEqual(t["display"], "00:00:00")
 
+    def test_a_state_file_predating_acknowledged_defaults_it_false(self):
+        # Older timer_state.json files never wrote this key — query_all()'s
+        # .get() must not raise, and must read as "not yet acknowledged".
+        past = (datetime.now().astimezone() - timedelta(minutes=2)).isoformat()
+        ammit._save({"timers": [
+            {"duration_seconds": 60, "started_at": past, "running": True}
+        ]})
+        self.assertFalse(ammit.query_all()[0]["acknowledged"])
+
+
+class TestAcknowledge(_TempState):
+    def test_fresh_timer_reads_not_acknowledged(self):
+        ammit.start_timer(0, 300)
+        self.assertFalse(ammit.query_all()[0]["acknowledged"])
+
+    def test_acknowledge_sets_the_flag(self):
+        ammit.start_timer(0, 300)
+        ammit.acknowledge_timer(0)
+        self.assertTrue(ammit.query_all()[0]["acknowledged"])
+
+    def test_acknowledge_does_not_touch_expired_or_running(self):
+        # Acknowledging silences the passive badge only — it must not be a
+        # backdoor way to clear the timer itself.
+        past = (datetime.now().astimezone() - timedelta(minutes=2)).isoformat()
+        ammit._save({"timers": [
+            {"duration_seconds": 60, "started_at": past, "running": True,
+             "acknowledged": False}
+        ]})
+        ammit.acknowledge_timer(0)
+        t = ammit.query_all()[0]
+        self.assertTrue(t["running"])
+        self.assertTrue(t["expired"])
+        self.assertTrue(t["acknowledged"])
+
+    def test_restarting_the_timer_re_arms_acknowledged(self):
+        ammit.start_timer(0, 60)
+        ammit.acknowledge_timer(0)
+        self.assertTrue(ammit.query_all()[0]["acknowledged"])
+        ammit.start_timer(0, 300)   # a fresh countdown re-arms the badge
+        self.assertFalse(ammit.query_all()[0]["acknowledged"])
+
+    def test_reset_clears_acknowledged(self):
+        ammit.start_timer(0, 60)
+        ammit.acknowledge_timer(0)
+        ammit.reset_timer(0)
+        self.assertFalse(ammit.query_all()[0]["acknowledged"])
+
 
 class TestHandle(_TempState):
     def test_start_is_one_indexed(self):

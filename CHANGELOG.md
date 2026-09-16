@@ -14,6 +14,77 @@ New here? Start with [`README.md`](README.md) for what Felhaven is,
 [`SETUP.md`](SETUP.md) to run it, and [`CONVENTIONS.md`](CONVENTIONS.md) for how
 the code is put together.
 
+- `2026-09-15` — `README_PANTHEON/kairos.md`: documented test command corrected to the `discover` form — `unittest tests.test_kairos` has never worked, as the stub's own test file says.
+- `2026-09-15` — `kairos.py`: new `RETRY_DELAYS` ladder + `_note_outcome()` — a failed fetch retries in 60s/300s/900s instead of waiting out its whole interval, then resumes normal cadence.
+- `2026-09-15` — `kairos.py`: `refetch()` validates against the instance's `_intervals`, not the `WORKERS` class attribute, so it agrees with everything else that schedules.
+- `2026-09-15` — `tools/aura.py`: Open-Meteo added as a fallback source — `_fetch_weather()` tries wttr.in first and normalizes either into `_build()`'s dict, so no panel learns which host answered.
+- `2026-09-15` — `tools/aura.py`: new `weather_cert_error` slug — wttr.in served an expired certificate for nine hours, which is not a flaky link and no retry clears it.
+- `2026-09-15` — `panels/aura_panel.py`: the `None` branch reads "no weather source reachable" — with a fallback in place, reaching it means both hosts are down.
+- `2026-09-15` — `tests/test_aura_fallback.py`, `tests/test_kairos.py`: 27 tests for failover, source shape parity and WMO→WWO translation; 7 for the retry ladder.
+- `2026-09-15` — `tools/morpheus.py`: new `set_volume()` + `_user_volume` — `unduck()` restores the user's level instead of the `_FULL_VOLUME` constant, disarming the tripwire its own docstring warned about.
+- `2026-09-15` — `tools/morpheus.py`: `_DUCK_VOLUME` → `_DUCK_RATIO` — narration ducks to a fraction of the user's level, so a volume under 30 no longer gets LOUDER during an answer; identical at the default.
+- `2026-09-15` — `tools/morpheus.py`: `control_music` gains `volume` + a `level` param; `status()` reports the level and `_ensure_mpv()` reapplies it after an mpv respawn.
+- `2026-09-15` — `tests/test_morpheus_duck.py`: `TestSetVolume` + `TestRespawnReappliesTheVolume`, and the restore test rewritten — it asserted a constant that equals the new default, so it passed vacuously.
+- `2026-09-15` — `tools/morpheus.py`: new `is_audible()` — a free read of the snapshot `status()` last cached, so a fast UI chain can ask what is playing without an mpv IPC round trip.
+- `2026-09-15` — `panels/home_panel.py`: `_tick_face` wires the face's fourth state — speaking > thinking > playing > idle, with Morpheus driving `playing`; it had been defined but unreachable.
+- `2026-09-15` — `tests/test_home_panel_smoke.py`, `tests/test_morpheus_load_failure.py`: cover the new rung, the media-exists rule, and that the 16 Hz face tick never touches the pipe.
+- `2026-09-15` — `panels/morpheus_panel.py`: the transport dims and refuses clicks when mpv is not running — `_live` off the Kairos tick, so a click can no longer vanish into a dead pipe or flip ⏯ to a state that never happened.
+- `2026-09-15` — `tests/test_morpheus_panel_smoke.py`: four tests for the transport gate, and the failed-load fixture corrected to `running: True` — it contradicted its own docstring, and `running` now drives the gate.
+- `2026-09-15` — `tools/morpheus.py`: new `control_music(action)` brain tool — one enum over pause / resume / stop / next / previous / replay / status, replacing the panel-only transport.
+- `2026-09-15` — `tools/morpheus.py`: `resume_music` absorbed into `control_music(action="replay")`; morpheus still exposes two tools, and the registry stays at 22.
+- `2026-09-15` — `tools/morpheus.py`: new `set_paused(flag)` — an idempotent `set_property pause` for blind callers; `toggle_pause()` stays for the panel's ⏯ button.
+- `2026-09-15` — `tests/test_morpheus_control.py`: new — pins pause/resume off `cycle pause`, and asserts every mutating action refuses a dead pipe instead of reporting success.
+- `2026-09-15` — `tests/test_tool_handles.py`, `README_PANTHEON/morpheus.md`: follow the `resume_music` → `control_music` rename.
+- `2026-09-14` — `tools/ammit.py`: new `acknowledge_timer()`/`acknowledged` state — dismissing the alarm popup calms AmmitWidget and AmmitBadge to green without touching `running`/`remaining_seconds`.
+- `2026-09-14` — `panels/horai_panel.py`: new `AmmitAlarm`/`AmmitAlarmPopup`/`AmmitBadge` — a red popup and spoken announcement fire on timer expiry, re-announced up to 3 times 30s apart until dismissed.
+- `2026-09-14` — `panels/home_panel.py`: mounts `AmmitBadge` on the status row and registers under Kairos's `"horai"` tick — Home had no live Ammit indicator before this.
+- `2026-09-14` — `felhaven.py`: registers the Home view under Kairos's `"horai"` worker so `AmmitBadge` refreshes on the existing 1s tick.
+- `2026-09-09` — `harmonia.py`: `_ensure_stream` checks the owned stream is still live and reopens it if PortAudio tore it down — a device change used to silence narration for the rest of the session.
+- `2026-09-09` — `tools/morpheus.py`: `mpv.log` is capped at 50 MB — `play()` recycles mpv when it is over, which is the only thing that reclaims the space.
+- `2026-09-08` — `panels/home_panel.py`: a failing poll tick reports at most once a minute, carrying a count — at 16 Hz an unattended fault would churn the log's whole rotation in twenty minutes.
+- `2026-09-08` — `panels/home_panel.py`: `_poll` re-arms in a `finally` and logs a failing tick, so one bad tick can no longer kill the drain chain silently.
+- `2026-09-08` — `tools/morpheus.py`: `duck()`/`unduck()` are write-only now — no volume read-back, and the restore target is the `_FULL_VOLUME` constant.
+- `2026-09-07` — `calliope.py`: the pre-rendered filler lines are gone — with them the WAV cache, its per-voice re-render thread, `prewarm()`'s render pass, `speak_filler`/`generate_fillers`/`filler_delay_ms`/`load_wav`, and the `hashlib`/`random` imports.
+- `2026-09-07` — `calliope.py`: the prebuffer gate no longer depends on a filler masking the wait — it always builds a lead, released early by `end_turn()` when a turn's text is already complete.
+- `2026-09-07` — `panels/home_panel.py`: dropped the filler timer and its after-id; `_speak` now calls `calliope.end_turn()`, without which a one-chunk answer would wait out the 6 s prebuffer timeout.
+- `2026-09-07` — `harmonia.py`: `play()` ducks Morpheus instead of stopping it, and a new `tick_yield()` restores the volume once the buffer has been quiet — narration was killing tracks `play_music` had just started, mid-resolve and silently.
+- `2026-09-07` — `tools/morpheus.py`: new `duck()`/`unduck()` on mpv's own `volume`; `--watch-later-options=start` stops a duck being baked into a track's resume file.
+- `2026-09-07` — `panels/home_panel.py`: `_poll` calls `harmonia.tick_yield()` — Harmonia may not arm a timer (§6), so the standing 60 ms drain chain drives the restore.
+- `2026-09-01` — `theme.py`: `PhosphorScroll` now asks for `height=1` — a bare Canvas requests 265 px, which put a 265 px floor under every container holding a scrollbar and collapsed Home's status line and chat entry at any window under ~1280x900.
+- `2026-09-01` — `panels/home_panel.py`: the transcript `Text` takes `height=1` for the same reason; it grows through `expand` instead of out-requesting the chat bar below it.
+- `2026-09-01` — `panels/hestia_panel.py`: regridded to three columns with a `uniform` group — face centred on the real midline and enlarged to 190x160, controls stacked top-right.
+- `2026-09-01` — `panels/vox_controls.py`: the three controls became a bordered box of dotted rows, reusing `SidebarRow`'s dot with the polarity flipped (amber = active here, so a dot can't disagree with its own label).
+- `2026-09-01` — `panels/home_panel.py`: Scraptoken Flux and Rites moved out of Hestia onto the status row, bottom-right, and HomePanel now owns the labels rather than pushing numbers through Hestia.
+- `2026-09-01` — `panels/vox_controls.py`: new — the three Hestia icons became words (Vox Response / Vox End / Reset Session), lit amber when active and dim when not.
+- `2026-09-01` — `panels/narrator_panel.py`: retired; `VoxControls` is now Calliope's only runtime auto-speak mutator, and the `draw_speaker` seam had no other caller.
+- `2026-09-01` — `panels/pythia_face.py`: moved in from `sandbox/`; palette rederived from `theme.C` (the fake-alpha ramps blend toward `C["bg"]`, so they had to follow it) and `set_state()` made idempotent.
+- `2026-09-01` — `panels/hestia_panel.py`: rebuilt around the face — title block, readouts and the vox row stack left, the face pins right; adds `set_face_state()` and `flash_reset()`.
+- `2026-09-01` — `panels/home_panel.py`: `_tick_face()` derives the face state and the Vox End cue from the existing 60 ms drain chain — no second timer, and the cue now survives narration that outlives the answer.
+- `2026-09-01` — `theme.py`: new `amber_bright` — the hovered half of the amber channel, as `red_bright` is to `red`.
+- `2026-09-01` — `CONVENTIONS.md`: §6 records the face's visibility-bounded animation loop; §7 records the vox row's amber-active inversion and its brighten-within-state hover.
+- `2026-08-20` — `bin/yt-dlp.exe`: updated `2026.06.09` → `2026.08.19`; the stale build resolved URLs mpv then got HTTP 403 on, so every Morpheus play was a silent no-op.
+- `2026-08-20` — `tools/morpheus.py`: mpv now runs with `--log-file=logs/mpv/mpv.log` — a subdirectory, since `emanon.py` globs `logs/*.log` and parses every match.
+- `2026-08-20` — `tools/morpheus.py`: a detected failure is distilled into `logs/mpv/last_failure.log` (header + mpv's error lines, 361 bytes vs 22 KB measured); it holds one failure, overwritten each time.
+- `2026-08-20` — `tools/morpheus.py`: `shutdown()` deletes `mpv.log` once mpv releases it — the distilled record is what persists, so the ~420 KB-per-load buffer never accumulates between runs.
+- `2026-08-20` — `tools/morpheus.py`: `play()` arms load tracking and `status()` reports `load_failed` when mpv goes idle with nothing loaded; `stop()` / `shutdown()` disarm it.
+- `2026-08-20` — `tools/morpheus.py`: a failed load writes one ERROR line naming the URL and the mpv log — the outage that prompted this produced none.
+- `2026-08-20` — `panels/morpheus_panel.py`: an `error` slug renders as red transport text via `_ERROR_TEXT`, outranking the idle line (mpv is genuinely running-and-idle after a failed load).
+- `2026-08-20` — `tests/test_morpheus_load_failure.py`: new — pins loading / playing / failed / stopped apart, including that a still-loading tick must not confirm the load.
+- `2026-08-19` — `pythia.py`: the startup warm sends the same `options` as a real request — it was loading a runner at Ollama's default context that the first question then threw away and reloaded, paying the full ~70s cold load despite a "successful" prewarm.
+- `2026-08-19` — `pythia.py`: the warm also prefills the system prompt + tool schemas, so the first question reuses llama.cpp's prompt cache instead of processing ~2,700 tokens itself.
+- `2026-08-19` — `pythia.py`: `_OPTIONS` is now one shared dict read by both `_chat()` and `_warm()`, with a lockstep test comparing the two payloads' `num_ctx` rather than hardcoding it.
+- `2026-08-19` — `pythia.py`: round stats and the warm log carry Ollama's `load_duration` / `prompt_eval_duration` — a large `load=` on a real question is the tell that the warm missed.
+- `2026-08-19` — `pythia.py`: new `is_warming()` — true from `prewarm()` until the warm ends, cleared on success and failure alike.
+- `2026-08-19` — `panels/home_panel.py`: the status line shows "waking the oracle…" while the model loads, riding the existing drain chain so no new `after()` id is created.
+- `2026-08-18` — `pythia.py`: the stats payload carries `tool_records` — one record per tool invocation (arguments, status, timing, error slug, capped result preview).
+- `2026-08-18` — `pythia.py`: `tools_called`, `tools_failed` and `failed_tools` now derive from `tool_records` instead of separate counters.
+- `2026-08-18` — `pythia.py`: Stop halts the tools too — a cancel set mid-round records every remaining call `not_run` and skips its dispatch.
+- `2026-08-18` — `pythia.py`: new `_now()` clock seam, `_redact()` credential scrub, and a 1,000-char `_truncate()` cap behind the new records.
+- `2026-08-18` — `panels/rite_panel.py`: new — the Rite Log window, a scrollable per-turn tool-call record with JSON copy. The toolbox's first `tk.Toplevel`.
+- `2026-08-18` — `panels/home_panel.py`: the meta-line's `N tools` and `⚠ N failed` counts are clickable and open the Rite Log for that turn.
+- `2026-08-18` — `panels/home_panel.py`: tool records are held in a 20-turn ring, cleared on Refresh; an aged-out turn opens the Rite Log's expired view.
+- `2026-08-18` — `theme.py`: new palette entry `red_bright` — the alarm channel hovered, for the meta-line's failure span.
+- `2026-08-16` — CodeQL `py/clear-text-logging-sensitive-data` on `voices.py`'s smoke-test `print()` dismissed as a false positive: the "private" data is the hardcoded `_GENDER` voice-label map.
 - `2026-08-16` — `tools/artemis.py`: a refresh that cannot fetch elevation now carries the committed `terrain.bin` forward and records `terrain_kept` — re-ingesting with a sealed vault was downgrading a complete area to a terrain-less one.
 - `2026-08-16` — `panels/artemis_panel.py`: the range instrument — rings, ticks, rim, range labels and N/E/S/W — draws in phosphor like the centre fix; the world keeps the muted map hues and the compass rose and scale bar stay dim.
 - `2026-08-16` — `panels/artemis_panel.py`: new Cached Locations overlay above the compass — rename, two-click refresh and two-click Recycle-Bin delete per area, range and bearing from the fix, and a row click jumps the view.

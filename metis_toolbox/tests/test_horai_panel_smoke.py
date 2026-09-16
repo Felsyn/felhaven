@@ -16,13 +16,14 @@ import sys
 import tempfile
 import unittest
 import tkinter as tk
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import theme
 from tools import ammit
-from panels.horai_panel import HoraiPanel, AmmitWidget
+from panels.horai_panel import HoraiPanel, AmmitWidget, AmmitBadge
 
 # The shape horai.handle() returns — built statically so the panel test does not
 # couple to the tool or read Themis.
@@ -90,6 +91,64 @@ class TestHoraiPanelSmoke(unittest.TestCase):
         w._refresh()
         self.root.update_idletasks()
         self.assertNotEqual(w._display.cget("text"), "00:00:00")
+
+    def test_ammit_badge_constructs(self):
+        AmmitBadge(self.root)
+        self.root.update_idletasks()
+
+    def test_ammit_badge_idle_state(self):
+        b = AmmitBadge(self.root)
+        self.root.update_idletasks()
+        self.assertEqual(b._label.cget("text"), "AMMIT --:--")
+        self.assertEqual(b._label.cget("fg"), theme.C["text3"])
+
+    def test_ammit_badge_reflects_a_running_timer(self):
+        b = AmmitBadge(self.root)
+        ammit.start_timer(0, 300)
+        b.refresh()
+        self.root.update_idletasks()
+        self.assertIn("AMMIT ", b._label.cget("text"))
+        self.assertNotEqual(b._label.cget("text"), "AMMIT --:--")
+        self.assertEqual(b._label.cget("fg"), theme.C["amber"])
+
+    def test_ammit_badge_reflects_an_expired_timer(self):
+        past = (datetime.now().astimezone() - timedelta(minutes=2)).isoformat()
+        ammit._save({"timers": [
+            {"duration_seconds": 60, "started_at": past, "running": True,
+             "acknowledged": False}
+        ]})
+        b = AmmitBadge(self.root)
+        self.root.update_idletasks()
+        self.assertEqual(b._label.cget("text"), "AMMIT TIME'S UP")
+        self.assertEqual(b._label.cget("fg"), theme.C["red"])
+
+    def test_ammit_badge_goes_green_not_red_once_acknowledged(self):
+        # The bug this pins: the badge used to key off `expired` alone, so
+        # dismissing the alarm popup elsewhere never reached it and it stayed
+        # red until the timer was actually stopped/reset.
+        past = (datetime.now().astimezone() - timedelta(minutes=2)).isoformat()
+        ammit._save({"timers": [
+            {"duration_seconds": 60, "started_at": past, "running": True,
+             "acknowledged": True}
+        ]})
+        b = AmmitBadge(self.root)
+        self.root.update_idletasks()
+        self.assertEqual(b._label.cget("text"), "AMMIT 00:00:00")
+        self.assertEqual(b._label.cget("fg"), theme.C["green"])
+
+    def test_ammit_widget_goes_green_not_red_once_acknowledged(self):
+        # AmmitWidget tracks the same acknowledged flag as AmmitBadge — both
+        # read ammit.py's state, so dismissing the popup on any panel calms
+        # both displays down together.
+        past = (datetime.now().astimezone() - timedelta(minutes=2)).isoformat()
+        ammit._save({"timers": [
+            {"duration_seconds": 60, "started_at": past, "running": True,
+             "acknowledged": True}
+        ]})
+        w = AmmitWidget(self.root)
+        self.root.update_idletasks()
+        self.assertEqual(w._display.cget("fg"), theme.C["green"])
+        self.assertEqual(w._btn.cget("fg"), theme.C["green"])
 
 
 if __name__ == "__main__":

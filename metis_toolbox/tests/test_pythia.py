@@ -17,7 +17,9 @@ TOOLS/_DISPATCH registry invariant, the §2 error-slug shape of the dispatcher's
 own returns, that a caught exception's raw message never reaches the LLM
 context or the transcript (only its class), and that a `thinking` trace is
 dropped (never shown, never forwarded) while still being named in the log as
-the reason a round came back empty.
+the reason a round came back empty, and that the startup warm asks Ollama for
+the SAME runner _chat() will ask for (the cold-start regression guard) while
+prefilling the real system+tools prefix.
 """
 
 import json
@@ -25,6 +27,7 @@ import os
 import sys
 import threading
 import unittest
+from datetime import datetime
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -442,15 +445,70 @@ class TestPythiaStats(unittest.TestCase):
         self.assertEqual(messages[0], {"role": "system", "content": "CUSTOM PROMPT"})
 
 
+def _warm_response() -> mock.Mock:
+    """Fake the NON-streaming response _warm() reads (stream=False), including
+    the duration fields it logs."""
+    resp = mock.Mock()
+    resp.raise_for_status.return_value = None
+    resp.content = b"{}"
+    resp.json.return_value = {"load_duration": 1_000_000,
+                              "prompt_eval_duration": 2_000_000,
+                              "prompt_eval_count": 2718}
+    return resp
+
+
 class TestPythiaPrewarm(unittest.TestCase):
-    def test_warm_posts_empty_message_preload(self):
-        resp = mock.Mock()
-        resp.raise_for_status.return_value = None
-        with mock.patch("pythia.requests.post", return_value=resp) as post:
+    def test_warm_prefills_the_real_prompt_prefix(self):
+        """The warm must send the same prefix a real turn opens with — system
+        prompt + tools. `messages: []` would load the weights only and leave the
+        ~2,700-token prefill to the first question."""
+        with mock.patch("pythia.machine_spirit.effective_prompt",
+                        return_value="SPIRIT"),              mock.patch("pythia.requests.post",
+                        return_value=_warm_response()) as post:
             pythia._warm()
         payload = post.call_args.kwargs["json"]
-        self.assertEqual(payload["messages"], [])          # empty = load-only, no gen
+        self.assertEqual(payload["messages"][0],
+                         {"role": "system", "content": "SPIRIT"})
+        self.assertEqual(payload["messages"][-1]["role"], "user")
+        self.assertEqual(payload["tools"], pythia.TOOLS)
         self.assertEqual(payload["keep_alive"], -1)
+
+    def test_warm_and_chat_request_the_SAME_runner(self):
+        """The regression guard for the cold-start bug.
+
+        Ollama keys a resident model on its runtime options, so if the warm's
+        num_ctx differs from the chat's, the warm loads a runner the first real
+        question throws away and reloads — the full cold load, in the user's
+        face, despite a 'successful' prewarm.
+
+        Compares the two captured payloads against each other. Deliberately does
+        NOT hardcode 8192: a hardcoded number passes while the two halves drift."""
+        with mock.patch("pythia.machine_spirit.effective_prompt",
+                        return_value="SPIRIT"),              mock.patch("pythia.requests.post",
+                        return_value=_warm_response()) as post:
+            pythia._warm()
+        warm_options = post.call_args.kwargs["json"]["options"]
+
+        with mock.patch("pythia.requests.post",
+                        return_value=_stream({"message": {"role": "assistant",
+                                                          "content": "hi"},
+                                              "done": True})) as post:
+            pythia._chat([{"role": "user", "content": "hi"}])
+        chat_options = post.call_args.kwargs["json"]["options"]
+
+        # num_ctx is the option that decides runner identity — it must match.
+        self.assertEqual(warm_options["num_ctx"], chat_options["num_ctx"])
+
+    def test_warm_caps_generation_without_changing_the_runner(self):
+        """num_predict may differ (it is a sampling knob, not a runtime one) —
+        that is what keeps the warm from generating a whole answer."""
+        with mock.patch("pythia.machine_spirit.effective_prompt",
+                        return_value="SPIRIT"),              mock.patch("pythia.requests.post",
+                        return_value=_warm_response()) as post:
+            pythia._warm()
+        options = post.call_args.kwargs["json"]["options"]
+        self.assertEqual(options["num_predict"], pythia._WARM_NUM_PREDICT)
+        self.assertLess(options["num_predict"], pythia._NUM_PREDICT)
 
     def test_warm_swallows_when_ollama_down(self):
         with mock.patch("pythia.requests.post",
@@ -461,6 +519,247 @@ class TestPythiaPrewarm(unittest.TestCase):
         with mock.patch("pythia._warm") as warm:
             pythia.prewarm().join(timeout=2)
         warm.assert_called_once()
+
+    def test_is_warming_true_the_moment_prewarm_returns(self):
+        """Set in prewarm(), not in the thread — a panel polling immediately
+        after launch must not read False before the thread is scheduled."""
+        started = threading.Event()
+        release = threading.Event()
+
+        def _blocked():
+            started.set()
+            release.wait(timeout=2)
+
+        with mock.patch("pythia._warm", side_effect=_blocked):
+            t = pythia.prewarm()
+            try:
+                self.assertTrue(pythia.is_warming())
+                started.wait(timeout=2)
+                self.assertTrue(pythia.is_warming())
+            finally:
+                release.set()
+                t.join(timeout=2)
+        # _warm was mocked out, so clear the flag it would have cleared itself.
+        pythia._WARMING.clear()
+
+    def test_is_warming_clears_even_when_warming_fails(self):
+        """A downed Ollama must not strand the UI on 'waking the oracle…'."""
+        pythia._WARMING.set()
+        with mock.patch("pythia.requests.post",
+                        side_effect=requests.ConnectionError()):
+            pythia._warm()
+        self.assertFalse(pythia.is_warming())
+
+    def test_is_warming_clears_after_a_successful_warm(self):
+        pythia._WARMING.set()
+        with mock.patch("pythia.machine_spirit.effective_prompt",
+                        return_value="SPIRIT"),              mock.patch("pythia.requests.post", return_value=_warm_response()):
+            pythia._warm()
+        self.assertFalse(pythia.is_warming())
+
+
+def _tool_round(*names_and_args) -> mock.Mock:
+    """A stream whose single assistant turn requests the given tool calls."""
+    return _stream({"message": {"role": "assistant", "content": "", "tool_calls": [
+        {"function": {"name": n, "arguments": a}} for n, a in names_and_args]},
+        "done": True})
+
+
+class TestPythiaRiteRecords(unittest.TestCase):
+    """tool_records — one diagnostic record per tool invocation (§3 of the Rite
+    Log brief). The derived counts are asserted alongside, because the whole
+    point of deriving them is that they cannot disagree with the list."""
+
+    def _ask(self, streams, dispatch, **kw) -> dict:
+        events: list = []
+        with mock.patch("pythia.requests.post", side_effect=streams), \
+             mock.patch.dict(pythia._DISPATCH, dispatch):
+            pythia.ask("q", [], on_event=events.append, **kw)
+        return events[0]
+
+    def test_successful_call_records_ok(self):
+        ev = self._ask(
+            [_tool_round(("get_weather", {"city": "Ely"})), _stream(_final("Sun."))],
+            {"get_weather": lambda **_: {"temp": 12}})
+        (rec,) = ev["tool_records"]
+        self.assertEqual(rec["seq"], 1)
+        self.assertEqual(rec["round"], 1)
+        self.assertEqual(rec["name"], "get_weather")
+        self.assertEqual(rec["arguments"], {"city": "Ely"})
+        self.assertFalse(rec["arguments_truncated"])
+        self.assertEqual(rec["status"], "ok")
+        self.assertIsNone(rec["error"])
+        self.assertIn("temp", rec["result_preview"])
+        self.assertFalse(rec["result_truncated"])
+        self.assertIsInstance(rec["duration_ms"], int)
+
+    def test_failing_call_records_the_slug_and_no_preview(self):
+        ev = self._ask(
+            [_tool_round(("get_stock_quote", {})), _stream(_final("Locked."))],
+            {"get_stock_quote": lambda **_: {"error": "vault_locked"}})
+        (rec,) = ev["tool_records"]
+        self.assertEqual(rec["status"], "failed")
+        self.assertEqual(rec["error"], "vault_locked")
+        self.assertIsNone(rec["result_preview"])
+
+    def test_separate_detail_key_folds_into_the_slug(self):
+        # Morpheus carries the human half in "detail" rather than after a colon.
+        # Dropping it would show the operator a bare slug and lose the sentence
+        # that explains it.
+        ev = self._ask(
+            [_tool_round(("play_music", {})), _stream(_final("No."))],
+            {"play_music": lambda **_: {"error": "no_query",
+                                        "detail": "No song was specified."}})
+        self.assertEqual(ev["tool_records"][0]["error"],
+                         "no_query: No song was specified.")
+
+    def test_seq_is_continuous_across_rounds_and_round_is_tracked(self):
+        ev = self._ask(
+            [_tool_round(("a", {}), ("b", {})), _tool_round(("c", {})),
+             _stream(_final("Done."))],
+            {"a": lambda **_: {"v": 1}, "b": lambda **_: {"v": 2},
+             "c": lambda **_: {"v": 3}})
+        self.assertEqual([r["seq"] for r in ev["tool_records"]], [1, 2, 3])
+        self.assertEqual([r["round"] for r in ev["tool_records"]], [1, 1, 2])
+
+    def test_started_at_comes_from_the_clock_seam(self):
+        fixed = datetime(2026, 8, 18, 9, 7, 12, 431000)
+        with mock.patch("pythia._now", return_value=fixed):
+            ev = self._ask(
+                [_tool_round(("a", {})), _stream(_final("Done."))],
+                {"a": lambda **_: {"v": 1}})
+        self.assertEqual(ev["tool_records"][0]["started_at"],
+                         "2026-08-18T09:07:12.431")
+
+    def test_counts_are_derived_from_the_records(self):
+        ev = self._ask(
+            [_tool_round(("ok_tool", {}), ("bad", {})), _stream(_final("Done."))],
+            {"ok_tool": lambda **_: {"v": 1},
+             "bad": lambda **_: {"error": "no_key"}})
+        self.assertEqual(ev["tools_called"], 2)
+        self.assertEqual(ev["tools_failed"], 1)
+        self.assertEqual(ev["failed_tools"], ["bad"])
+
+    def test_unknown_tool_is_recorded_as_a_failed_rite(self):
+        ev = self._ask([_tool_round(("nope", {})), _stream(_final("Done."))], {})
+        (rec,) = ev["tool_records"]
+        self.assertEqual(rec["status"], "failed")
+        self.assertTrue(rec["error"].startswith("unknown_tool: "))
+
+
+class TestPythiaRiteCancellation(unittest.TestCase):
+    """Stop halts the TOOLS, not just the model (§4). Before this change,
+    pressing Stop while tool 1 of 3 was running let tools 2 and 3 run to
+    completion — Stop stopped the oracle but not its rites."""
+
+    def test_remaining_calls_are_not_run_and_never_dispatched(self):
+        cancel = threading.Event()
+        dispatched: list = []
+
+        def _handler(**_kw):
+            dispatched.append("t")
+            cancel.set()               # the user hits Stop during the first call
+            return {"v": 1}
+
+        events: list = []
+        streams = [_tool_round(("t", {}), ("t", {}), ("t", {}))]
+        with mock.patch("pythia.requests.post", side_effect=streams), \
+             mock.patch.dict(pythia._DISPATCH, {"t": _handler}):
+            pythia.ask("q", [], on_event=events.append, cancel=cancel)
+
+        ev = events[0]
+        self.assertEqual(len(dispatched), 1, "tools 2 and 3 must not run")
+        self.assertEqual([r["status"] for r in ev["tool_records"]],
+                         ["ok", "not_run", "not_run"])
+        for rec in ev["tool_records"][1:]:
+            self.assertEqual(rec["error"], pythia._RITE_CANCELLED)
+            self.assertIsNone(rec["duration_ms"])
+            self.assertIsNone(rec["result_preview"])
+            # Still a genuine event: requested, and deliberately not run.
+            self.assertEqual(rec["name"], "t")
+            self.assertTrue(rec["started_at"])
+        # A call that never happened was never "called".
+        self.assertEqual(ev["tools_called"], 1)
+        self.assertEqual(ev["tools_failed"], 0)
+
+
+class TestPythiaRedaction(unittest.TestCase):
+    """§5 — a deterministic pattern scrub. Note there is no cerberus import in
+    this path: the diagnostics must not need the vault open to report that the
+    vault is shut."""
+
+    def test_query_parameter_values_are_replaced(self):
+        for raw, want in (
+            ("https://x/s?q=cat&key=abc123&n=1", "https://x/s?q=cat&key=[REDACTED]&n=1"),
+            ("?apikey=abc123", "?apikey=[REDACTED]"),
+            ("?api_key=abc123 rest", "?api_key=[REDACTED] rest"),
+            ("?access_token=xyz", "?access_token=[REDACTED]"),
+            ("&token=xyz&a=1", "&token=[REDACTED]&a=1"),
+            ("&auth=hunter2", "&auth=[REDACTED]"),
+        ):
+            self.assertEqual(pythia._redact(raw), want)
+
+    def test_it_is_case_insensitive(self):
+        self.assertEqual(pythia._redact("?API_KEY=abc"), "?API_KEY=[REDACTED]")
+
+    def test_bearer_header_value_is_replaced(self):
+        self.assertEqual(pythia._redact("Authorization: Bearer eyJhbGciOi"),
+                         "Authorization: Bearer [REDACTED]")
+
+    def test_a_word_merely_ending_in_key_is_not_a_key(self):
+        self.assertEqual(pythia._redact("monkey=banana"), "monkey=banana")
+
+    def test_error_and_preview_are_scrubbed_but_arguments_are_not(self):
+        secret = "https://api/s?key=SECRET123"
+        events: list = []
+        streams = [_tool_round(("s", {"url": secret})), _stream(_final("Done."))]
+        with mock.patch("pythia.requests.post", side_effect=streams), \
+             mock.patch.dict(pythia._DISPATCH, {"s": lambda **_: {"used": secret}}):
+            pythia.ask("q", [], on_event=events.append)
+        (rec,) = events[0]["tool_records"]
+        self.assertNotIn("SECRET123", rec["result_preview"])
+        self.assertIn("[REDACTED]", rec["result_preview"])
+        # Arguments are exactly what the operator opened the log to read (§5).
+        self.assertEqual(rec["arguments"], {"url": secret})
+
+
+class TestPythiaTruncation(unittest.TestCase):
+    """§6 — serialize, THEN redact, THEN truncate, so the cap applies to the
+    string that actually gets stored. The flag carries the signal, never a
+    marker written into the data."""
+
+    def test_helper_caps_and_flags(self):
+        text, cut = pythia._truncate("x" * 1500)
+        self.assertEqual(len(text), pythia._PREVIEW_CAP)
+        self.assertTrue(cut)
+        self.assertNotIn("...", text)
+        self.assertNotIn("truncated", text)
+
+    def test_short_text_passes_through_unflagged(self):
+        self.assertEqual(pythia._truncate("short"), ("short", False))
+
+    def test_long_result_is_capped_and_flagged(self):
+        events: list = []
+        streams = [_tool_round(("s", {})), _stream(_final("Done."))]
+        with mock.patch("pythia.requests.post", side_effect=streams), \
+             mock.patch.dict(pythia._DISPATCH, {"s": lambda **_: {"t": "y" * 4000}}):
+            pythia.ask("q", [], on_event=events.append)
+        (rec,) = events[0]["tool_records"]
+        self.assertEqual(len(rec["result_preview"]), pythia._PREVIEW_CAP)
+        self.assertTrue(rec["result_truncated"])
+
+    def test_long_arguments_become_a_truncated_string(self):
+        events: list = []
+        streams = [_tool_round(("s", {"blob": "z" * 4000})), _stream(_final("Done."))]
+        with mock.patch("pythia.requests.post", side_effect=streams), \
+             mock.patch.dict(pythia._DISPATCH, {"s": lambda **_: {"v": 1}}):
+            pythia.ask("q", [], on_event=events.append)
+        (rec,) = events[0]["tool_records"]
+        # A dict under the cap, a truncated JSON string over it — the type IS
+        # the flag's companion, so the panel knows which of the two to render.
+        self.assertIsInstance(rec["arguments"], str)
+        self.assertEqual(len(rec["arguments"]), pythia._PREVIEW_CAP)
+        self.assertTrue(rec["arguments_truncated"])
 
 
 if __name__ == "__main__":

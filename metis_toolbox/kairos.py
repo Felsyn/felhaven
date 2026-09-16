@@ -27,6 +27,13 @@ Requires:    importlib, logging, queue, threading, time (stdlib only).
 V0.02: Audited 2026-07-25 — verified honest (exhaustive coverage, no dead code);
        tightened the thread-safety contract to §6's precise worker↔main-thread
        wording (§12); added Upstream/Downstream/Requires.
+
+2026-09-15: added the RETRY_DELAYS re-attempt ladder. A failed fetch used to
+       wait out the worker's whole interval before trying again, so one blip
+       pinned Aura's panel at "unavailable" for 30 minutes — long after the
+       sky was fine. _note_outcome now backdates _last_run on failure to pull
+       the next attempt forward. Main-thread only; the threading contract above
+       is unchanged.
 """
 
 import importlib
@@ -57,6 +64,18 @@ class Kairos:
         ("artemis",     600, "tools.artemis.fetch"),
     ]
 
+    # Re-attempt ladder after a failed fetch (seconds), in order. A worker that
+    # fails gets its next attempt this soon instead of waiting out its whole
+    # interval — a 30-minute worker like Aura otherwise shows "unavailable" for
+    # a full half-hour after a blip that cleared in seconds.
+    #
+    # The ladder is SHORT on purpose, and deliberately runs out: recovery from a
+    # transient failure is caught within a minute, but a sustained outage falls
+    # back to the worker's normal cadence instead of hammering a dead endpoint
+    # forever (see the decisions log — wttr.in's 2026-09-15 cert expiry failed
+    # every attempt for nine hours; polling that twice as often helps nobody).
+    RETRY_DELAYS = (60, 300, 900)
+
     def __init__(self, root):
         self.root = root
         self.result_queue = queue.Queue()
@@ -64,10 +83,13 @@ class Kairos:
         self._last_run = {}         # name -> monotonic time of last dispatch (main thread only)
         self._running_threads = {}  # name -> Thread (pile-up guard)
         self._fetch_fns = {}        # name -> callable, resolved once at startup
-        for name, _interval, dotted in self.WORKERS:
+        self._intervals = {}        # name -> interval seconds, for the retry ladder
+        self._fail_counts = {}      # name -> consecutive failures (main thread only)
+        for name, interval, dotted in self.WORKERS:
             module_path, _, attr = dotted.rpartition(".")
             module = importlib.import_module(module_path)
             self._fetch_fns[name] = getattr(module, attr)
+            self._intervals[name] = interval
 
     def register_panel(self, name: str, panel) -> None:
         self._panels.setdefault(name, []).append(panel)
@@ -80,10 +102,17 @@ class Kairos:
         worker infinitely overdue; the pile-up guard still applies. Main-thread
         only (called from a panel's Save handler), same as _schedule_workers, so
         no lock is needed. Unknown names are ignored."""
-        known = {n for n, _interval, _dotted in self.WORKERS}
+        # Validated against the instance's own resolved registry, not the
+        # WORKERS class attribute: _intervals and _fetch_fns are what every
+        # other method schedules from, and a name this instance cannot fire is
+        # not a name it should mark overdue.
         for name in names:
-            if name in known:
+            if name in self._intervals:
                 self._last_run[name] = float("-inf")
+                # A manual refetch is a fresh start: clear any retry ladder
+                # progress so a worker that had been failing gets the full
+                # short-delay ladder again rather than resuming mid-climb.
+                self._fail_counts.pop(name, None)
 
     def start(self) -> None:
         now = time.monotonic()
@@ -109,6 +138,33 @@ class Kairos:
                 break
             for panel in self._panels.get(name, []):
                 panel.update(data)
+            self._note_outcome(name, data)
+
+    def _note_outcome(self, name: str, data) -> None:
+        """Advance or clear a worker's retry ladder from its latest result.
+
+        `data is None` is Kairos's own failure signal (_run_worker puts None
+        when fetch() raised), which is why this reads the drained result rather
+        than anything the worker thread set: _fail_counts and _last_run stay
+        main-thread-only, so §6's one-shared-object contract is untouched.
+        """
+        interval = self._intervals.get(name)
+        if interval is None:
+            return                      # unregistered name — nothing to schedule
+        if data is not None:
+            self._fail_counts.pop(name, None)
+            return
+        fails = self._fail_counts.get(name, 0) + 1
+        self._fail_counts[name] = fails
+        if fails > len(self.RETRY_DELAYS):
+            return                      # ladder spent — resume the normal cadence
+        delay = self.RETRY_DELAYS[fails - 1]
+        if delay >= interval:
+            return                      # already polls this often; nothing to gain
+        # Backdate the last run so the next tick fires it `delay` from now.
+        self._last_run[name] = time.monotonic() - interval + delay
+        log.info(f"{name} failed ({fails}) — retrying in {delay}s "
+                 f"instead of {interval}s")
 
     def _schedule_workers(self) -> None:
         now = time.monotonic()

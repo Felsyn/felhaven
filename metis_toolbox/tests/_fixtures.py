@@ -47,3 +47,31 @@ def missing_hourly_payload() -> dict:
     raw = load_real_j1()
     del raw["weather"][1]["hourly"]
     return raw
+
+
+# ── Open-Meteo (Aura's fallback source) ───────────────────────────────────────
+
+_OM_FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "fixtures", "open_meteo.json")
+
+
+def load_real_open_meteo() -> dict:
+    """A fresh copy of the captured real Open-Meteo forecast payload.
+
+    Captured the same way and for the same reason as the wttr.in fixture: its
+    dialect is genuinely different (floats not strings, WMO not WWO codes,
+    parallel arrays not nested day objects, one temperature unit not two), and a
+    hand-built minimal payload would quietly agree with whatever the normalizer
+    happened to do.
+    """
+    with open(_OM_FIXTURE, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def open_meteo_snow_payload() -> dict:
+    """Real payload with day 0 turned into heavy snowfall (WMO 75), to drive the
+    snow branch of the single combined precipitation probability."""
+    raw = load_real_open_meteo()
+    raw["daily"]["weather_code"][0] = 75
+    raw["daily"]["precipitation_probability_max"][0] = 80
+    return raw

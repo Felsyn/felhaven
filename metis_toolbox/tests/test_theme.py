@@ -140,6 +140,30 @@ class ThemeTests(unittest.TestCase):
         bar.set(0.0, 0.5)              # half visible → a thumb exists
         self.assertIsNotNone(bar._thumb_box())
 
+    def test_scroll_requests_no_height_of_its_own(self):
+        """A bare tk.Canvas asks for 265 px of height. PhosphorScroll is always
+        packed fill="y" beside the thing it scrolls, so that request is pure
+        fiction — but geometry managers believe it, and it quietly put a 265 px
+        floor under every container holding one. On Home that floor ate the
+        status line and the chat entry at any window under ~1280x900: pack
+        satisfies requested heights in pack order before it hands the leftover
+        to expand=True children, so the transcript's scrollbar outbid the thing
+        you type into.
+
+        Asserted rather than trusted because the symptom is invisible on a
+        maximised window and no test fails when it regresses — the layout is
+        simply wrong at sizes nobody happened to try."""
+        bar = theme.PhosphorScroll(self.root)
+        self.addCleanup(bar.destroy)
+        self.assertLess(bar.winfo_reqheight(), 40)
+
+    def test_scroll_still_claims_its_lane_width(self):
+        """The width is NOT fiction — the docstring promises the lane keeps its
+        packed width so layout never jumps when the thumb hides."""
+        bar = theme.PhosphorScroll(self.root)
+        self.addCleanup(bar.destroy)
+        self.assertEqual(bar.winfo_reqwidth(), theme.PhosphorScroll.LANE)
+
     # ── Right-click menu primitives ───────────────────────────────────────────
 
     def test_themed_menu_is_a_tk_menu_in_theme_colors(self):

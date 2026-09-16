@@ -4,35 +4,53 @@ panels/hestia_panel.py — Hestia: the Home command surface
 Metis Toolbox | Anti-Legion: ONE JOB
 
 Job:         Draw Pythia's command surface — the "PYTHIA / ask the oracle"
-             title block, the (relocated) narration lamp, a Stop control, a
-             Refresh control, and two session readouts (Scraptoken Flux =
-             running token total, Rites = tool-call tally). Draws and
-             delegates — owns NO chat state, no worker, no history, no
-             counters of its own. HomePanel pushes every number in and wires
-             Stop/Refresh to its own handlers.
+             title block, the wireframe face, and the vox control box. Draws
+             and delegates — owns NO chat state, no worker, no history, no
+             counters of its own. HomePanel wires the controls to its own
+             handlers and tells the face what she is doing.
 
-Layout:      PYTHIA
-             ask the oracle   [speaker] [stop] [refresh]   Flux: n   Rites: n
+Layout:      PYTHIA                                  ┌──────────────────┐
+             ask the oracle      ┌──────────┐        │ ● Vox Response   │
+                                 │   face   │        │ ● Vox End        │
+                                 └──────────┘        │ ● Reset Session  │
+                                                     └──────────────────┘
+
+             Three grid columns, not packed sides. Pack would centre the face
+             in the *leftover* space, which sits off the midline whenever the
+             two side columns differ in width — and they do (the title is
+             ~102 px, the control box ~127). The outer columns share a `uniform`
+             group so they are forced to equal width, which is what puts the
+             face on the real centre line. The session readouts used to live
+             here; they now sit with the status line at the bottom of
+             HomePanel, away from the controls.
 
 Contract:    HestiaBar(parent, on_stop, on_refresh)
-                 set_flux(tokens: int)             — session token total
-                 set_rites(called: int, failed: int) — session tool tally
-                 set_running(running: bool)          — bright/dim cue for Stop
-                                                        (cosmetic only — Stop
-                                                        is ALWAYS clickable,
-                                                        since narration can
-                                                        keep playing after
-                                                        generation ends)
+                 set_running(running: bool)  — lit/dim cue for Vox End
+                                               (cosmetic only — Vox End is
+                                               ALWAYS clickable, since
+                                               narration can keep playing after
+                                               generation ends; see
+                                               panels/vox_controls.py)
+                 set_face_state(name: str)   — idle | playing | thinking |
+                                               speaking
+                 flash_reset()               — one beat on Reset Session
 
 Upstream:    panels/home_panel.py (constructs + drives this)
-Downstream:  panels/narrator_panel.py (NarratorLamp, reused not forked),
-             theme.py (colors/fonts)
+Downstream:  panels/vox_controls.py (the control box),
+             panels/pythia_face.py (the indicator), theme.py (colors/fonts)
 
-Requires:    tkinter (stdlib). calliope only indirectly, via NarratorLamp.
+Requires:    tkinter (stdlib). calliope only indirectly, via VoxControls.
 
 V0.02: Audited 2026-07-26 — verified draw-and-delegate honest; owns no chat state
 of its own. §6-clean: no thread and no after() — HomePanel drives every readout
 and wires the Stop/Refresh handlers.
+
+2026-09-01: the icon cluster became three words (panels/vox_controls.py, which
+retired the NarratorLamp) and the wireframe face moved in from sandbox/. Hestia
+still holds no state: the face's animation is the face's own business (§6), and
+the armed/lit cue is still whatever HomePanel last pushed. Then regridded — face
+centred and enlarged, controls stacked right, readouts moved out to HomePanel's
+status row.
 """
 
 from typing import Callable
@@ -40,7 +58,13 @@ from typing import Callable
 import tkinter as tk
 
 from theme import C, FONTS
-from panels.narrator_panel import NarratorLamp
+from panels.pythia_face import PythiaFace
+from panels.vox_controls import VoxControls
+
+# Exactly half the 380×320 the face's geometry was tuned at, so its internal
+# scale factor lands on 0.5 and every contour steps evenly.
+_FACE_W = 190
+_FACE_H = 160
 
 
 class HestiaBar(tk.Frame):
@@ -49,82 +73,38 @@ class HestiaBar(tk.Frame):
                  on_refresh: Callable[[], None]) -> None:
         super().__init__(parent, bg=C["bg"])
 
-        tk.Label(self, text="PYTHIA", font=FONTS["title"],
+        # The outer columns share a uniform group, so grid gives them equal
+        # width whatever their contents ask for — without it, the wider column
+        # would push the face off the centre line.
+        self.columnconfigure(0, weight=1, uniform="hestia_side")
+        self.columnconfigure(2, weight=1, uniform="hestia_side")
+
+        # ── Title block, top left ────────────────────────────────────────────
+        titles = tk.Frame(self, bg=C["bg"])
+        titles.grid(row=0, column=0, sticky="nw")
+
+        tk.Label(titles, text="PYTHIA", font=FONTS["title"],
                  fg=C["text1"], bg=C["bg"]).pack(anchor="w", pady=(0, 2))
+        tk.Label(titles, text="ask the oracle", font=FONTS["subtitle"],
+                 fg=C["text3"], bg=C["bg"]).pack(anchor="w")
 
-        row = tk.Frame(self, bg=C["bg"])
-        row.pack(fill="x", pady=(0, 8))
-        tk.Label(row, text="ask the oracle", font=FONTS["subtitle"],
-                 fg=C["text3"], bg=C["bg"]).pack(side="left")
+        # ── The face, centred ────────────────────────────────────────────────
+        # bg is inherited from C["bg"] on purpose — the face's glow ramps blend
+        # toward the background it sits on.
+        self._face = PythiaFace(self, width=_FACE_W, height=_FACE_H)
+        self._face.grid(row=0, column=1, padx=12)
 
-        # ── Controls: narration lamp, stop, refresh ─────────────────────────
-        controls = tk.Frame(row, bg=C["bg"])
-        controls.pack(side="left", padx=(14, 0))
-
-        NarratorLamp(controls).pack(side="left")
-
-        self._stop = tk.Label(controls, text="⏹", font=FONTS["large_bold"],
-                              fg=C["text3"], bg=C["bg"])
-        self._stop.pack(side="left", padx=(8, 0))
-        self._stop.bind("<Button-1>", lambda _e: self._fire_stop())
-        self._stop.bind("<Enter>", lambda _e: self._hover_stop(True))
-        self._stop.bind("<Leave>", lambda _e: self._hover_stop(False))
-
-        self._refresh = tk.Label(controls, text="↻", font=FONTS["large_bold"],
-                                 fg=C["text1"], bg=C["bg"], cursor="hand2")
-        self._refresh.pack(side="left", padx=(8, 0))
-        self._refresh.bind("<Button-1>", lambda _e: on_refresh())
-        self._refresh.bind("<Enter>", lambda _e: self._refresh.config(fg=C["amber"]))
-        self._refresh.bind("<Leave>", lambda _e: self._refresh.config(fg=C["text1"]))
-
-        # ── Session readouts, right-aligned ─────────────────────────────────
-        readouts = tk.Frame(row, bg=C["bg"])
-        readouts.pack(side="right")
-
-        self._flux = tk.Label(readouts, text="Scraptoken Flux: 0",
-                              font=FONTS["small"], fg=C["text3"], bg=C["bg"])
-        self._flux.pack(side="left", padx=(0, 12))
-
-        rites_wrap = tk.Frame(readouts, bg=C["bg"])
-        rites_wrap.pack(side="left")
-        self._rites_main = tk.Label(rites_wrap, text="Rites: 0",
-                                    font=FONTS["small"], fg=C["text3"], bg=C["bg"])
-        self._rites_main.pack(side="left")
-        self._rites_fail = tk.Label(rites_wrap, text="",
-                                    font=FONTS["small"], fg=C["red"], bg=C["bg"])
-        self._rites_fail.pack(side="left")
-
-        self._on_stop = on_stop
-        self._running = False
-        self._restyle_stop()
+        # ── The vox control box, top right ───────────────────────────────────
+        self._vox = VoxControls(self, on_end=on_stop, on_reset=on_refresh)
+        self._vox.grid(row=0, column=2, sticky="ne")
 
     # ── HomePanel-facing setters ─────────────────────────────────────────────
 
-    def set_flux(self, tokens: int) -> None:
-        self._flux.config(text=f"Scraptoken Flux: {tokens}")
-
-    def set_rites(self, called: int, failed: int) -> None:
-        self._rites_main.config(text=f"Rites: {called}")
-        self._rites_fail.config(text=f" · {failed} failed" if failed else "")
-
     def set_running(self, running: bool) -> None:
-        self._running = running
-        self._restyle_stop()
+        self._vox.set_armed(running)
 
-    # ── Stop control ──────────────────────────────────────────────────────────
-    # Always clickable — narration can keep playing for seconds after the
-    # answer text itself finishes (synth/playback lags behind generation), so
-    # gating the click on "still generating" left Stop dead exactly when a
-    # still-talking user wanted to silence it. `_running` now only drives the
-    # dim/bright cue, never whether a click fires.
+    def set_face_state(self, name: str) -> None:
+        self._face.set_state(name)
 
-    def _fire_stop(self) -> None:
-        self._on_stop()
-
-    def _hover_stop(self, on: bool) -> None:
-        self._stop.config(fg=C["amber"] if on else (C["text1"] if self._running else C["text3"]))
-
-    def _restyle_stop(self) -> None:
-        # cursor stays "hand2" regardless — bright while generating, dim at
-        # rest, but clickable either way (see _fire_stop).
-        self._stop.config(fg=C["text1"] if self._running else C["text3"], cursor="hand2")
+    def flash_reset(self) -> None:
+        self._vox.flash_reset()

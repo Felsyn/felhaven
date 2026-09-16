@@ -57,6 +57,17 @@ C = {
     "gray":      "#2F7A2F",
     # ── genuinely semantic — kept distinct ──
     "red":       "#E24B4A",   # alarm / expired timer ONLY
+    # The SAME alarm channel, hovered — not a second meaning. Reserved for the
+    # hover state of a red control (the Rite Log's "N failed" span). Amber would
+    # be wrong here: it is the informational/road channel, and flipping an alarm
+    # to it on hover reports a failure as a notice.
+    "red_bright": "#FF7A79",
+    # The SAME informational channel as `amber`, hovered — not a second
+    # meaning, exactly as `red_bright` is to `red`. Needed because the Hestia
+    # vox controls invert §7 (active = amber, inactive = dim), so amber can no
+    # longer double as the hover colour: hover has to brighten *within* the
+    # control's current state instead of announcing one.
+    "amber_bright": "#F5C24A",
     # ── badges & bars ──
     "badge_bg":  "#0F2A0F",
     "badge_fg":  "#9DFF9D",
@@ -270,7 +281,14 @@ class PhosphorScroll(tk.Canvas):
 
     def __init__(self, parent, command=None, **kw):
         kw.setdefault("bg", C["card"])
-        super().__init__(parent, width=self.LANE,
+        # height=1 matters: a bare tk.Canvas asks for 265 px of height, and this
+        # widget is always packed fill="y" beside the thing it scrolls — so that
+        # request is fiction, but geometry managers believe it. It silently put a
+        # 265 px floor under every container holding a scrollbar; on Home that
+        # floor ate the status line and the chat entry at anything under a
+        # maximised window (pack satisfies requested heights before it hands the
+        # leftover to expand=True children).
+        super().__init__(parent, width=self.LANE, height=1,
                          highlightthickness=0, bd=0, **kw)
         self._command = command
         self._first, self._last = 0.0, 1.0

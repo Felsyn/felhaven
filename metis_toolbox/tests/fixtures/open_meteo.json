@@ -1,0 +1,79 @@
+{
+ "latitude": 51.4779,
+ "longitude": 0.0,
+ "generationtime_ms": 1.5462636947631836,
+ "utc_offset_seconds": -14400,
+ "timezone": "America/New_York",
+ "timezone_abbreviation": "GMT-4",
+ "elevation": 308.0,
+ "current_units": {
+  "time": "iso8601",
+  "interval": "seconds",
+  "temperature_2m": "\u00b0F",
+  "relative_humidity_2m": "%",
+  "apparent_temperature": "\u00b0F",
+  "precipitation": "mm",
+  "weather_code": "wmo code",
+  "cloud_cover": "%",
+  "wind_speed_10m": "mp/h",
+  "uv_index": ""
+ },
+ "current": {
+  "time": "2026-09-15T19:30",
+  "interval": 900,
+  "temperature_2m": 75.6,
+  "relative_humidity_2m": 75,
+  "apparent_temperature": 80.3,
+  "precipitation": 0.0,
+  "weather_code": 0,
+  "cloud_cover": 0,
+  "wind_speed_10m": 4.1,
+  "uv_index": 0.05
+ },
+ "daily_units": {
+  "time": "iso8601",
+  "weather_code": "wmo code",
+  "temperature_2m_max": "\u00b0F",
+  "temperature_2m_min": "\u00b0F",
+  "precipitation_probability_max": "%",
+  "sunrise": "iso8601",
+  "sunset": "iso8601"
+ },
+ "daily": {
+  "time": [
+   "2026-09-15",
+   "2026-09-16",
+   "2026-09-17"
+  ],
+  "weather_code": [
+   3,
+   2,
+   96
+  ],
+  "temperature_2m_max": [
+   81.0,
+   85.6,
+   82.4
+  ],
+  "temperature_2m_min": [
+   52.2,
+   63.7,
+   70.0
+  ],
+  "precipitation_probability_max": [
+   0,
+   20,
+   66
+  ],
+  "sunrise": [
+   "2026-09-15T07:02",
+   "2026-09-16T07:03",
+   "2026-09-17T07:04"
+  ],
+  "sunset": [
+   "2026-09-15T19:29",
+   "2026-09-16T19:27",
+   "2026-09-17T19:26"
+  ]
+ }
+}

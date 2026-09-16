@@ -10,6 +10,12 @@ WeatherPanel — two tabs, updated by Kairos every 30 min via update():
     FORECAST  3-day outlook — emoji icon + description + H/L + chance of rain.
 
 Module-level _icon() maps wttr.in (WWO) weather codes to emoji for the forecast.
+Aura's Open-Meteo fallback translates its own WMO codes into that same WWO space
+before handing the dict over, so this panel never learns which host answered.
+
+2026-09-15: the None branch says "no weather source reachable" rather than
+       "fetch failed" — with a fallback source in place, reaching it means both
+       hosts are down, which is a different (and rarer) thing to tell a user.
 """
 
 import tkinter as tk
@@ -426,7 +432,11 @@ class WeatherPanel(Card):
             # "unavailable" placeholder after a fetch miss.
             self.temp_lbl.config(text="unavailable", font=FONTS["medium"],
                                  fg=C["text1"])
-            self.desc_lbl.config(text="fetch failed")
+            # "fetch failed" said nothing a user could act on. Aura only reaches
+            # here once BOTH wttr.in and Open-Meteo have failed, which is worth
+            # naming — it points at the link rather than at one flaky host, and
+            # Kairos is already retrying on its short ladder.
+            self.desc_lbl.config(text="no weather source reachable — retrying")
             self._helios.update(None)
             self._selene.update(None)
             # Forecast rows keep their last values — the NOW tab already signals

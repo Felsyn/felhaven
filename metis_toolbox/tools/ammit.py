@@ -14,10 +14,22 @@ Contract:    Exposes TOOL_DEFINITION and handle().
              query_all() for direct dashboard use.
 
 Upstream:    pythia.py (registration + dispatch)
-Downstream:  panels/horai_panel.py (AmmitWidget — the countdown display)
+Downstream:  panels/horai_panel.py (AmmitWidget — the countdown display;
+             AmmitAlarm — popup + spoken announcement on expiry; AmmitBadge —
+             a passive status readout on other panels, e.g. Home)
 
 V0.02:       Audited 2026-07-24 — countdown display only, no alarm (deliberate);
              contract verified, _fmt privatized, hermetic tests added.
+
+2026-09-09:  the "no alarm" decision above was overridden by request — see
+             AmmitAlarm in horai_panel.py. `acknowledged` was added here (not
+             there) because it has to survive across panel instances: Home's
+             AmmitBadge and Horai's AmmitWidget/AmmitAlarm are different
+             objects that only share state through this file. Acknowledging
+             does NOT touch `running`/`remaining_seconds` — the countdown
+             itself is untouched, only the alarm styling both displays draw
+             from `expired` calms down (red -> green) once the alert has been
+             seen. Stop/Reset is still the only way to actually clear it.
 """
 
 import json
@@ -36,7 +48,8 @@ APP_DIR    = Path(__file__).resolve().parent.parent
 STATE_FILE = APP_DIR / "timer_state.json"
 
 MAX_SLOTS   = 1
-EMPTY_TIMER = {"duration_seconds": 0, "started_at": None, "running": False}
+EMPTY_TIMER = {"duration_seconds": 0, "started_at": None, "running": False,
+               "acknowledged": False}
 
 
 # ── Persistence ───────────────────────────────────────────────────────────────
@@ -89,6 +102,16 @@ def start_timer(slot: int, duration_seconds: int) -> None:
     t["duration_seconds"] = duration_seconds
     t["started_at"]       = datetime.now().astimezone().isoformat()
     t["running"]          = True
+    t["acknowledged"]     = False   # a fresh countdown re-arms the badge
+    _save(state)
+
+
+def acknowledge_timer(slot: int) -> None:
+    """Silence the passive badge for the CURRENT expiry without touching the
+    timer itself — cleared again the next time this slot starts (fresh
+    countdown) or resets. See the 2026-09-09 module docstring note."""
+    state = _load()
+    state["timers"][slot]["acknowledged"] = True
     _save(state)
 
 
@@ -120,6 +143,8 @@ def query_all() -> list[dict[str, Any]]:
             "remaining_seconds": rem,
             "display":          _fmt(rem),
             "expired":          t["running"] and rem == 0,
+            # .get(): older timer_state.json files predate this field.
+            "acknowledged":     t.get("acknowledged", False),
         })
     return out
 

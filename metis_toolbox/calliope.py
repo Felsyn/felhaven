@@ -23,7 +23,7 @@ Contract:    speak(text) -> None
                  `voice` names a kokoro voice for THIS call only; None means the
                  narration voice (see "Voice" below).
 
-Shared seam:  synthesize(), take_chunk(), save_wav(), load_wav() and SAMPLE_RATE
+Shared seam:  synthesize(), take_chunk(), save_wav() and SAMPLE_RATE
               are the public kokoro-audio helpers. Echo (tools/echo.py) reuses
               them so there is ONE source of truth for how kokoro PCM is chunked
               and written to a WAV — Echo owns no model instance and no second
@@ -41,7 +41,7 @@ Shared seam:  synthesize(), take_chunk(), save_wav(), load_wav() and SAMPLE_RATE
                  cross-thread device call (see harmonia.py's docstring).
 
 Device:      Calliope does not touch sounddevice or own an audio queue anymore.
-             Every synthesized chunk (and every filler) is handed to
+             Every synthesized chunk is handed to
              harmonia.play(pcm, SAMPLE_RATE, tag=...) — Harmonia owns the
              output device, the play thread, and barge-in interruption.
              Calliope keeps exactly one thing Harmonia must never know about:
@@ -67,9 +67,9 @@ Voice:       Two different things are called "the voice", and they are not the
                  for without disturbing narration. This is why the voice is a
                  parameter and not just a global: the two selections are
                  independent by design.
-             set_voice() re-renders the filler cache on a background thread —
-             the cache key includes the voice, so a switch would otherwise leave
-             speak_filler() silently empty until the next launch.
+             set_voice() is instantaneous — it sets a global and returns.
+             Nothing is cached per-voice any more (the pre-rendered filler
+             cache that used to be is gone), so a switch costs nothing.
 
 Config:      config/calliope_config.json — the DEFAULT voice, speed, lang, model
              paths, and the auto_speak default. The configured voice is the
@@ -82,7 +82,7 @@ Model files: kokoro-onnx needs two binaries (a *.onnx voice model and
              SETUP.md section 4 for the one-time download step.
 
 Upstream:    panels/home_panel.py (per-response speak button + auto-speak),
-             panels/narrator_panel.py (the header toggle),
+             panels/vox_controls.py (the Vox Response toggle),
              panels/machine_spirit_panel.py (set_voice via the voice bar),
              felhaven.py (seeds set_voice from voices.pythia_voice() at startup)
 Downstream:  kokoro-onnx (synthesis) → harmonia.py (playback ownership)
@@ -97,11 +97,9 @@ V0.02:       Audited 2026-07-24 — never-raise contract verified across
              No code change, only this marker.
 """
 
-import hashlib
 import json
 import logging
 import queue
-import random
 import re
 import threading
 import time
@@ -117,7 +115,6 @@ log = logging.getLogger("METIS.calliope")
 
 _APP_DIR = Path(__file__).resolve().parent
 _CONFIG_FILE = _APP_DIR / "config" / "calliope_config.json"
-_FILLER_DIR = _APP_DIR / "calliope_fillers"
 
 # ── Config (loaded once at import; fail soft to sane defaults) ─────────────────
 
@@ -131,7 +128,6 @@ _DEFAULTS: dict[str, Any] = {
     "model_path": "kokoro_models/kokoro-v1.0.onnx",
     "voices_path": "kokoro_models/voices-v1.0.bin",
     "auto_speak": False,
-    "filler_delay_ms": 1000,
     "prebuffer_chunks": 2,
     "first_chunk_max_chars": 70,
     "chunk_max_chars": 70,
@@ -176,7 +172,9 @@ def _resolve(path_str: str) -> Path:
 _model: Any = None
 _model_tried = False           # so a failed load isn't retried on every call
 _model_lock = threading.Lock()
-_synth_lock = threading.Lock()  # serialize model.create() (synth worker vs filler gen)
+# Serialize model.create(): kokoro's tokenizer is not thread-safe, and the
+# synth worker is not the only caller — Echo renders files on its own thread.
+_synth_lock = threading.Lock()
 
 
 def _load_model() -> Any:
@@ -211,13 +209,10 @@ def _load_model() -> Any:
 
 
 def prewarm() -> threading.Thread:
-    """On a background thread at startup: load the model (so the first speak()
-    isn't stalled by the one-time ONNX load) and render any missing filler audio
-    to disk. Returns the thread (mainly so tests can join it)."""
-    def _warm() -> None:
-        _load_model()
-        generate_fillers()
-    t = threading.Thread(target=_warm, name="calliope-prewarm", daemon=True)
+    """On a background thread at startup: load the model, so the first speak()
+    isn't stalled by the one-time ONNX load. Renders nothing to disk. Returns
+    the thread (mainly so tests can join it)."""
+    t = threading.Thread(target=_load_model, name="calliope-prewarm", daemon=True)
     t.start()
     return t
 
@@ -269,9 +264,9 @@ def synthesize(text: str, *, voice: Optional[str] = None) -> Optional[np.ndarray
 
 
 # ── kokoro sample rate ─────────────────────────────────────────────────────────
-# 24 kHz is a fact about kokoro's output, not about playback — save_wav/
-# load_wav (the shared WAV seam Echo reuses) need it for the file format
-# regardless of who owns the device. Every call to harmonia.play() below
+# 24 kHz is a fact about kokoro's output, not about playback — save_wav (the
+# shared WAV seam Echo reuses) needs it for the file format regardless of who
+# owns the device. Every call to harmonia.play() below
 # passes it explicitly (harmonia.py itself assumes no rate — see its D3).
 SAMPLE_RATE = 24000
 
@@ -303,7 +298,7 @@ def _split_sentences(text: str) -> list[str]:
 #     harmonia.play() — Harmonia's own queue provides the actual back-to-back
 #     device playback now. The release worker's only remaining job is deciding
 #     WHEN to make that first call (the prebuffer gate, below); Harmonia is not
-#     told about turns, fillers, or gates at all.
+#     told about turns or gates at all.
 # The FIRST chunk of a turn is capped SMALL (_FIRST_CHUNK_MAX_CHARS) and split at
 # a clause boundary, so a long opening sentence doesn't make you wait its whole
 # synth before the first word — speech starts in a couple of seconds. Later
@@ -318,29 +313,31 @@ _CHUNK_MAX_CHARS = int(_CONFIG.get("chunk_max_chars", _DEFAULTS["chunk_max_chars
 # Lookahead depth: hold the answer until this many chunks are synthesized before
 # playback starts, so a lead exists before the first word. Because synth is now
 # faster than real time (RTF < 1), once the lead exists it only grows — gaps
-# vanish structurally. The filler covers this wait. Only applies to auto-speak
-# turns (a filler is playing); the manual speak button plays immediately.
+# vanish structurally. The wait is UNCONDITIONAL: a pre-rendered filler line
+# used to mask it and used to be the only reason to wait at all, but the fillers
+# are gone (2026-09-07) and the lead is worth having on its own. What keeps the
+# wait from ever being felt is the OTHER release condition — a turn whose text
+# is already complete never waits, which covers both a short answer and the
+# manual speak button (home_panel._speak calls end_turn() straight after
+# speak(), because for it all the text is in by definition). Without that,
+# a one-chunk answer would sit on _PREBUFFER_TIMEOUT.
 _PREBUFFER_CHUNKS = int(_CONFIG.get("prebuffer_chunks", _DEFAULTS["prebuffer_chunks"]))
 _PREBUFFER_TIMEOUT = 6.0       # s — safety cap so prebuffer can never hang
 _RELEASE_BUFFER = 16           # max synthesized chunks held ahead of release
 
 _text_queue: "queue.Queue[str]" = queue.Queue()
-# Release items are (epoch, pcm) — real answer chunks awaiting the prebuffer
-# gate. Fillers never touch this queue: they bypass the gate entirely and go
-# straight to harmonia.play() from speak_filler().
+# Release items are (epoch, pcm) — answer chunks awaiting the prebuffer gate.
 _release_queue: "queue.Queue[tuple[int, np.ndarray]]" = queue.Queue(maxsize=_RELEASE_BUFFER)
 _workers_started = False
 _workers_lock = threading.Lock()
 _epoch = 0
 _epoch_lock = threading.Lock()
-_real_audio_queued = False     # has the synth worker produced answer audio this turn?
 
 # Prebuffer state, guarded by _cond: how many answer chunks have been synthesized
-# this turn, whether the turn's text is fully in, and whether a filler is masking.
+# this turn, and whether the turn's text is fully in.
 _cond = threading.Condition()
 _answer_produced = 0
 _turn_ended = False
-_filler_active = False
 
 # Boundaries to break a long chunk at, best first: sentence end, then a clause
 # mark, then any space. Each keeps its punctuation with the left side.
@@ -403,11 +400,8 @@ def _synth_worker() -> None:
         audio = synthesize(chunk)
         if audio is None:
             continue
-        global _real_audio_queued
         with _epoch_lock:
-            stale = worker_epoch != _epoch
-            if not stale:
-                _real_audio_queued = True     # real answer audio has begun this turn
+            stale = worker_epoch != _epoch    # barged in mid-synthesis
         if stale:
             continue
         _release_queue.put((worker_epoch, audio))    # blocks if full (backpressure)
@@ -419,12 +413,10 @@ def _synth_worker() -> None:
 
 def _release_worker() -> None:
     """Pull synthesized chunks in order and hand each to harmonia.play(). The
-    FIRST answer chunk of a turn waits for a prebuffered lead (while a filler
-    covers the silence via speak_filler()'s direct harmonia.play() call);
-    later chunks in the same turn forward immediately, so once the lead
-    exists Harmonia's own queue plays them back-to-back with no gap. Skips
-    chunks left over from a barged-in turn (epoch mismatch) instead of
-    forwarding them."""
+    FIRST chunk of a turn waits for a prebuffered lead; later chunks in the
+    same turn forward immediately, so once the lead exists Harmonia's own
+    queue plays them back-to-back with no gap. Skips chunks left over from a
+    barged-in turn (epoch mismatch) instead of forwarding them."""
     started_epoch = -1
     while True:
         ep, audio = _release_queue.get()
@@ -439,13 +431,17 @@ def _release_worker() -> None:
 
 
 def _await_prebuffer(ep: int) -> None:
-    """Block until _PREBUFFER_CHUNKS answer chunks are synthesized (or the turn's
-    text is fully in, or a safety timeout) — but only when a filler is masking the
-    wait. Without a filler (the manual speak button) playback starts immediately."""
+    """Block until _PREBUFFER_CHUNKS chunks are synthesized — or the turn's text
+    is fully in, or a safety timeout — so a lead exists before the first word
+    and every later chunk plays back-to-back.
+
+    UNCONDITIONAL as of 2026-09-07: it used to return at once unless a filler
+    was masking the wait, and with the fillers gone that would have made the
+    whole gate unreachable. A turn whose text is ALREADY complete still never
+    waits — that is _turn_ended, and it is what keeps a one-chunk answer (or
+    the manual speak button) from sitting here until the timeout."""
     deadline = time.monotonic() + _PREBUFFER_TIMEOUT
     with _cond:
-        if not _filler_active:
-            return
         while (_answer_produced < _PREBUFFER_CHUNKS and not _turn_ended
                and ep == _epoch and time.monotonic() < deadline):
             _cond.wait(timeout=0.2)
@@ -500,35 +496,23 @@ def stop() -> None:
     cross-thread device call (the old sd.stop() race that crashed the app on
     barge-in is gone; see harmonia.py + CONVENTIONS §12). Side effect: because
     Harmonia has no channels, this also stops a briefing Orpheus has playing."""
-    global _epoch, _real_audio_queued, _answer_produced, _turn_ended, _filler_active
+    global _epoch, _answer_produced, _turn_ended
     with _epoch_lock:
         _epoch += 1
-        _real_audio_queued = False
     with _cond:                    # reset the prebuffer gate for the new turn
         _answer_produced = 0
         _turn_ended = False
-        _filler_active = False
         _cond.notify_all()
     _drain(_text_queue)
     _drain(_release_queue)
     harmonia.stop()
 
 
-# ── Filler audio ──────────────────────────────────────────────────────────────
-# kokoro on CPU is slower than real time, so the opening of an answer always has
-# some synth latency. Rather than fight it, we mask it: a short filler line
-# ("Initiating Cogitator. Please wait.") is synthesized ONCE at startup, cached
-# to disk as a WAV, and played INSTANTLY (no synthesis) when a question is asked
-# — buying the real answer a few seconds to generate and get the pipeline ahead.
-# Filler phrases live in the config; the cache filename hashes phrase+voice+speed
-# so changing any of them regenerates cleanly.
-
-
-def _filler_path(phrase: str) -> Path:
-    # Include the model so switching models (e.g. int8 -> fp32) regenerates fillers.
-    key = f"{phrase}|{_voice}|{_CONFIG['speed']}|{_CONFIG['model_path']}"
-    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
-    return _FILLER_DIR / f"filler_{digest}.wav"
+# ── WAV seam (shared with Echo) ───────────────────────────────────────────────
+# The one place kokoro PCM becomes a file. tools/echo.py reuses save_wav so
+# there is no second WAV writer in the stack. There is deliberately no reader:
+# load_wav existed only to replay the pre-rendered filler cache, and went with
+# it (2026-09-07).
 
 
 def save_wav(path: Path, pcm: np.ndarray) -> None:
@@ -541,77 +525,15 @@ def save_wav(path: Path, pcm: np.ndarray) -> None:
         w.writeframes(ints.tobytes())
 
 
-def load_wav(path: Path) -> np.ndarray:
-    """Read a 16-bit WAV back to float32 [-1, 1] PCM."""
-    with wave.open(str(path), "rb") as w:
-        frames = w.readframes(w.getnframes())
-    return np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
-
-
-def generate_fillers() -> None:
-    """Synthesize any not-yet-cached filler phrase to disk. Called from prewarm();
-    each phrase is rendered once, then reused across launches. Never raises."""
-    phrases = _CONFIG.get("fillers") or []
-    if not phrases:
-        return
-    try:
-        _FILLER_DIR.mkdir(parents=True, exist_ok=True)
-    except Exception as e:  # noqa: BLE001
-        log.error("Calliope: could not create filler dir (%s)", e)
-        return
-    for phrase in phrases:
-        path = _filler_path(phrase)
-        if path.is_file():
-            continue
-        audio = synthesize(phrase)
-        if audio is None:
-            continue
-        try:
-            save_wav(path, audio)
-            log.info("Calliope: cached filler %r", phrase)
-        except Exception as e:  # noqa: BLE001
-            log.error("Calliope: could not save filler %r (%s)", phrase, e)
-
-
-def filler_delay_ms() -> int:
-    """How long the GUI should wait after Enter before firing the filler (a beat
-    so it doesn't react the instant you hit the key). Config-driven, ms."""
-    return int(_CONFIG.get("filler_delay_ms", _DEFAULTS["filler_delay_ms"]))
-
-
-def speak_filler() -> None:
-    """Play a random PRE-RENDERED filler line immediately (no synthesis), to cover
-    the wait while the real answer generates. No-op if no filler is cached yet, or
-    if the real answer's audio has already begun (a fast answer beat us to it — a
-    late filler must never jump ahead of real speech). NON-BLOCKING and never
-    raises — safe to call from the UI thread. Bypasses the prebuffer gate and the
-    release queue entirely: it goes straight to harmonia.play(), so it is already
-    "ahead" of the real answer's first chunk (which is still waiting on the gate)
-    and Harmonia's FIFO keeps the order right without Calliope tracking an epoch
-    for it."""
-    with _epoch_lock:
-        if _real_audio_queued:
-            return
-    phrases = _CONFIG.get("fillers") or []
-    ready = [p for p in phrases if _filler_path(p).is_file()]
-    if not ready:
-        return
-    try:
-        pcm = load_wav(_filler_path(random.choice(ready)))
-    except Exception as e:  # noqa: BLE001
-        log.error("Calliope: could not load filler (%s)", e)
-        return
-    _ensure_workers()
-    with _cond:
-        global _filler_active
-        _filler_active = True                 # arms the prebuffer gate to mask the wait
-    harmonia.play(pcm, SAMPLE_RATE, tag="filler")
-
-
 def end_turn() -> None:
-    """Signal that the answer's text is fully streamed in — releases the prebuffer
-    gate so a short answer (fewer than _PREBUFFER_CHUNKS chunks) plays without
-    waiting. Called by the GUI when Pythia finishes. Never raises."""
+    """Signal that this turn's text is all in — releases the prebuffer gate so a
+    short answer (fewer than _PREBUFFER_CHUNKS chunks) plays without waiting.
+
+    Called by the GUI when Pythia finishes streaming, and by the manual speak
+    button, which has the whole text up front. Since the gate stopped being
+    filler-conditional this is the ONLY thing keeping a one-chunk answer off
+    the _PREBUFFER_TIMEOUT — a caller that hands over complete text and does
+    not call this will stall. Never raises."""
     global _turn_ended
     with _cond:
         _turn_ended = True
@@ -654,18 +576,15 @@ def set_voice(voice: str) -> None:
     """Set the narration voice (runtime only — does not rewrite the config;
     voices.save_pythia_voice() is what makes a pick survive a restart).
 
-    A real change re-renders the filler cache on a daemon thread: _filler_path()
-    hashes the voice, so the cached WAVs are keyed to the OLD voice and
-    speak_filler() would find none and silently no-op. Backgrounded because each
-    phrase is a full kokoro synthesis and this is called from the UI thread."""
+    Sets a global and returns — safe to call straight from the UI thread. It
+    used to fire a daemon thread to re-render the voice-keyed filler cache;
+    with the fillers gone nothing is cached per voice, so a switch is free."""
     global _voice
     voice = str(voice)
     if not voice or voice == _voice:
         return
     _voice = voice
     log.info("Calliope: narration voice set to %s", voice)
-    threading.Thread(target=generate_fillers, name="calliope-fillers",
-                     daemon=True).start()
 
 
 # ── Standalone demo ───────────────────────────────────────────────────────────

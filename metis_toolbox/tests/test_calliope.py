@@ -23,6 +23,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import wave
 from pathlib import Path
 from unittest import mock
 
@@ -54,10 +55,8 @@ class _CalliopeBase(unittest.TestCase):
                        calliope._voice)
         calliope._model = None
         calliope._model_tried = False
-        calliope._real_audio_queued = False
         calliope._answer_produced = 0
         calliope._turn_ended = False
-        calliope._filler_active = False
         self._drain()
 
     def tearDown(self):
@@ -93,9 +92,7 @@ class TestConfigDefaults(_CalliopeBase):
                 self.assertEqual(default, shipped[key])
 
     def test_defaults_cover_every_tunable_config_key(self):
-        # 'fillers' is prose, not a tunable: absent, generate_fillers() renders
-        # none and the narrator still speaks, so it is deliberately undefaulted.
-        missing = set(self._shipped()) - set(calliope._DEFAULTS) - {"fillers"}
+        missing = set(self._shipped()) - set(calliope._DEFAULTS)
         self.assertEqual(missing, set())
 
     def test_config_absent_still_yields_a_loadable_model_path(self):
@@ -206,8 +203,9 @@ class TestSynthesize(_CalliopeBase):
 
 
 class TestNarrationVoice(_CalliopeBase):
-    """Runtime narration voice — the _auto_speak precedent, plus a filler-cache
-    invalidation the flag doesn't have."""
+    """Runtime narration voice — the _auto_speak precedent. Setting it used to
+    also re-render a voice-keyed filler cache on a daemon thread; with the
+    fillers gone it sets a global and returns, so these pin only that."""
 
     def test_seeded_from_the_config(self):
         self.assertEqual(calliope.configured_voice(), calliope._CONFIG["voice"])
@@ -215,8 +213,7 @@ class TestNarrationVoice(_CalliopeBase):
     def test_set_voice_changes_what_synthesize_uses(self):
         pcm = np.zeros(10, dtype=np.float32)
         fake = _fake_model(pcm)
-        with mock.patch("calliope.generate_fillers"):
-            calliope.set_voice("bf_emma")
+        calliope.set_voice("bf_emma")
         self.assertEqual(calliope.narration_voice(), "bf_emma")
         with mock.patch("calliope._load_model", return_value=fake):
             calliope.synthesize("hello")
@@ -225,33 +222,21 @@ class TestNarrationVoice(_CalliopeBase):
     def test_set_voice_does_not_rewrite_the_config(self):
         # Runtime only — voices.save_pythia_voice() is what persists a pick.
         before = calliope._CONFIG["voice"]
-        with mock.patch("calliope.generate_fillers"):
-            calliope.set_voice("bm_lewis")
+        calliope.set_voice("bm_lewis")
         self.assertEqual(calliope._CONFIG["voice"], before)
 
-    def test_a_real_change_regenerates_the_filler_cache(self):
-        # _filler_path hashes the voice, so the cached WAVs belong to the OLD
-        # voice; without this speak_filler() silently finds nothing.
-        with mock.patch("calliope.generate_fillers") as gen:
-            calliope.set_voice("am_onyx")
-            for t in threading.enumerate():          # let the daemon finish
-                if t.name == "calliope-fillers":
-                    t.join(timeout=5)
-        gen.assert_called_once()
+    def test_a_no_op_change_is_ignored(self):
+        before = calliope.narration_voice()
+        calliope.set_voice(before)
+        calliope.set_voice("")                       # blank is not a voice
+        self.assertEqual(calliope.narration_voice(), before)
 
-    def test_a_no_op_change_regenerates_nothing(self):
-        with mock.patch("calliope.generate_fillers") as gen:
-            calliope.set_voice(calliope.narration_voice())
-            calliope.set_voice("")
-        gen.assert_not_called()
-
-    def test_filler_path_is_keyed_to_the_voice(self):
-        with mock.patch("calliope.generate_fillers"):
-            calliope.set_voice("af_bella")
-            a = calliope._filler_path("one moment")
-            calliope.set_voice("bm_daniel")
-            b = calliope._filler_path("one moment")
-        self.assertNotEqual(a, b)
+    def test_set_voice_spawns_no_thread(self):
+        """It used to background a filler re-render; nothing is cached per
+        voice now, so a switch from the UI thread must cost nothing."""
+        before = set(threading.enumerate())
+        calliope.set_voice("am_onyx")
+        self.assertEqual(set(threading.enumerate()) - before, set())
 
 
 class TestSpeakEnqueues(_CalliopeBase):
@@ -284,105 +269,69 @@ class TestStop(_CalliopeBase):
 
 
 class TestPrewarm(_CalliopeBase):
-    def test_prewarm_loads_model_and_generates_fillers(self):
+    def test_prewarm_loads_the_model_and_renders_nothing(self):
+        """It used to render the filler cache to disk as well. Now the only
+        startup cost is the one-time ONNX load."""
         with mock.patch("calliope._load_model") as lm, \
-                mock.patch("calliope.generate_fillers") as gf:
+                mock.patch("calliope.save_wav") as save:
             t = calliope.prewarm()
             t.join(timeout=2)
         lm.assert_called_once()
-        gf.assert_called_once()
+        save.assert_not_called()
 
 
-class TestFillers(_CalliopeBase):
+class TestWavSeam(_CalliopeBase):
+    """save_wav is the one WAV writer in the stack — tools/echo.py reuses it
+    rather than owning a second one, so this guards Echo as much as Calliope.
+    (Its load_wav counterpart went with the filler cache that was its only
+    reader; the round trip is now asserted against the stdlib reader.)"""
+
     def setUp(self):
         super().setUp()
         self._tmp = tempfile.TemporaryDirectory()
-        self._orig_dir = calliope._FILLER_DIR
-        calliope._FILLER_DIR = Path(self._tmp.name)
 
     def tearDown(self):
-        calliope._FILLER_DIR = self._orig_dir
         self._tmp.cleanup()
         super().tearDown()
 
-    def test_filler_path_is_deterministic_and_scoped(self):
-        p1 = calliope._filler_path("Hello.")
-        p2 = calliope._filler_path("Hello.")
-        p3 = calliope._filler_path("Different.")
-        self.assertEqual(p1, p2)
-        self.assertNotEqual(p1, p3)
-        self.assertEqual(p1.parent, calliope._FILLER_DIR)
-
-    def test_wav_round_trip(self):
+    def test_save_wav_round_trips_through_a_plain_wave_reader(self):
         pcm = (np.sin(np.linspace(0, 20, 2400)) * 0.5).astype(np.float32)
         path = Path(self._tmp.name) / "t.wav"
         calliope.save_wav(path, pcm)
-        back = calliope.load_wav(path)
+        with wave.open(str(path), "rb") as w:
+            self.assertEqual(w.getnchannels(), 1)
+            self.assertEqual(w.getsampwidth(), 2)
+            self.assertEqual(w.getframerate(), calliope.SAMPLE_RATE)
+            frames = w.readframes(w.getnframes())
+        back = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
         self.assertEqual(back.shape, pcm.shape)
         self.assertLess(float(np.max(np.abs(back - pcm))), 1e-3)   # int16 quantization
 
-    def test_generate_fillers_renders_missing(self):
-        pcm = np.zeros(1200, dtype=np.float32)
-        with mock.patch("calliope.synthesize", return_value=pcm) as synth:
-            calliope.generate_fillers()
-        phrases = calliope._CONFIG["fillers"]
-        self.assertEqual(synth.call_count, len(phrases))          # one render each
-        for phrase in phrases:
-            self.assertTrue(calliope._filler_path(phrase).is_file())
-
-    def test_generate_fillers_skips_existing(self):
-        pcm = np.zeros(1200, dtype=np.float32)
-        phrases = calliope._CONFIG["fillers"]
-        calliope._FILLER_DIR.mkdir(parents=True, exist_ok=True)
-        calliope.save_wav(calliope._filler_path(phrases[0]), pcm)   # pre-cache one
-        with mock.patch("calliope.synthesize", return_value=pcm) as synth:
-            calliope.generate_fillers()
-        self.assertEqual(synth.call_count, len(phrases) - 1)      # the cached one skipped
-
-    def test_speak_filler_plays_cached_audio_and_arms_gate(self):
-        pcm = np.zeros(600, dtype=np.float32)
-        phrase = calliope._CONFIG["fillers"][0]
-        calliope._FILLER_DIR.mkdir(parents=True, exist_ok=True)
-        calliope.save_wav(calliope._filler_path(phrase), pcm)
-        with mock.patch("calliope._ensure_workers"), \
-                mock.patch.object(harmonia, "play") as hplay:
-            calliope.speak_filler()
-        hplay.assert_called_once()
-        args, kwargs = hplay.call_args
-        self.assertEqual(len(args[0]), 600)                # the cached pcm
-        self.assertEqual(args[1], calliope.SAMPLE_RATE)     # explicit rate (D3)
-        self.assertEqual(kwargs.get("tag"), "filler")
-        self.assertTrue(calliope._filler_active)           # prebuffer gate armed
-
-    def test_speak_filler_noop_when_none_cached(self):
-        with mock.patch("calliope._ensure_workers") as ew, \
-                mock.patch.object(harmonia, "play") as hplay:
-            calliope.speak_filler()                              # empty dir
-        hplay.assert_not_called()
-        ew.assert_not_called()
-
-    def test_speak_filler_skips_when_real_audio_already_queued(self):
-        # A fast answer beat the delayed filler — it must not play over real speech.
-        pcm = np.zeros(600, dtype=np.float32)
-        phrase = calliope._CONFIG["fillers"][0]
-        calliope._FILLER_DIR.mkdir(parents=True, exist_ok=True)
-        calliope.save_wav(calliope._filler_path(phrase), pcm)
-        calliope._real_audio_queued = True
-        with mock.patch("calliope._ensure_workers"), \
-                mock.patch.object(harmonia, "play") as hplay:
-            calliope.speak_filler()
-        hplay.assert_not_called()
-
-    def test_filler_delay_from_config(self):
-        self.assertEqual(calliope.filler_delay_ms(),
-                         int(calliope._CONFIG.get("filler_delay_ms", 1000)))
-
 
 class TestPrebuffer(_CalliopeBase):
-    def test_no_wait_without_filler(self):
-        # The manual speak button (no filler) must never block on the prebuffer.
-        calliope._filler_active = False
+    def test_the_gate_waits_with_no_filler_in_sight(self):
+        """The inverse of the old test. The gate used to short-circuit unless a
+        filler was masking the wait; with the fillers gone that would have made
+        it unreachable, so it now always builds a lead."""
+        import threading as _t
+        import time as _time
         calliope._answer_produced = 0
+        calliope._turn_ended = False
+        done = _t.Event()
+        _t.Thread(target=lambda: (calliope._await_prebuffer(calliope._epoch),
+                                  done.set()), daemon=True).start()
+        self.assertFalse(done.wait(timeout=0.3))         # still holding
+        with calliope._cond:
+            calliope._answer_produced = calliope._PREBUFFER_CHUNKS
+            calliope._cond.notify_all()
+        self.assertTrue(done.wait(timeout=2))
+
+    def test_a_completed_turn_never_waits(self):
+        """_turn_ended is the ONLY thing keeping a one-chunk answer — or the
+        manual speak button, which calls end_turn() straight after speak() —
+        off the full _PREBUFFER_TIMEOUT."""
+        calliope._answer_produced = 0
+        calliope._turn_ended = True
         start = __import__("time").perf_counter()
         calliope._await_prebuffer(calliope._epoch)       # returns at once
         self.assertLess(__import__("time").perf_counter() - start, 0.1)
@@ -393,10 +342,9 @@ class TestPrebuffer(_CalliopeBase):
         self.assertTrue(calliope._turn_ended)
 
     def test_wait_releases_once_enough_produced(self):
-        # With a filler active, the gate opens as soon as prebuffer_chunks land.
+        # The gate opens as soon as prebuffer_chunks land.
         import threading as _t
         import time as _time
-        calliope._filler_active = True
         calliope._answer_produced = 0
         calliope._turn_ended = False
         done = _t.Event()

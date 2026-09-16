@@ -161,6 +161,9 @@ class FelhavenApp:
         self.kairos = Kairos(self.root)
         self.kairos.register_panel("horai",      self._views["horai"])
         self.kairos.register_panel("horai",      self.header_clock)
+        # HomePanel only needs this to refresh its Ammit status badge (its own
+        # chat state stays event-driven, not Kairos-timed) — see home_panel.py.
+        self.kairos.register_panel("horai",      self._views["felhaven"])
         self.kairos.register_panel("hephaestus", self._views["moderati"].hephaestus)
         self.kairos.register_panel("aether",     self._views["moderati"].hephaestus.aether)
         self.kairos.register_panel("emanon",     self._views["moderati"].emanon)
@@ -187,9 +190,10 @@ class FelhavenApp:
         # question/answer isn't stalled by a cold load: Calliope's kokoro-onnx
         # model (one-time ONNX load) and Pythia's gemma4:e2b (~100s Ollama cold
         # load). Both are best-effort and silent if unavailable.
-        # Point narration at the user's saved voice BEFORE prewarm: prewarm
-        # renders the filler cache, whose key includes the voice, so seeding
-        # afterwards would render the config default and immediately re-render.
+        # Point narration at the user's saved voice before prewarm, so the
+        # very first thing spoken is already in the right voice. (This used to
+        # be load-bearing — prewarm rendered a voice-keyed filler cache — but
+        # the fillers are gone and set_voice() now just sets a global.)
         calliope.set_voice(voices.pythia_voice())
         calliope.prewarm()
         pythia.prewarm()

@@ -14,24 +14,41 @@ Contract:    A hybrid flavor, new to the stack — document it here so future-yo
                             never raises ("morpheus not playing" is a normal
                             state, not a fault — deliberate deviation from the
                             raise-on-failure norm the other fetch()es follow).
-               - mutations: play / toggle_pause / next_track / prev_track /
-                            stop fire from deliberate UI action in
-                            MorpheusPanel — plus one non-UI caller: harmonia.py
-                            calls stop() at the top of its play(), which runs on
-                            whatever thread entered play() — Calliope's release
-                            worker (speech) or the UI thread (a filler or an
-                            Orpheus briefing), never Harmonia's own play worker
-                            (which only touches sounddevice) — to yield the
-                            speaker before Calliope or Orpheus makes sound. Safe
-                            because _ipc() opens the pipe fresh per call and
-                            never raises.
+                            It DOES carry an "error" slug when a load failed —
+                            see "Load failures" below. Read-only still holds:
+                            detecting the failure only reads properties.
+               - is_audible(): a FREE read of the snapshot fetch() last took,
+                            for callers on a fast UI chain (HomePanel's ~16 Hz
+                            face tick). No IPC, so it can be one Kairos tick
+                            stale. Its docstring says why "running" is not the
+                            test — mpv stays up and idle after a track ends.
+               - mutations: play / toggle_pause / set_paused / next_track /
+                            prev_track / stop / set_volume fire from
+                            deliberate UI action in
+                            MorpheusPanel — plus two non-UI callers: harmonia.py
+                            calls duck() at the top of its play() and unduck()
+                            from its tick_yield(). duck() runs on whatever
+                            thread entered play() — Calliope's release worker
+                            (speech) or the UI thread (an Orpheus briefing),
+                            never Harmonia's own play worker (which
+                            only touches sounddevice); unduck() always runs on
+                            the main thread. Safe because _ipc() opens the pipe
+                            fresh per call and never raises. Harmonia does NOT
+                            call stop() any more — see "Ducking" for why that
+                            matters.
              TOOL_DEFINITIONS (plural — see CONVENTIONS §3/§8) exposes two
-             tools: play_music — "play this song" searches YouTube's top hit
-             and plays it (it mutates audio, not records, so it's a safe LLM
-             tool) — and resume_music — bring back whatever play_music (or
-             the panel) last started, after it was interrupted. Other
-             playback controls (pause/skip) stay panel-driven for now; a
-             companion tool can be added later if wanted.
+             tools, split by what they do rather than by verb count:
+               - play_music    : "play this song" searches YouTube's top hit
+                                 and plays it. STARTS something new. (It
+                                 mutates audio, not records, so it's a safe
+                                 LLM tool.)
+               - control_music : governs what is ALREADY playing — one
+                                 `action` enum over pause / resume / stop /
+                                 next / previous / replay / status / volume.
+                                 See "Control surface" below.
+             Five separate transport tools would be five schemas billed on
+             every request to a small local model; one enum is the ammit
+             (manage_timer) precedent.
 
 Source:      Two external binaries, zero new pip packages, stdlib-only Python.
                - mpv     : headless audio engine, driven over its JSON IPC
@@ -58,6 +75,179 @@ Resume:      mpv saves the playback position on quit (--save-position-on-quit)
              so a mid-session stop or a switch to another video saves your place
              too, not only app close.
 
+Control      control_music is a STATE MACHINE over one `action` enum
+surface:     (_CONTROL_ACTIONS), and two of its properties are load-bearing
+             rather than incidental:
+
+               - pause/resume are IDEMPOTENT, and route through set_paused(),
+                 never toggle_pause(). A toggle is wrong for a caller that
+                 cannot see the current state: the model would flip the music
+                 back on by retrying a call it thought had timed out. The panel
+                 keeps toggle_pause() because a human IS looking at the glyph —
+                 two affordances, not duplication.
+               - every mutating action is GATED on status()["running"]. _ipc()
+                 never raises and silently does nothing when the pipe is down
+                 (see _ipc), which is survivable for a button — the human sees
+                 nothing happen — but not for a tool, which would otherwise
+                 report success into the model's context. Two exceptions, both
+                 because they do not depend on a live pipe: replay starts mpv
+                 itself via play(), and volume is module state that
+                 _ensure_mpv applies on the next spawn.
+
+             Every action returns the post-action status(), so the model can see
+             what it did without a second call. Two consequences worth knowing
+             before reading a surprising result:
+               - after next/previous/replay the title can LAG one Kairos tick,
+                 because loadfile is fire-and-forget (see "Load failures").
+                 Not worth a sleep to hide; the next poll corrects it.
+               - a load failure arrives NESTED, as status["error"]. A top-level
+                 "error" means the tool call itself failed; a nested one means
+                 the call worked and the player has a problem.
+
+             status() is read-only but not side-effect-free: it runs
+             _judge_pending_load, so a tool call can confirm or condemn a
+             pending load between Kairos ticks. That is the same verdict Kairos
+             would have reached two seconds later, on the same evidence.
+
+Load         loadfile is FIRE-AND-FORGET over IPC: mpv resolves the URL through
+failures:    yt-dlp asynchronously and reports nothing back on the write. So a
+             load that fails (a dead video, or — the 2026-08-20 outage — a
+             yt-dlp too old for YouTube, whose resolved media URL then 403s)
+             used to leave the panel showing "(loading…)" forever, with not one
+             line in felhaven.log. A whole subsystem could go dark silently.
+
+             The fix is intent-tracking, not event subscription. play() stamps
+             _pending_load; status() then watches for mpv having gone back to
+             idle with nothing loaded (idle-active True, path None) while a load
+             was outstanding, and calls that a failure. Measured signatures
+             (2026-08-20, real mpv):
+                 loading  — idle-active False, path <url>, time-pos None
+                 playing  — idle-active False, path <url>, time-pos advancing
+                 FAILED   — idle-active True,  path None,  playlist-count 1
+                 stopped  — idle-active True,  path None,  playlist-count 0
+             mpv never passes through idle-active True during a good load, so
+             the signal is definitive rather than a heuristic. _PENDING_GRACE
+             exists only to cover the few ms between our loadfile write and mpv
+             acting on it — not to guess at how slow a resolve might be.
+
+             Note the trap in that table: `path` is set during LOADING as well
+             as during playing, so it means "mpv accepted this URL", not "the
+             load worked". Confirmation therefore reads time-pos/duration —
+             media existing — and _judge_pending_load explains why at length.
+
+             Deliberately NOT an event-subscription reader: mpv's end-file event
+             would need a persistent pipe connection and a dedicated reader
+             thread, and §6 gives timing to Kairos. This rides the 2 s status
+             tick that already exists and adds no thread.
+
+             The resulting slug is sticky (_load_error) so the panel can show it
+             until the user's next play()/stop(), rather than blinking past in
+             one tick. It is a BARE slug — mpv's own text is never spliced in
+             (§2: no raw external text into a dict the model and screen read;
+             mpv's log lines carry full signed googlevideo URLs). The reason
+             goes to the logs instead.
+
+Ducking:     Narration does not STOP music, it lowers it: harmonia.play() calls
+             duck() before buffering any audio, and harmonia.tick_yield() calls
+             unduck() once its buffer has been quiet for a beat.
+
+             It used to call stop(), and that was a real bug. loadfile is
+             fire-and-forget (see "Load failures"), so play_music returned
+             {"now_playing": ...} while yt-dlp was still resolving, and the
+             answer's own first speech chunk killed the resolve seconds later.
+             Measured 2026-09-07 in logs/mpv/mpv.log: loadfile at t=0.223,
+             stop at t=2.585, "ytdl_hook: Subprocess failed: killed". Worse,
+             stop() disarms load tracking, so the kill reported nothing at
+             all — Pythia said the song was playing while mpv sat idle.
+
+             Uses mpv's own `volume` property, NOT `ao-volume` (which is the
+             system mixer). Verified settable over this pipe against this
+             build (mpv v0.41.0, 2026-08-20): 100.0 -> 30.0 -> 100.0.
+
+             The duck target is a RATIO of the user's level (_DUCK_RATIO), not
+             a fixed floor. With the volume at 20, ducking to a constant 30
+             would make the music louder during narration — the opposite of
+             yielding. At the default the arithmetic is unchanged: 100 × 0.30
+             is the same 30.0 the line above was measured at.
+
+             Both calls are WRITE-ONLY — no reply is ever waited on. duck()
+             runs on the thread that feeds the audio buffer and unduck() runs
+             on the Tk main thread, and _get_props' timeout cannot interrupt a
+             readline() already blocking, so a reply-wait on either of those
+             threads could stall narration or the UI.
+
+             unduck() restores _user_volume, and it gets that WITHOUT a read.
+             This module tracks the level it set, and that tracking is
+             AUTHORITATIVE rather than a cache, because nothing else can move
+             mpv's volume: --no-config blocks any mpv.conf, there is no window
+             and no terminal to take a keypress, --watch-later-options=start
+             keeps volume out of resume files (below), and set_volume() is the
+             only other writer in the process. So the value a read would return
+             is the value we already hold, and the read that would be unsafe on
+             these threads is simply not needed.
+
+             This is the load-bearing claim of the whole section. What breaks
+             it: a SECOND writer of mpv's volume appearing anywhere, or
+             --no-config / --watch-later-options=start being dropped. Any of
+             those and the tracked value becomes a guess — at which point the
+             read has to come back, and it has to happen off both these
+             threads (the Kairos worker is the place).
+
+             The earlier version of this note said a volume control was the
+             thing that would break the assumption. It was half right: it broke
+             the CONSTANT, not the tracking. Restoring 100 unconditionally
+             would have stomped the user's level on the first narrated answer.
+
+             _ducked is a LATCH, not a counter. Harmonia has one buffer and one
+             drain, so two overlapping ducks are not a reachable state, and a
+             counter would leak a permanent duck on any missed decrement. The
+             latch is also what makes the per-chunk call site cheap: only the
+             first duck of a turn touches the pipe.
+
+             --watch-later-options=start (see _ensure_mpv) exists FOR this.
+             mpv's watch-later files save options that CHANGED since playback
+             started, and `volume` is in its default set — so without the flag
+             a _checkpoint() fired while ducked would bake volume=30 into that
+             track's resume file and quietly restore it on every future play.
+             It now keeps a USER-chosen volume out of those files too, which is
+             what makes the tracked level above trustworthy.
+
+mpv log:     TWO files in logs/mpv/, because mpv's own log is unusable as-is.
+
+             mpv.log — the raw --log-file. A SCRATCH BUFFER, not something to
+             read: ~420 KB per successful track load, dominated by one ~128 KB
+             line (mpv logs yt-dlp's whole JSON dump), and it writes that whether
+             anything went wrong or not — one measured run was 424 KB and 661
+             lines containing zero errors. Its verbosity is NOT tunable:
+             --msg-level does not lower it, because mpv forces the log file to at
+             least -v -v (verified against the binary, 2026-08-20). Truncated by
+             mpv on every start, and deleted by shutdown() once mpv releases the
+             handle, so it does not persist between runs.
+
+             mpv.log is CAPPED at _MPV_LOG_MAX_BYTES, checked on each play().
+             Nothing else can shrink it: mpv's verbosity is not tunable,
+             truncating leaves its file offset stale (the next write re-expands
+             the file with NUL padding), and deleting it while mpv holds the
+             handle does not return the space on Windows. Restarting mpv does
+             all three — it truncates on start and releases the handle — so a
+             load that finds the log too big cycles mpv first. Measurements are
+             in the constant's comment.
+
+             last_failure.log — the distilled record, and the file the panel
+             names. Cut from mpv.log at detection time: a header (wall clock +
+             the URL) and mpv's error-level lines from that attempt, ~3 in
+             practice. Holds exactly ONE failure, overwritten each time, because
+             the most recent is the only one anyone asks for. Survives shutdown.
+
+             Both live in a SUBDIRECTORY of logs/, not beside felhaven.log:
+             emanon.py globs logs/*.log and parses every line of every match on
+             each tick, and neither file is in the METIS " | " format — a
+             subdirectory is invisible to that non-recursive glob.
+
+             Neither is the primary signal: the ERROR line status() writes to
+             felhaven.log is what Emanon surfaces on the dashboard, and it stands
+             on its own if --log-file is ever dropped entirely.
+
 Upstream:    kairos.py (calls fetch), panels/morpheus_panel.py (UI mutations),
              felhaven.py (calls shutdown() on close)
 Downstream:  mpv.exe (audio engine) + yt-dlp.exe (search / URL resolution)
@@ -72,6 +262,15 @@ V0.02:       Audited 2026-07-25 — the last output-contract allowlist entry:
              caller's thread, not a "background play thread"; the playlist path
              corrected to config/. Never-raise verified across fetch/mutations/
              search/play_music/resume_music.
+
+NOTE (2026-08-20, post-audit): --log-file and load-failure detection added after
+a real outage in which a stale yt-dlp made every play a no-op — the panel showed
+"(loading…)" indefinitely and felhaven.log had not one METIS.morpheus line. The
+audit above verified the never-raise contract and the slug vocabulary and both
+still hold; what it did not ask was whether a failure could be SEEN. See the
+"Load failures" and "mpv log" sections. fetch() gained an "error" key, so the §2
+error vocabulary now applies to this module's polled output as well as its tool
+handles — the slug is bare and deliberately carries none of mpv's own text.
 """
 
 import json
@@ -95,6 +294,45 @@ _PLAYLISTS_PATH = os.path.join(_APP_ROOT, "config", "morpheus_playlists.json")
 # disables mpv's default watch-later location — see _ensure_mpv.
 _WATCH_LATER_DIR = os.path.join(_APP_ROOT, "morpheus_watch_later")
 
+# mpv's own log. A SUBDIRECTORY of logs/ on purpose — emanon.py globs
+# logs/*.log (non-recursive) and parses every line of every match each tick;
+# mpv's format is foreign to that parser and its volume would be scanned for
+# nothing. See the "mpv log" docstring section.
+_MPV_LOG_DIR = os.path.join(_APP_ROOT, "logs", "mpv")
+_MPV_LOG_FILE = os.path.join(_MPV_LOG_DIR, "mpv.log")
+
+# The distilled record — just the last failure, a few lines. This is the file a
+# human opens; mpv.log is the scratch buffer it is cut from (see "mpv log").
+_FAILURE_LOG_FILE = os.path.join(_MPV_LOG_DIR, "last_failure.log")
+
+# How much of mpv.log's tail to scan when distilling. A failing load writes
+# ~25 KB, and its lines are always at the very end, so this is generous; the
+# cap is what keeps the read cheap when mpv.log has grown to tens of MB.
+_FAILURE_SCAN_BYTES = 256_000
+# How many of mpv's error lines to keep. A real failure produces ~3.
+_FAILURE_LOG_LINES = 20
+
+# How large mpv.log may get before we recycle mpv to reset it (~120 track
+# loads at the measured ~420 KB each). Felhaven gets left running for days, and
+# a single mpv process would otherwise grow this without limit.
+#
+# Recycling is the only thing that actually reclaims the space. Measured
+# 2026-09-09 against this build:
+#   - lowering mpv's verbosity does not work — --msg-level=all=error and
+#     ytdl_hook=error both leave the log the same size (13.8-14.9 KB at idle
+#     startup); mpv forces --log-file to at least -v -v, as the "mpv log"
+#     section says.
+#   - truncating in place does not work — mpv keeps its old file offset, so its
+#     next write re-expands the file with a hole of NUL bytes (13,710 of them).
+#   - deleting while mpv runs does not work either — Windows holds the space
+#     until the last handle closes, so an unlinked file mpv is still writing to
+#     still costs disk. It merely hides the problem.
+#   - restarting mpv DOES work: it truncates --log-file on every start (three
+#     consecutive runs stayed at ~14 KB), and quitting releases the handle.
+_MPV_LOG_MAX_BYTES = 50_000_000
+# mpv's own error-level marker, e.g. "[   2.284][e][ytdl_hook] ERROR: ...".
+_MPV_ERROR_MARK = "[e]"
+
 # mpv's JSON IPC server. A Windows named pipe — this module is Windows-only by
 # design (named pipes, CREATE_NO_WINDOW). Felhaven is a Windows dashboard.
 _PIPE = r"\\.\pipe\mpv-felhaven"
@@ -111,10 +349,41 @@ _OPEN_BACKOFF = 0.05   # seconds between open attempts
 # AttributeError — the value is only meaningful on Windows anyway.
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+# How long after a loadfile write we refuse to call an idle mpv a failure.
+# This covers ONLY the gap between our write and mpv acting on it — mpv leaves
+# idle-active as soon as it accepts the command, long before the URL resolves,
+# so this is not a resolve-time budget (see the "Load failures" docstring).
+_PENDING_GRACE = 4.0   # seconds
+
+# mpv's `volume` property is a 0-100 scale. _FULL_VOLUME is where mpv boots and
+# the default the user starts from; _DUCK_RATIO is the FRACTION of the user's
+# level narration pulls it down to.
+#
+# A ratio rather than a fixed floor, and not for elegance: with a user volume of
+# 20, ducking to a constant 30 would make the music LOUDER during narration. At
+# the default the arithmetic is unchanged (100 × 0.30 = 30.0), so this preserves
+# the behaviour measured against mpv v0.41.0 exactly.
+_DUCK_RATIO = 0.30
+_FULL_VOLUME = 100.0
+
 # ── Module state ──────────────────────────────────────────────────────────────
 _proc: "subprocess.Popen[bytes] | None" = None   # the headless mpv process, or None
 _request_id = 0                            # IPC request id counter (see _ipc)
 _last_url: "str | None" = None             # last URL play() actually loaded (resume_music)
+# Load tracking (see "Load failures"). _pending_load is the monotonic stamp of
+# the last loadfile we sent and have not yet seen land; _load_error is the
+# sticky slug status() reports until the next play()/stop() clears it.
+_pending_load: "float | None" = None
+_load_error: "str | None" = None
+# Ducking (see "Ducking"). A latch, not a counter.
+_ducked: bool = False
+# The level the user chose, and what unduck() restores to. AUTHORITATIVE, not a
+# cache: this module is mpv's only volume writer, so what we last set is what
+# mpv has. See "Ducking" for the full argument and what would invalidate it.
+_user_volume: float = _FULL_VOLUME
+# The last snapshot status() produced, so a caller on a fast UI chain can ask
+# what is playing without paying for an IPC round trip (see is_audible).
+_last_status: dict[str, Any] = {"running": False}
 
 
 # ── Binary resolution ─────────────────────────────────────────────────────────
@@ -147,7 +416,7 @@ def _ensure_mpv() -> bool:
     Returns False (logging one ERROR) if a binary is missing or the pipe never
     appears — callers (play) simply do nothing in that case.
     """
-    global _proc
+    global _proc, _ducked
     if _proc is not None and _proc.poll() is None:
         return True
 
@@ -164,6 +433,16 @@ def _ensure_mpv() -> bool:
         os.makedirs(_WATCH_LATER_DIR, exist_ok=True)
     except OSError as e:
         log.warning("could not create watch-later dir: %s", e)
+
+    # mpv won't create --log-file's directory either. If we can't make it, run
+    # without the log rather than risk mpv refusing to start over it — the
+    # ERROR line status() writes is the primary signal regardless.
+    try:
+        os.makedirs(_MPV_LOG_DIR, exist_ok=True)
+        log_args = [f"--log-file={_MPV_LOG_FILE}"]
+    except OSError as e:
+        log.warning("could not create mpv log dir (%s) — running without --log-file", e)
+        log_args = []
 
     args = [
         bins["mpv"],
@@ -188,11 +467,25 @@ def _ensure_mpv() -> bool:
         # so without it resume would silently do nothing.
         "--save-position-on-quit",
         f"--watch-later-dir={_WATCH_LATER_DIR}",
+        # Save ONLY the position in those files. mpv otherwise saves every
+        # option that changed since playback started, and `volume` is in its
+        # default set — so a checkpoint taken while ducked (see "Ducking")
+        # would bake volume=30 into that track's resume file for good. Verified
+        # accepted by this build: `mpv --no-config --watch-later-options=start
+        # --version` exits 0 (mpv v0.41.0-744, 2026-09-07).
+        "--watch-later-options=start",
         f"--input-ipc-server={_PIPE}",
         # Pass our resolved yt-dlp explicitly so the bin/ copy wins over any
         # stale yt-dlp already on PATH.
         f"--script-opts=ytdl_hook-ytdl_path={bins['ytdlp']}",
+        # mpv's own diagnostics. --no-terminal + CREATE_NO_WINDOW mean its
+        # stderr goes nowhere, so without this a load failure leaves no trace
+        # anywhere (see the "mpv log" docstring section).
+        *log_args,
     ]
+    # A fresh mpv starts at volume 100, so a latch left over from a process
+    # that died while ducked would suppress the next duck entirely.
+    _ducked = False
     try:
         _proc = subprocess.Popen(args, creationflags=_NO_WINDOW)
     except Exception as e:
@@ -205,9 +498,17 @@ def _ensure_mpv() -> bool:
     for _ in range(10):
         try:
             with open(_PIPE, "r+b", buffering=0):
-                return True
+                pass
         except OSError:
             time.sleep(0.2)
+            continue
+        # The pipe exists, so a command can land. A fresh mpv boots at 100, and
+        # play() recycles mpv when its log grows too big — so without this a
+        # respawn silently returns a user who chose 40 to full blast. Skipped at
+        # the default, where the write would be a no-op.
+        if _user_volume != _FULL_VOLUME:
+            _ipc(["set_property", "volume", _user_volume])
+        return True
 
     log.error("mpv started but its IPC pipe never appeared")
     return False
@@ -218,9 +519,18 @@ def shutdown() -> None:
     Best-effort clean stop. Safe to call when mpv was never started.
     Asks mpv to quit over IPC, then terminates the process if it lingers.
     Hard requirement: no orphan mpv.exe after the app closes.
+
+    Also discards mpv.log once mpv has released it — anything worth keeping was
+    already distilled into last_failure.log, which is deliberately NOT touched
+    here (a failure you close the app on is the one you come back to read).
     """
-    global _proc
+    global _proc, _pending_load, _load_error, _ducked, _last_status
+    _pending_load = None
+    _load_error = None
+    _ducked = False
+    _last_status = {"running": False}   # nothing is audible after this
     if _proc is None:
+        _discard_mpv_log()
         return
     if _proc.poll() is None:
         _ipc(["quit"])                       # polite ask
@@ -237,6 +547,48 @@ def shutdown() -> None:
                 except subprocess.TimeoutExpired:
                     log.warning("mpv did not exit after terminate()+kill()")
     _proc = None
+    _discard_mpv_log()                       # only now is the handle released
+
+
+def _discard_mpv_log() -> None:
+    """Delete the verbose scratch log. Called after mpv has exited — never while
+    it holds the handle. Never raises; a log that outlives one run is harmless
+    (mpv truncates it on the next start anyway)."""
+    try:
+        os.remove(_MPV_LOG_FILE)
+    except FileNotFoundError:
+        pass                                 # never started, or already gone
+    except OSError as e:
+        log.debug("could not remove mpv log: %s", e)
+
+
+def _recycle_if_log_is_huge() -> None:
+    """Restart mpv when its scratch log has outgrown _MPV_LOG_MAX_BYTES.
+
+    Called from play(), which is both the only thing that grows the log
+    (~420 KB per load) and the one moment a restart costs nothing — we are
+    about to replace whatever is loaded anyway, so there is no playlist or
+    position to lose that loadfile was not already going to discard. mpv quits
+    with --save-position-on-quit, so the outgoing track keeps its bookmark.
+
+    Deliberately NOT called from status()/fetch(): those are documented
+    READ-ONLY and Kairos drives them every 2 s. A watcher that restarts the
+    thing it is watching is not a watcher.
+
+    Never raises — a log we cannot stat is simply not capped."""
+    try:
+        size = os.path.getsize(_MPV_LOG_FILE)
+    except OSError:
+        return                               # no log (never started, or no --log-file)
+    if size < _MPV_LOG_MAX_BYTES or _proc is None or _proc.poll() is not None:
+        return
+    log.info("mpv log reached %.1f MB — recycling mpv to reset it", size / 1e6)
+    shutdown()          # quits mpv, releases the handle, then deletes the file
+    # The caller's _ensure_mpv() respawns. Note the duck latch goes with it
+    # (shutdown and _ensure_mpv both clear it): a fresh mpv starts at full
+    # volume, so a track loaded mid-narration plays unducked until the next
+    # speech chunk re-ducks it, ~one chunk later. Self-correcting, and only
+    # reachable once every ~120 loads.
 
 
 # ── IPC client (stdlib only) ──────────────────────────────────────────────────
@@ -393,17 +745,36 @@ def play(url: str) -> None:
     needed. mpv natively queues a full playlist URL; next/prev then walk it.
     Bookmarks the outgoing track first so switching videos keeps its place.
     Remembers `url` as the resume target (resume_music) once actually loaded —
-    not on an early return, so a failed mpv start never overwrites a good one."""
-    global _last_url
+    not on an early return, so a failed mpv start never overwrites a good one.
+
+    Also arms load tracking: loadfile reports nothing back, so status() is what
+    finds out whether this actually landed (see "Load failures").
+
+    Caps mpv's scratch log on the way in — this is the only call that grows it
+    (see _recycle_if_log_is_huge)."""
+    global _last_url, _pending_load, _load_error
+    _recycle_if_log_is_huge()          # before _ensure_mpv, so it respawns clean
     if not _ensure_mpv():
         return
     _checkpoint()                      # bookmark the outgoing track, if any
     _ipc(["loadfile", url, "replace"])
     _last_url = url
+    _pending_load = time.monotonic()   # status() confirms or condemns it
+    _load_error = None                 # a new attempt clears the last verdict
 
 
 def toggle_pause() -> None:
+    """Flip pause state. For the PANEL's ⏯ button, where a human is looking at
+    the glyph and a toggle is what they mean. Callers that cannot see the
+    current state want set_paused() instead — see "Control surface"."""
     _ipc(["cycle", "pause"])
+
+
+def set_paused(flag: bool) -> None:
+    """Pause (True) or unpause (False) explicitly. IDEMPOTENT, which is the
+    whole point: this is what control_music routes through, because a blind
+    caller retrying a toggle turns the music back on."""
+    _ipc(["set_property", "pause", flag])
 
 
 def next_track() -> None:
@@ -417,9 +788,101 @@ def prev_track() -> None:
 def stop() -> None:
     """Stop playback. mpv stays idle and alive, ready for the next play().
     Bookmarks the current position first, so resume works after a mid-session
-    stop and not only on app close."""
+    stop and not only on app close.
+
+    Disarms load tracking: a deliberate stop leaves mpv in exactly the idle
+    state a failed load does, and it is not a failure. The callers that need
+    that are MorpheusPanel's stop button — which can be pressed while a load is
+    still resolving — and shutdown(). Narration is NOT one of them any more: it
+    ducks the volume instead of stopping (see "Ducking"), precisely because
+    this clause, written to suppress a false positive, was also suppressing the
+    true one the yield itself was causing."""
+    global _pending_load, _load_error
+    _pending_load = None
+    _load_error = None
     _checkpoint()
     _ipc(["stop"])
+
+
+# ── Public API — ducking (harmonia's yield) ───────────────────────────────────
+
+def duck() -> None:
+    """Lower mpv's volume so narration can be heard over it. Harmonia calls
+    this before it buffers ANY audio — ONCE PER CHUNK, on whatever thread
+    entered its play().
+
+    That cadence is why _ducked is a latch: the first call of a turn costs one
+    pipe transaction, every later one returns after a poll() and a bool.
+
+    Costs nothing when mpv is not running: the same _proc guard status() uses,
+    so an idle dashboard generates no IPC churn. Never raises (_ipc doesn't).
+
+    WRITE-ONLY, and that is load-bearing rather than a simplification. This runs
+    on the thread that FEEDS THE AUDIO BUFFER, and _ipc() without expect_reply
+    opens, writes and closes without ever waiting on a reply. It must never read
+    the volume back first — _get_props' own timeout "cannot interrupt a single
+    readline() that is already blocking", so a jammed pipe would stall narration
+    itself. It does not need to: _user_volume already IS the answer a read would
+    return (see "Ducking").
+
+    Note what it does NOT touch: _pending_load. That is the entire point — a
+    still-resolving loadfile now survives narration (see "Ducking").
+
+    Known and accepted: starting a track from the panel WHILE narration is
+    speaking begins it ducked, and it comes up when the narration ends. Having
+    play() clear the latch would defeat the yield on exactly the turn the user
+    is most likely to be listening to."""
+    global _ducked
+    if _proc is None or _proc.poll() is not None:
+        return                              # no mpv — nothing to duck
+    if _ducked:
+        return                              # already quiet; no pipe traffic
+    _ipc(["set_property", "volume", _user_volume * _DUCK_RATIO])
+    _ducked = True
+
+
+def unduck() -> None:
+    """Put the volume back up — to the USER's level, not to full. Harmonia
+    calls this from tick_yield() once its buffer has been quiet long enough.
+
+    Free when nothing is ducked — one bool — so it is safe to call at whatever
+    cadence the caller's existing chain runs at (60 ms, today). That matters:
+    the caller is the Tk MAIN THREAD, so like duck() this is write-only and
+    never waits for a reply. Measured worst case against a live mpv with a
+    Kairos-rate poller running alongside: 63 ms.
+
+    The latch is cleared FIRST, so an mpv that died while ducked still leaves
+    clean state behind. Never raises."""
+    global _ducked
+    if not _ducked:
+        return
+    _ducked = False
+    if _proc is None or _proc.poll() is not None:
+        return          # mpv died while ducked — latch cleared, nothing to say
+    _ipc(["set_property", "volume", _user_volume])
+
+
+def set_volume(level: float) -> float:
+    """Set the music volume, 0-100. Returns the level actually stored (clamped).
+
+    Deliberately does NOT write to mpv while ducked. Narration is speaking in
+    that window, and pushing the new level straight through would undo the duck
+    — the music would jump to full over the answer. The level is recorded and
+    unduck() applies it when the duck lifts, which is a beat later and is what
+    the user meant anyway. This is the one branch here worth reading twice.
+
+    Write-only like duck()/unduck(), and for a weaker reason: this one is
+    called from the Kairos worker or the UI, not the audio thread. It stays
+    write-only for consistency, and because there is nothing to read back.
+    Never raises."""
+    global _user_volume
+    _user_volume = max(0.0, min(100.0, float(level)))
+    if _ducked:
+        return _user_volume         # unduck() will apply it — see above
+    if _proc is None or _proc.poll() is not None:
+        return _user_volume         # no mpv; _ensure_mpv reapplies on spawn
+    _ipc(["set_property", "volume", _user_volume])
+    return _user_volume
 
 
 # ── Public API — keyless search (BLOCKING — caller threads it) ────────────────
@@ -471,21 +934,34 @@ def status() -> dict[str, Any]:
     Current playback snapshot. {"running": False} when mpv isn't up — and we
     return that WITHOUT touching the pipe, so an idle dashboard generates no IPC
     churn and no Emanon noise (idle is the normal state).
+
+    Also the load-failure detector (see "Load failures"): it CONFIRMS a pending
+    load the moment mpv reports something loaded, and CONDEMNS one that left mpv
+    idle-with-nothing-loaded. Read-only either way — it only reads properties;
+    the verdict is Python-side state.
     """
+    global _pending_load, _load_error, _last_status
+
     if _proc is None or _proc.poll() is not None:
-        return {"running": False}
+        _last_status = {"running": False}
+        return dict(_last_status)
 
     props = _get_props(["media-title", "pause", "time-pos", "duration",
-                        "playlist-pos", "playlist-count"])
+                        "playlist-pos", "playlist-count", "idle-active"])
 
     # Liveness check: if EVERY property came back None, the pipe is dead or
     # unresponsive even though the process is alive (rare) — fall back to
     # idle. A None title alone (stream still resolving, everything else live)
     # is not a liveness failure — the panel renders that as "(loading…)".
+    # A live mpv always answers idle-active, so this now really does mean the
+    # pipe is gone; we must NOT read that as a load failure.
     if all(v is None for v in props.values()):
-        return {"running": False}
+        _last_status = {"running": False}
+        return dict(_last_status)
 
-    return {
+    _judge_pending_load(props)
+
+    out: dict[str, Any] = {
         "running": True,
         "title":  props["media-title"],         # str | None
         "paused": props["pause"],                # bool | None
@@ -493,7 +969,124 @@ def status() -> dict[str, Any]:
         "dur":    props["duration"],             # float seconds | None
         "pl_pos": props["playlist-pos"],         # int | None
         "pl_n":   props["playlist-count"],       # int | None
+        # Not read off the pipe — we are mpv's only volume writer, so this is
+        # exact and free. It is also what lets the model answer "turn it down a
+        # bit": read the level, do the arithmetic, set the result.
+        "volume": _user_volume,                  # float 0-100
     }
+    if _load_error is not None:
+        out["error"] = _load_error              # bare slug (§2)
+    _last_status = out
+    return dict(out)
+
+
+def is_audible() -> bool:
+    """True when music is actually making sound right now.
+
+    Reads the LAST snapshot status() produced instead of taking a fresh one,
+    because the caller is HomePanel's face tick at ~16 Hz and an IPC round trip
+    at that cadence is exactly what Kairos's 2 s poll exists to avoid. So the
+    answer can be up to one tick stale — the right trade for a mood light, and
+    the wrong one for anything that acts on it. Never does IPC, never raises.
+
+    "Running" is NOT the test. mpv stays alive and idle after a track ends or a
+    load fails, so running alone would leave the face lit forever on a finished
+    playlist. Audible means media EXISTS and is not paused, and media-exists is
+    time-pos/duration — the same evidence _judge_pending_load uses to confirm a
+    load, for the same reason (`path` is set while yt-dlp is still resolving).
+
+    Volume 0 is silence, so it is not audible either — a track playing into a
+    muted output should not sit the face on amber.
+    """
+    return bool(
+        _last_status.get("running")
+        and not _last_status.get("paused")
+        and (_last_status.get("pos") is not None
+             or _last_status.get("dur") is not None)
+        and _user_volume > 0
+    )
+
+
+def _mpv_error_lines() -> list[str]:
+    """mpv's error-level lines from the tail of its log, most recent last.
+
+    Bounded read: mpv.log can be tens of MB, and everything we want is at the
+    end. Never raises — a missing or unreadable log just means no lines."""
+    try:
+        size = os.path.getsize(_MPV_LOG_FILE)
+        with open(_MPV_LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
+            if size > _FAILURE_SCAN_BYTES:
+                f.seek(size - _FAILURE_SCAN_BYTES)
+                f.readline()           # drop the partial line the seek landed in
+            lines = f.read().splitlines()
+    except OSError as e:
+        log.debug("could not read mpv log: %s", e)
+        return []
+    return [ln for ln in lines if _MPV_ERROR_MARK in ln][-_FAILURE_LOG_LINES:]
+
+
+def _write_failure_report(url: "str | None") -> None:
+    """Cut the last failure out of mpv.log into last_failure.log.
+
+    Overwritten every time, holding exactly ONE failure — the most recent, which
+    is the only one anyone asks for. This is the file the panel names and a human
+    opens: a few lines instead of the ~420 KB per track load mpv writes whether
+    anything went wrong or not (its verbosity is not tunable — see "mpv log").
+
+    Best-effort by design: it is a convenience over the ERROR line already in
+    felhaven.log, so any failure here is logged at debug and swallowed rather
+    than allowed to disturb a status() tick. Never raises.
+    """
+    errors = _mpv_error_lines()
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    body = "\n".join(errors) if errors else (
+        "(no error-level lines found in mpv.log — mpv may not have flushed yet, "
+        "or was started without --log-file)")
+    try:
+        os.makedirs(_MPV_LOG_DIR, exist_ok=True)
+        with open(_FAILURE_LOG_FILE, "w", encoding="utf-8") as f:
+            f.write(f"Morpheus load failure — {stamp}\n"
+                    f"url: {url}\n"
+                    f"{'-' * 60}\n{body}\n")
+    except OSError as e:
+        log.debug("could not write failure report: %s", e)
+
+
+def _judge_pending_load(props: dict[str, Any]) -> None:
+    """Confirm or condemn an outstanding load from one property snapshot.
+
+    Confirming matters as much as condemning: a track that plays to its natural
+    end leaves mpv in the SAME idle state a failed load does, so an unconfirmed
+    stamp left lying around would report every finished track as a failure.
+    Kairos polls every 2 s and tracks run minutes, so a good load is always
+    confirmed long before its EOF.
+
+    Confirmation is time-pos/duration — MEDIA EXISTING — and deliberately not
+    mpv's `path`. path is set the instant mpv accepts the URL, while yt-dlp is
+    still resolving it and long before anyone knows whether it will work; a
+    failing load therefore passes through a tick with path set and no media.
+    Confirming on that silently disarmed the detector and let the exact outage
+    this was written for slip through again (caught end-to-end against real mpv,
+    2026-08-20 — tests/test_morpheus_load_failure.py pins it).
+    """
+    global _pending_load, _load_error
+    if _pending_load is None:
+        return
+
+    # Media actually exists — the load landed.
+    if props["time-pos"] is not None or props["duration"] is not None:
+        _pending_load = None
+        return
+
+    # mpv is back to idle with nothing loaded. Past the in-flight grace, that
+    # is a failed load. The reason is in logs/mpv/mpv.log — never spliced into
+    # the slug (§2: no raw external text; those lines carry signed URLs).
+    if props["idle-active"] is True and (time.monotonic() - _pending_load) > _PENDING_GRACE:
+        _pending_load = None
+        _load_error = "load_failed"
+        _write_failure_report(_last_url)
+        log.error("load failed for %r — mpv went idle with nothing loaded; "
+                  "see %s", _last_url, _FAILURE_LOG_FILE)
 
 
 def fetch() -> dict[str, Any]:
@@ -590,14 +1183,20 @@ def remove_playlist(index: int) -> bool:
 
 # ── LLM tool contract ─────────────────────────────────────────────────────────
 # TOOL_DEFINITIONS (plural — the Callimachus precedent, CONVENTIONS §3/§8):
-# two tightly-coupled calls on one job (play music / bring it back), each with
-# a like-named function replacing the old singular handle(). play_music
-# searches the top YouTube hit and plays it. resume_music replays the last URL
-# play() actually loaded — mpv's own watch-later file (written by every
-# stop()/play() via _checkpoint()) resumes the position, so this is just
-# "load the same URL again," nothing more. Other playback controls
-# (pause/skip) stay panel-driven for now; a companion tool can be added later
-# if wanted.
+# two tightly-coupled calls on one job, each with a like-named function
+# replacing the old singular handle(). play_music STARTS something new
+# (searches the top YouTube hit and plays it); control_music governs what is
+# already playing. The split is start-vs-govern, and both descriptions point at
+# the other one, because "play the next song" is the ambiguity a small model
+# will actually hit.
+#
+# The old resume_music tool is now control_music(action="replay") — it was
+# named the same as a pause button's "resume" while meaning something else
+# entirely (reload _last_url), which is a distinction the model had to make on
+# every music turn and could only get wrong. CONVENTIONS §12 records why.
+
+_CONTROL_ACTIONS = ("pause", "resume", "stop", "next", "previous",
+                    "replay", "status", "volume")
 
 TOOL_DEFINITIONS = [
     {
@@ -607,7 +1206,9 @@ TOOL_DEFINITIONS = [
             "description": (
                 "Search YouTube for a song, artist, or any audio and play the top "
                 "result through the local audio engine (mpv). Call whenever the user "
-                "asks to play, put on, or listen to music or a specific track."
+                "asks to play, put on, or listen to music or a specific track. To "
+                "change or inspect audio that is ALREADY playing — pause, skip, stop, "
+                "or what is on right now — use control_music instead."
             ),
             "parameters": {
                 "type": "object",
@@ -624,14 +1225,47 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "resume_music",
+            "name": "control_music",
             "description": (
-                "Resume the most recently played song or audio from where it left "
-                "off, after it was interrupted (e.g. by a spoken answer). Call when "
-                "the user asks to resume, continue, or pick the music back up — not "
-                "for starting a new song (use play_music for that)."
+                "Control audio that is already playing, or report on it. Call when "
+                "the user asks to pause, unpause, stop, skip, go back, put the last "
+                "track back on, or asks what is playing right now. To start "
+                "something new, use play_music instead."
             ),
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": list(_CONTROL_ACTIONS),
+                        # The per-action matrix lives here, not in the function
+                        # description: that one is billed on every request and
+                        # capped at 600 chars (herodotus.edit_document precedent).
+                        "description": (
+                            "pause and resume are idempotent — pausing twice leaves "
+                            "it paused. stop ends playback and bookmarks the "
+                            "position. next and previous walk the current playlist. "
+                            "replay puts the most recently played track back on, "
+                            "from where it left off — for after a stop, not for "
+                            "skipping. status reports the title, paused state, "
+                            "position and volume, and changes nothing. volume "
+                            "sets the level and needs the level parameter."
+                        ),
+                    },
+                    "level": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 100,
+                        "description": (
+                            "Loudness 0-100, for action=volume only; 100 is full. "
+                            "For a relative change (\"a bit quieter\") read the "
+                            "current level from action=status first, then send the "
+                            "result."
+                        ),
+                    },
+                },
+                "required": ["action"],
+            },
         },
     },
 ]
@@ -665,25 +1299,81 @@ def play_music(query: str = "") -> dict[str, Any]:
     }
 
 
-def resume_music() -> dict[str, Any]:
-    """Toolbox entry: replay the last URL play() actually loaded. Never
-    raises: nothing played yet, or a missing mpv binary, degrades to an
-    error dict the model can relay."""
+def _replay() -> "dict[str, Any] | None":
+    """The replay action's guards and effect. Returns an error dict, or None
+    once the load has been fired. Split out because it is the only action with
+    preconditions of its own — everything else is one _ipc write."""
     if _last_url is None:
         return {"error": "nothing_to_resume", "detail": "Nothing has been played yet."}
-
-    bins = available()
-    if not bins["mpv"]:
+    if not available()["mpv"]:
         return {"error": "player_unavailable", "detail": "mpv binary not found."}
-
     play(_last_url)
-    return {"resumed_url": _last_url}
+    return None
+
+
+def control_music(action: str = "status",
+                  level: "float | None" = None) -> dict[str, Any]:
+    """Toolbox entry: the transport state machine over whatever is playing.
+
+    Returns {"action": ..., "status": {...}} — the post-action snapshot, so the
+    caller sees the result without a second call. See "Control surface" in the
+    module docstring for why pause/resume are idempotent, why the mutations are
+    gated on a live mpv, and why the title can lag a tick after a load.
+
+    `action` defaults to "status" — the harmless one — so a model that omits it
+    reads state rather than mutating something. Never raises: an unknown action,
+    a dead player, or nothing to replay all degrade to an error dict.
+    """
+    if action not in _CONTROL_ACTIONS:
+        # Slug first, then detail (§2). The detail lists the legal values so a
+        # model that guessed can correct itself without another round trip.
+        return {"error": f"unknown_action: {action!r} is not one of "
+                         f"{', '.join(_CONTROL_ACTIONS)}."}
+
+    if action == "status":
+        return {"action": action, "status": status()}
+
+    # Volume is the one action that works with no mpv running: the level is
+    # module state, and _ensure_mpv applies it on the next spawn. Gating it on
+    # a live pipe would refuse a perfectly meaningful "turn it down for later".
+    if action == "volume":
+        if level is None:
+            return {"error": "no_level: volume needs a level from 0 to 100."}
+        return {"action": action, "volume": set_volume(level),
+                "status": status()}
+
+    # Every remaining action mutates. _ipc() is silent when the pipe is down
+    # (see "Control surface"), so refuse rather than report a success nothing
+    # heard. replay is exempt — it starts mpv itself, via play() — and skips
+    # this read entirely rather than paying for a snapshot it would discard.
+    if action != "replay" and not status().get("running"):
+        return {"error": "not_playing: nothing is playing right now."}
+
+    if action == "replay":
+        failure = _replay()
+        if failure is not None:
+            return failure
+    elif action == "pause":
+        set_paused(True)
+    elif action == "resume":
+        set_paused(False)
+    elif action == "stop":
+        stop()
+    elif action == "next":
+        next_track()
+    else:                       # "previous" — the enum check above admits no other
+        prev_track()
+
+    return {"action": action, "status": status()}
 
 
 # ── Standalone test ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     print("[morpheus] available():", available())
+    # Safe to run cold: with no mpv up this reads {"running": False} without
+    # touching the pipe, and mutating actions refuse rather than no-op.
+    print("[morpheus] control_music('status'):", control_music("status"))
     print("[morpheus] searching 'lofi' ...")
     for r in search("lofi", limit=5):
         if "error" in r:

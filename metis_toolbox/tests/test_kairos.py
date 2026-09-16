@@ -301,5 +301,93 @@ class TestRefetch(KairosBehaviorTestCase):
         self.assertNotIn("nonexistent", self.kairos._last_run)
 
 
+# ── Group F — Retry ladder (_note_outcome) ─────────────────────────────────
+
+class TestRetryLadder(KairosBehaviorTestCase):
+    """A failed fetch pulls the next attempt forward instead of waiting out the
+    worker's whole interval — the bug that pinned Aura at "unavailable" for 30
+    minutes after a blip that cleared in seconds.
+
+    TEST_WORKERS' "alpha" has a 60 s interval and "beta" a 5 s one, which is
+    exactly the pair worth testing: the ladder's first rung (60 s) is shorter
+    than neither, so alpha is left alone as "already polls this often" and beta
+    even more so. These tests therefore patch in their own long-interval worker
+    where the ladder actually has something to give.
+    """
+
+    def _long_kairos(self, interval=1800):
+        """A Kairos whose single worker polls slowly enough for the ladder to bite."""
+        workers = [("slow", interval, "test_kairos.fetch_ok")]
+        with mock.patch.object(Kairos, "WORKERS", workers):
+            return Kairos(FakeRoot())
+
+    def test_failure_pulls_next_attempt_to_first_rung(self):
+        k = self._long_kairos()
+        clock = FakeClock(1000.0)
+        with mock.patch.object(kairos, "time", clock):
+            k._last_run["slow"] = clock.now          # just fired
+            k.result_queue.put(("slow", None))       # ...and failed
+            k._drain_queue()
+        # Next fire is due 60 s from the drain, not 1800 s.
+        self.assertAlmostEqual(k._last_run["slow"], 1000.0 - 1800 + 60)
+        self.assertEqual(k._fail_counts["slow"], 1)
+
+    def test_ladder_escalates_then_runs_out(self):
+        k = self._long_kairos()
+        clock = FakeClock(1000.0)
+        with mock.patch.object(kairos, "time", clock):
+            for expected in Kairos.RETRY_DELAYS:     # 60, 300, 900
+                k._last_run["slow"] = clock.now
+                k.result_queue.put(("slow", None))
+                k._drain_queue()
+                self.assertAlmostEqual(k._last_run["slow"], 1000.0 - 1800 + expected)
+            # Ladder spent: a further failure stops overriding the schedule, so
+            # a sustained outage settles back to the normal cadence.
+            k._last_run["slow"] = clock.now
+            k.result_queue.put(("slow", None))
+            k._drain_queue()
+            self.assertAlmostEqual(k._last_run["slow"], 1000.0)
+
+    def test_success_clears_the_ladder(self):
+        k = self._long_kairos()
+        clock = FakeClock(1000.0)
+        with mock.patch.object(kairos, "time", clock):
+            k.result_queue.put(("slow", None))
+            k._drain_queue()
+            self.assertEqual(k._fail_counts["slow"], 1)
+            k.result_queue.put(("slow", {"ok": True}))
+            k._drain_queue()
+        self.assertNotIn("slow", k._fail_counts)
+
+    def test_short_interval_worker_is_left_alone(self):
+        """beta polls every 5 s; the 60 s first rung would SLOW it down."""
+        self.kairos._last_run["beta"] = 1000.0
+        with mock.patch.object(kairos, "time", FakeClock(1000.0)):
+            self.kairos.result_queue.put(("beta", None))
+            self.kairos._drain_queue()
+        self.assertEqual(self.kairos._last_run["beta"], 1000.0)   # untouched
+
+    def test_unregistered_name_does_not_schedule(self):
+        self.kairos.result_queue.put(("nobody", None))
+        self.kairos._drain_queue()                   # must not raise
+        self.assertNotIn("nobody", self.kairos._last_run)
+        self.assertNotIn("nobody", self.kairos._fail_counts)
+
+    def test_refetch_clears_ladder_progress(self):
+        k = self._long_kairos()
+        with mock.patch.object(kairos, "time", FakeClock(1000.0)):
+            k.result_queue.put(("slow", None))
+            k._drain_queue()
+        self.assertEqual(k._fail_counts["slow"], 1)
+        k.refetch("slow")
+        self.assertNotIn("slow", k._fail_counts)
+
+    def test_every_real_worker_has_an_interval(self):
+        """The ladder reads _intervals; a worker missing from it would silently
+        never retry. Holds the two dicts in lockstep against the real table."""
+        k = Kairos(FakeRoot())
+        self.assertEqual(set(k._intervals), set(k._fetch_fns))
+
+
 if __name__ == "__main__":
     unittest.main()

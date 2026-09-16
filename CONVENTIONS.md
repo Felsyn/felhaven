@@ -225,8 +225,8 @@ committing one.
   runs an `after()`-driven polling or timing **loop**; it exposes `update(data)`
   and waits to be called. A *single* one-shot `after()` for transient UI
   feedback — a status line that self-clears, a glyph that resets after a beat, a
-  latency-masking filler — is fine: it fires once, on the main thread, touching
-  only this panel's own widgets.
+  two-click-remove confirm that disarms itself — is fine: it fires once, on the
+  main thread, touching only this panel's own widgets.
 - Kairos runs a single 500 ms tick loop on the main thread. Each tick it fires
   due workers as **daemon** threads, drains the result queue, and calls
   `panel.update(data)` **on the main thread**.
@@ -253,6 +253,22 @@ Each preserves the contract: the worker's only shared touch is a queue
 `put`, `update()` / the drain runs on the main thread, and a single-flight guard
 ignores a second job while one is in flight.
 
+**`PythiaFace`'s animation loop** (`panels/pythia_face.py`) is the one exception
+that is not about a slow call. It is a ~20 fps redraw, and there is no rate at
+which a 500 ms Kairos tick animates anything — so the widget schedules its own
+frame chain. What keeps it honest is that it is *bounded by visibility*: `<Map>`
+starts the loop and `<Unmap>` stops it, so a face on a packed-away view costs
+nothing (`felhaven._show_view` `pack_forget()`s the whole panel), `start()`
+guards on `_running` so a repeated `<Map>` cannot double-schedule, and the
+pending id is cancelled in `destroy()`. It spawns no thread and touches only its
+own canvas items. `tests/test_panel_after_teardown.py` holds all three ends of
+that down.
+
+Note what the face does **not** do: it reads no state. `HomePanel` derives the
+state name on its existing drain chain and pushes it in. A panel that wanted to
+animate *and* poll for what to animate would need a second exception, and would
+not get one.
+
 `AmmitWidget`'s countdown is **not** among them, despite once being listed here:
 it holds no `after()` and spawns no thread. `HoraiPanel.update()` refreshes it on
 horai's 1 s Kairos tick — the compliant path, which is exactly why it needs no
@@ -277,7 +293,7 @@ Cancelling the pending id is the only thing that actually ends the chain.
 Two shapes, picked by how many can be outstanding at once:
 
 - **One at a time** → a single `self._xxx_after_id` attribute (`EchoPanel`'s
-  drain, `HomePanel`'s poll and latency filler). Re-arm through a helper that
+  drain, `HomePanel`'s poll). Re-arm through a helper that
   cancels the stored id first: a callback can be entered *without* its timer
   having fired — the smoke tests call `panel._poll()` directly — and re-arming
   blind orphans an id that `destroy()` can then never reach.
@@ -308,6 +324,25 @@ to track whether the timer is still live.
   (`<Enter>`/`<Leave>`) so stacked scroll frames don't fight over wheel events.
 - **Clickable rows**: `cursor="hand2"`, `<Button-1>` for the action, and a hover
   highlight flipping `fg` to `C["amber"]` on `<Enter>` and back on `<Leave>`.
+- **The one inversion — Hestia's vox controls** (`panels/vox_controls.py`):
+  there, active = `C["amber"]` and inactive = `C["text3"]`, the opposite of the
+  rule above. It is deliberate and it is local. Home's command surface sits
+  beside the wireframe face and the Sonus indicator, which already say "amber
+  means this is doing something right now"; a control row that lit up green next
+  to them would be reporting the same fact in a second vocabulary. The cost is
+  that amber can no longer double as the hover colour — an unhovered active
+  control and a hovered inactive one would be identical — so **hover brightens
+  within the current state** instead of announcing one: `text3` → `text1` when
+  off, `amber` → `amber_bright` when on. `amber_bright` is to `amber` exactly
+  what `red_bright` is to `red`: the same channel, hovered, not a new meaning.
+  Each control also carries `SidebarRow`'s dot — same canvas, same 8 px oval —
+  with the **polarity flipped**: `SidebarRow` lights its dot `C["green"]` when
+  active and leaves it amber otherwise ("amber = somewhere you could go, green =
+  you are here"), which reused here would turn a dot green at the exact moment
+  its own label turned amber. The dot follows the label beside it, from one
+  computed colour painted on both surfaces — never two branches that can drift.
+  Do not spread this outside that row. Everywhere else, active is still
+  `C["text1"]`.
 - **Collapsible sub-widgets**: collapsed by default, toggled with a `▶`/`▼`
   label — copy the `AmmitWidget` section-toggle.
 - **Grouping views in the nav rail**: a family of related views goes in
@@ -316,6 +351,16 @@ to track whether the timer is still live.
   `felhaven._views` with the whole content area and the ordinary lit-row active
   state. Adding one is a child tuple plus a `_views` entry —
   `test_sidebar_view_parity` fails if you do only one of the two.
+- **Nothing above the input may out-request the input.** Pack satisfies every
+  slave's *requested* height in pack order, and only then hands the leftover to
+  `expand=True` children — so a tall widget packed above a control squeezes that
+  control to 1 px rather than shrinking itself. A `tk.Text` asks for 24 lines and
+  a bare `tk.Canvas` asks for 265 px, which is how `PhosphorScroll` silently put
+  a 265 px floor under every container holding one and collapsed Home's chat bar
+  at any window under ~1280×900. Give a widget that is *meant* to absorb slack
+  (`height=1` on a Text, an explicit `height` on a Canvas) a token request and
+  let `expand` do the growing. The rule of thumb: whatever the user scrolls is
+  what shrinks; whatever the user clicks or types into never does.
 - **Placeholders, not crashes**: if a tool can't run (no API key, missing
   binary), render a calm placeholder and disable controls — never raise from a
   panel constructor.
@@ -426,6 +471,130 @@ and when, one line per change, so a decision worth keeping must be written here.
 
 - **`emanon.fetch()` / `morpheus.fetch()` never raise** (vs. §2's raise-on-failure
   norm). A watcher that crashes is useless; "nothing playing" is not a fault.
+- **`HomePanel._poll` swallows and logs, and re-arms in a `finally`** (vs. the
+  general rule that panels let errors surface). This chain is not just this
+  panel's: `_poll` drives `_on_delta`, which is what feeds sentences to
+  Calliope. `_arm_poll()` was the last statement in the method, so ONE escaping
+  exception stopped the chain permanently — and the symptoms named nothing.
+  Narration halted mid-answer, the transcript froze, and Vox End stayed lit
+  because `_tick_face` never ran again to clear it, so the whole thing read as
+  "narration is broken" rather than "the UI is dead."
+
+  **What made it pathological is that it was silent.** Tk prints a failing
+  `after()` callback to stderr, and Felhaven runs under `pythonw.exe`, which
+  has no stderr — so nothing reached `felhaven.log` and there was nothing to
+  debug from. The swallow is only defensible BECAUSE of the `log.exception`
+  that comes with it: the failure now names itself in the log, where Emanon
+  surfaces it. Never add one without the other. *(2026-09-08.)*
+
+  **And the log line needs a rate limit, for the same reason it needs to
+  exist.** The chain ticks at 16 Hz, so a persistent fault writing a traceback
+  every tick is ~3.7 KB/s — measured — which cycles `felhaven.log`'s
+  1 MB x 3 rotation in under twenty minutes and shreds the FIRST traceback, the
+  only one worth reading. Felhaven gets left running for days at a time, so an
+  unattended fault has to cost a trickle. `_note_poll_failure` reports once per
+  `_POLL_FAIL_QUIET` with a count of what it stands for. Note the gate is on
+  time alone: gating on the count too looks equivalent and is not, because the
+  counter resets after each report, so the next tick reads as a first failure
+  and the flood survives. *(2026-09-08.)*
+- **The one owned output stream is checked for liveness, not assumed.**
+  Harmonia opens a single `sd.OutputStream` and keeps it for the app's life —
+  that is deliberate and it is what killed the barge-in segfault (§12,
+  2026-07-26). What it quietly also meant was that `_ensure_stream` returned
+  the cached stream on nothing but `is not None and rate matches`. PortAudio
+  can stop a stream underneath you — device change or removal, driver reset,
+  another app taking the device in exclusive mode, sleep/resume — and when it
+  did, every later `play()` got the corpse and appended to a buffer nothing was
+  draining. Narration went silent for the rest of the session, `is_playing()`
+  stuck true so Vox End stayed lit, Calliope kept synthesizing perfectly, and
+  **nothing was logged**. It took two bug reports to find, and the first one
+  sent me hunting the wrong subsystem entirely.
+
+  `_stream_is_live()` reads `closed`/`active`; a backend exposing neither is
+  treated as live, because guessing "dead" would reopen on every call. The
+  reopen drops whatever was buffered: audio queued against a dead device is
+  stale by the time one returns, and replaying it would talk over whatever the
+  user asked next.
+
+  **The general lesson is worth more than the fix**: "own it for the process
+  lifetime" is a statement about *who may replace it*, never a guarantee that
+  it still works. Any long-lived handle to something outside the process —
+  a device, a socket, a pipe, a subprocess — needs a liveness check at the
+  point of use, and Felhaven is left running for days, so "rare" here means
+  "weekly", not "never". *(2026-09-09.)*
+- **mpv's scratch log is capped by RESTARTING mpv, from `play()`** — not by
+  truncating it, and not from the Kairos tick. `mpv.log` grows ~420 KB per track
+  load and Felhaven is left running for days, so one mpv process would grow it
+  without limit. Every cheaper option was measured against the shipped binary
+  on 2026-09-09 and does not work: `--msg-level` does not lower it (mpv forces
+  `--log-file` to at least `-v -v`, so `all=error` and `ytdl_hook=error` both
+  leave idle startup at ~14 KB); truncating in place leaves mpv's file offset
+  stale, so its next write re-expands the file with a hole of NUL bytes (13,710
+  measured); and deleting it while mpv holds the handle does not return the
+  space on Windows, it only unlinks the name while the bytes stay charged to
+  the open handle. Restarting is the only thing that both truncates the file
+  and releases the handle.
+
+  It hangs off `play()` because that is the only call that grows the log, and
+  the one moment a restart costs nothing — `loadfile ... replace` was going to
+  discard the playlist anyway, and `--save-position-on-quit` keeps the outgoing
+  bookmark. Explicitly NOT off `status()`/`fetch()`: those are documented
+  READ-ONLY and Kairos drives them every 2 s. A watcher that restarts the thing
+  it is watching is not a watcher. *(2026-09-09.)*
+- **`duck()`/`unduck()` are write-only, and the restore target is a constant.**
+  `duck()` runs on Calliope's release worker — the thread that feeds the audio
+  buffer — and `unduck()` runs on the Tk main thread. `_ipc()` without
+  `expect_reply` opens, writes and closes; `_get_props()` waits for a reply, and
+  its own timeout "cannot interrupt a single `readline()` that is already
+  blocking." Reading the pre-duck volume so it could be restored exactly was
+  therefore buying accuracy with a stall risk on the two threads that can least
+  afford one. There is no accuracy to buy: mpv runs `--no-config`, nothing in
+  Felhaven exposes a volume control, and morpheus is the only writer, so the
+  value is always 100. **Adding a volume control is what breaks this** — the
+  read would have to come back, off both threads. *(2026-09-08.)*
+- **Calliope's pre-rendered fillers are gone, and the prebuffer gate became
+  unconditional.** The fillers were five canned phrases synthesized once into a
+  hash-keyed WAV cache and played 1000 ms after Enter to mask kokoro's synth
+  latency. They dragged a per-voice cache (re-rendered on a daemon thread by
+  `set_voice()`), a render pass inside `prewarm()`, a one-shot `after()` timer
+  with epoch/cancel guards, and a `_real_audio_queued` flag whose only job was
+  stopping a late filler from jumping ahead of real speech.
+
+  The gate they masked stays, and now always applies: it used to return at once
+  unless `_filler_active`, so removing the fillers would have left it
+  unreachable. **The subtlety worth keeping** is that the gate has a second
+  release condition — `_turn_ended` — and that is now the only thing standing
+  between a one-chunk answer and the full `_PREBUFFER_TIMEOUT`. `_on_done`
+  already called `end_turn()`; `home_panel._speak` (the manual speak button)
+  did not, because the filler short-circuit had always covered for it. It does
+  now. A caller that hands Calliope complete text and skips `end_turn()` will
+  stall for six seconds, which is exactly the sort of bug a removed guard
+  uncovers rather than causes. *(2026-09-07.)*
+- **Narration DUCKS music instead of stopping it**, and `harmonia.tick_yield()`
+  rides `HomePanel._poll`'s existing 60 ms chain rather than arming a timer of
+  its own (vs. §6, which gives timing to Kairos — this is a passenger on a
+  listed exception, not a new one). `harmonia.play()` used to call
+  `morpheus.stop()` before buffering any audio, once per chunk. mpv's `loadfile`
+  is fire-and-forget, so `play_music` returned `{"now_playing": ...}` while
+  yt-dlp was still resolving the URL, and the answer's own first spoken chunk
+  killed the resolve 2.36 s later — measured in `logs/mpv/mpv.log`: `loadfile`
+  at t=0.223, `stop` at t=2.585, `ytdl_hook: Subprocess failed: killed`.
+
+  **The part worth remembering** is why it had no symptoms. `stop()` clears
+  `_pending_load`/`_load_error`, and that clause was written *specifically* so
+  the yield could not be misreported as a load failure — so it also swallowed
+  the true failure the yield was causing. A tolerance added to silence a false
+  positive must be narrowed to the exact condition that is genuinely benign, or
+  it will eventually hide the real thing. The clause stays (MorpheusPanel's stop
+  button still needs it); only its justification changed.
+
+  Uses mpv's own `volume`, not `ao-volume` (the system mixer). `_ducked` is a
+  latch, not a counter — Harmonia has one buffer and one drain, so overlapping
+  ducks are unreachable and a counter could only ever leak a permanent duck.
+  `--watch-later-options=start` is load-bearing: mpv persists options that
+  changed since playback started, and `volume` is in its default set, so without
+  it a checkpoint taken while ducked would bake `volume=30` into that track's
+  resume file for good. *(2026-09-07.)*
 - **`MorpheusPanel` spawns a daemon thread** (vs. §6's "no panel spawns threads").
   The `yt-dlp` search blocks for seconds and Kairos has no request-driven slot.
   Mitigated by the queue-only contract + a single-flight guard. *(2026-06-10.)*
@@ -576,8 +745,9 @@ and when, one line per change, so a decision worth keeping must be written here.
 - **§6 narrowed: a single one-shot `after()` for transient UI feedback is no
   longer a deviation.** The rule had quietly accumulated harmless one-shot timers
   — MorpheusPanel's two-click-remove confirm reset, its status-line and glyph
-  auto-clears (flagged walkthrough s17), and HomePanel's latency-masking filler —
-  all of which fire once on the main thread and touch only their own panel's
+  auto-clears (flagged walkthrough s17), and HomePanel's latency-masking filler
+  (since removed, 2026-09-07) — all of which fire once on the main thread and
+  touch only their own panel's
   widgets. The hazards §6 actually guards are background threads and standing
   poll/timing loops, so the rule now targets those. Threads and
   self-re-arming/persistent `after()` work stay documented exceptions: HomePanel's
@@ -902,3 +1072,207 @@ and when, one line per change, so a decision worth keeping must be written here.
   the same idiom `felhaven._show_view` uses, and it is order-correct by
   construction rather than by remembering a `before=` neighbor.
   *(2026-08-08.)*
+- **CodeQL's clear-text-logging alerts against §3 smoke-test `print()`s are
+  dismissed, never coded around.** Three so far, all
+  `py/clear-text-logging-sensitive-data` at **high** severity, all on the public
+  mirror `Felsyn/felhaven` (code scanning is not enabled on the private repo, so
+  they surface only after a snapshot push): `tools/aura.py` and `themis.py` on
+  2026-07-21, `voices.py` on 2026-08-16. The query's "private" classification
+  implements CWE-359, whose term list includes geographic location *and gender* —
+  so `aura`/`themis` tripped on latitude/longitude and `voices.py` on the local
+  named `gender` in `label()`, read from the hardcoded
+  `_GENDER = {"f": "female", "m": "male"}`. **The heuristic is name-based only.**
+  It cannot see that the value is one of two literals naming a kokoro voice
+  timbre, or that a §3 smoke block prints constants to a local console and never
+  to a log file or the wire. **Do not rename an accurate identifier to dodge a
+  regex** — `gender` → `timbre` would silence the scanner by making the code
+  worse for the reader, and would teach the next session that heuristics outrank
+  clarity. Dismiss with reason `used in tests` and a comment saying why (280-char
+  API limit), then one CHANGELOG line. Genuine secrets are Cerberus's problem and
+  never reach a `print()` in the first place. *(2026-08-16.)*
+- **`panels/rite_panel.py` is a `tk.Toplevel`** — the toolbox's first, against
+  §7's house pattern of an in-panel expand or a swapped frame. The Rite Log has
+  two requirements neither of those meets: the operator must be able to open
+  **two turns at once** and read them side by side, and the transcript behind it
+  must stay scrollable while one is up (the failure they are diagnosing is often
+  three answers further down). Hence also **no `grab_set()`** — a modal window
+  would defeat both. The window imports `theme` and nothing else; it takes a
+  list of dicts and draws it, so it stays a panel in every sense that matters.
+  *(2026-08-18.)*
+- **Stop now halts pending tools, not just the model.** `cancel` was checked once
+  per round, above the tool loop, so pressing Stop while tool 1 of 3 was running
+  let tools 2 and 3 run to completion — Stop stopped the oracle but not its
+  rites, which is not what the button says. A second check now sits at the top of
+  the per-call loop; remaining calls are recorded `not_run` and never dispatched.
+  Note the blast radius: `HomePanel._on_refresh` also sets the cancel event, so
+  **Refresh abandons pending tools too**. Both are the intended reading of "stop".
+  *(2026-08-18.)*
+- **A rite record's `error` field is assigned by subscript, not written into the
+  dict literal** (`pythia.py`). `tests/test_tool_output_contract.py` inspects
+  every `{"error": ...}` literal in the app-root and tool modules and requires a
+  slug — the right rule for a value that gets fed to the LLM, and the wrong one
+  for a *diagnostic copy* of that value, which is computed by construction. The
+  guard cannot tell the two apart, so the record is built without the key and the
+  field set immediately after, with a comment at the site. **Do not "tidy" it
+  back into the literal** — the guard will fail, correctly by its own lights.
+  A future tightening could scope the walk to `return` statements. *(2026-08-18.)*
+- **`pythia._now()` returns naive LOCAL time**, against the usual instinct to
+  store UTC. Felhaven is single-machine and local-first, and the question a rite
+  answers is "what happened on my machine, when" — the reader is comparing it
+  against their own memory of the afternoon, so they want the clock on the wall.
+  UTC earns its ugliness once records are aggregated across machines, which these
+  never are. It exists as a function at all so tests can patch it. *(2026-08-18.)*
+- **The Rite Log's redaction is a pattern scrub, and imports no `cerberus`.** A
+  diagnostic system that needed the vault unlocked in order to report that the
+  vault is locked would be useless exactly when it is wanted. So `_redact()` is
+  deterministic regexes over the *value* half of `key=`/`token=`/`auth=` and
+  `Authorization: Bearer`, applied to a rite's error and result preview only.
+  **Arguments are never redacted** — model-authored arguments are precisely what
+  the operator opened the log to read, and scrubbing them would defeat the
+  feature. *(2026-08-18.)*
+- **Every `/api/chat` payload shares one `_OPTIONS` dict** — `_chat()` and
+  `_warm()` must not each spell out their own. Ollama keys a *resident* model on
+  its runtime options, so a warm whose `num_ctx` differs from the chat's loads a
+  runner the first real question immediately discards and reloads. The prewarm
+  looked healthy for six weeks while doing exactly that: it sent no `options` at
+  all, warmed a 65536-context runner, and the first question still paid ~70s —
+  measured 71s at a point 83 seconds *after* a warm that had reported success in
+  1.4s. The guard is a test comparing the two captured payloads to each other;
+  hardcoding `8192` in it would pass while the halves drift. *(2026-08-19.)*
+- **The warm sends a real prompt, not `messages: []`.** Load-only warming leaves
+  the ~2,700-token system-prompt-plus-tool-schemas prefill to the first question
+  (6.7s measured). Sending the real prefix parks it in llama.cpp's prompt cache,
+  which matches on longest common prefix — so a question with a *different* user
+  message still reuses it: 2,714 prompt tokens, of which only 21 were actually
+  processed. Cost of the choice: the prefix is captured at warm time, so editing
+  the Machine Spirit prompt before the first question misses the cache and falls
+  back to the old cost. No breakage, just no saving — the system-prompt-as-tool-
+  surface seam again. *(2026-08-19.)*
+- **`pythia._WARMING` is a worker→main `threading.Event`**, against §6's "the
+  result queue is the only object shared between worker threads and the main
+  thread". Allowed for the same reason `ask()`'s `cancel` crosses that boundary
+  the other way: an Event is atomic, carries no payload, and needs no drain, so
+  none of the ordering hazards the queue rule exists to prevent apply. It is
+  cleared in a `finally` precisely so a downed Ollama cannot strand the UI on
+  "waking the oracle…". `HomePanel` reads it from the drain chain it already
+  runs, so no second `after()` id is created and §6's teardown rule is
+  untouched. *(2026-08-19.)*
+- **`morpheus.fetch()` carries an `error` slug**, which §2's flavor table does not
+  contemplate for a polled read — the error vocabulary is written around
+  `handle()`. Morpheus's mutations are fire-and-forget over IPC (`loadfile`
+  returns nothing), so the *only* place a failed load can surface is the polled
+  read. On 2026-08-20 a yt-dlp too old for YouTube made every play a no-op: mpv
+  resolved a URL it then got HTTP 403 on, the panel showed "(loading…)"
+  indefinitely, and `felhaven.log` held not one `METIS.morpheus` line across the
+  whole outage. The subsystem was completely dark, and the bug was findable only
+  by running mpv by hand *outside* the app. The slug is bare (`load_failed`) and
+  mpv's own text is never spliced into it — those lines carry signed
+  `googlevideo` URLs, exactly the leak §2's no-raw-text rule exists to stop; the
+  reason goes to the logs instead. *(2026-08-20.)*
+- **Load failure is detected by tracking intent, not by subscribing to mpv's
+  `end-file` event.** An event reader needs a persistent pipe connection and a
+  dedicated thread, and §6 gives timing to Kairos; this rides the 2 s status tick
+  that already exists and adds no thread. It works because a failed load and a
+  deliberate stop are *identical* to mpv (idle-active `True`, path `None`) and
+  differ only in whether we asked for something — so the discriminator has to be
+  Python-side anyway. **The trap, paid for once:** mpv sets `path` the moment it
+  accepts a URL, while yt-dlp is still resolving and long before anyone knows the
+  load will work. Confirming on `path` disarms the detector one tick *before* the
+  failure appears, and the outage goes invisible again. Confirmation is
+  `time-pos`/`duration` — media existing. The unit tests were green with the bug
+  in place ("no error while loading" is true either way); only an end-to-end run
+  against real mpv caught it, and the regression test now asserts the detector is
+  still *armed* after a loading tick rather than merely quiet. *(2026-08-20.)*
+- **mpv gets TWO log files, because its own is unreadable.** `--log-file` writes
+  ~420 KB per successful track load, dominated by one ~128 KB line (mpv logs
+  yt-dlp's whole JSON dump), and it writes that whether anything went wrong or
+  not — one measured run was 424 KB and 661 lines containing *zero* errors. The
+  verbosity is not ours to tune: `--msg-level` does **not** lower it, because mpv
+  forces the log file to at least `-v -v` (verified against the binary rather than
+  assumed, twice). So `mpv.log` is treated as a **scratch buffer**, and the ~3
+  error lines that matter are cut out of it into `last_failure.log` at detection
+  time — 361 bytes vs 22 KB, measured. The distilled file holds exactly ONE
+  failure, overwritten each time, because the most recent is the only one anyone
+  asks for; it is what the panel names and what survives `shutdown()`, which
+  deletes the scratch buffer once mpv releases the handle. **The lesson worth
+  keeping: when a third-party tool won't log less, don't accept its log as the
+  artifact — distil it and throw the rest away.** Both files sit in a
+  *subdirectory* of `logs/`, since `emanon.py` globs `logs/*.log` non-recursively
+  and parses every line of every match on each tick, and neither is in the METIS
+  `" | "` format. Neither is the primary signal — the ERROR line `status()` writes
+  to `felhaven.log` is what Emanon surfaces, and it stands alone if `--log-file`
+  is ever dropped entirely. *(2026-08-20.)*
+- **Morpheus's transport is ONE `action` enum, not five tools — and `resume_music`
+  was absorbed into it rather than kept beside it.** Two decisions, one reason
+  each. *Five tools:* `pause_music`, `stop_music`, `next_track`, `previous_track`
+  and `music_status` would be five schemas billed on every request to a small
+  local model, to describe one subsystem's transport; `manage_timer` had already
+  set the enum precedent. *Absorbing `resume_music`:* it meant "reload `_last_url`
+  from where it left off", which is **not** what "resume" means next to a pause
+  button. Left side by side, the model faced that distinction on every music turn
+  and could only get it wrong — so unpause took the name `resume` and the reload
+  became `replay`. Net: morpheus still exposes exactly two tools, split
+  start-vs-govern, and the registry stayed at 22. **Two things not to "simplify"
+  back:** `control_music` routes pause through `set_paused()` and never
+  `toggle_pause()` — a blind caller retrying a toggle turns the music back ON,
+  which is why the panel keeps the toggle and the tool does not — and every
+  mutating action is gated on `status()["running"]`, because `_ipc()` is silent on
+  a dead pipe and would otherwise report success for a command nothing heard. A
+  human pressing a button sees nothing happen; a model does not.
+  *(2026-09-15.)*
+- **Morpheus tracks the volume it set rather than reading it back — and the
+  duck is a RATIO, not a floor.** Two choices that look wrong at a glance, in the
+  one place a volume control could go badly. *The tracking:* `duck()`/`unduck()`
+  run on the audio-buffer thread and the Tk main thread, and `_get_props`' timeout
+  "cannot interrupt a `readline()` already blocking", so a read on either could
+  stall narration or the UI. This module's own docstring predicted that a volume
+  control would therefore force the read to come back. It does not — a read is
+  only needed if we do not already know the answer, and we do: `--no-config`
+  blocks any `mpv.conf`, there is no window or terminal to take a keypress,
+  `--watch-later-options=start` keeps volume out of resume files, and this module
+  is the only writer in the process. `_user_volume` is therefore AUTHORITATIVE,
+  not a cache. **What invalidates it:** a second writer appearing, or either of
+  those two mpv flags being dropped — then the read has to come back, and off
+  both those threads (the Kairos worker is the place). What the old warning got
+  right was narrower than it looked: the constant was the problem, not the
+  tracking. *The ratio:* with the volume at 20, ducking to a fixed 30 makes the
+  music LOUDER during narration — the opposite of yielding. `_DUCK_RATIO` is
+  0.30, which at the default level is the same 30.0 the original was measured at,
+  so nothing observable changed for the case that already existed.
+  *(2026-09-15.)*
+
+- **Aura has two sources, and Kairos retries a failed fetch early.** Two changes
+  to one failure, worth separating because only one of them is about retrying.
+  *The trigger:* on 2026-09-15 wttr.in served an expired Let's Encrypt
+  certificate for nine hours (`notAfter Sep 15 08:35:01 2026 GMT`), and the
+  Atmospherics panel read "unavailable" the whole time. The log shows the same
+  host failing in runs before that — 500s and read timeouts on 08-18, 08-21 and
+  08-24, three to eight consecutive misses each.
+
+  **A retry would not have fixed any of it, and that is the useful part.** A
+  certificate failure is not a flaky link: every attempt fails identically, at
+  the same speed, forever. The runs of 500s were hours long too. So the tempting
+  fix — retry the request three times inside `fetch()` — would have changed
+  almost nothing, and `verify=False` would have permanently disabled certificate
+  checking to paper over something that lasted an afternoon. The real answers
+  were a **second source** (`_fetch_weather()` falls back to Open-Meteo, which
+  normalizes into `_build()`'s dict so no panel learns which host answered), and
+  a **schedule fix**, because the panel was also staying wrong long after the
+  sky was fine.
+
+  *The schedule fix* (`Kairos.RETRY_DELAYS`) is a genuine deviation from "Kairos
+  fires each worker on its interval": a failed worker is re-attempted at
+  60s/300s/900s instead. **It deliberately runs out** rather than backing off
+  forever — a blip is caught within a minute, and a real outage settles back to
+  the worker's normal cadence instead of doubling the traffic to a dead endpoint
+  for nine hours. It lives in `_drain_queue`, on the main thread, reading the
+  `None` that Kairos itself put on the queue, so §6's one-shared-object contract
+  is untouched.
+
+  **What the fallback costs:** Open-Meteo has no moon data, so SELENE reads
+  blank while it is serving (`selene.py` already degrades per-field, so it shows
+  "—" rather than crashing). Restoring it means computing the phase locally —
+  it is deterministic from the date — not a third fetch. Its `weather_code` is
+  also translated from WMO into wttr.in's WWO space on the way out, because
+  that is the space `aura_panel._icon()` maps; leaking a raw WMO code would
+  silently draw the wrong emoji rather than fail. *(2026-09-15.)*

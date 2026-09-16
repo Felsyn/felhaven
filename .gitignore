@@ -60,10 +60,6 @@ artemis_cache/
 # ~350 MB. Downloaded separately; see SETUP.md section 4.
 kokoro_models/
 
-# Calliope — pre-rendered filler audio (WAVs), regenerated from the config
-# phrases on first launch. Machine-local cache, not source.
-calliope_fillers/
-
 # Echo — generated .opus audio files (text → audio). Runtime output, not source;
 # same bucket as morpheus_watch_later/. No retention cap by design.
 local_audio/

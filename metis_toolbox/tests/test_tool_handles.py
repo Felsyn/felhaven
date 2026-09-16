@@ -132,7 +132,10 @@ class TestMorpheusHandle(unittest.TestCase):
             play.assert_not_called()               # never play when search fails
 
 
-class TestMorpheusResumeMusic(unittest.TestCase):
+class TestMorpheusReplay(unittest.TestCase):
+    """The old resume_music, now control_music(action="replay").
+    The state machine's own coverage is tests/test_morpheus_control.py."""
+
     _AVAIL = {"mpv": "mpv.exe", "ytdlp": "yt-dlp.exe"}
 
     def setUp(self):
@@ -143,20 +146,23 @@ class TestMorpheusResumeMusic(unittest.TestCase):
 
     def test_nothing_played_yet_degrades(self):
         morpheus._last_url = None
-        self.assertEqual(morpheus.resume_music()["error"], "nothing_to_resume")
+        self.assertEqual(morpheus.control_music("replay")["error"],
+                         "nothing_to_resume")
 
     def test_missing_mpv_degrades(self):
         morpheus._last_url = "https://youtu.be/abc"
         with mock.patch("tools.morpheus.available",
                         return_value={"mpv": None, "ytdlp": "yt-dlp.exe"}):
-            self.assertEqual(morpheus.resume_music()["error"], "player_unavailable")
+            self.assertEqual(morpheus.control_music("replay")["error"],
+                             "player_unavailable")
 
     def test_resumes_last_played_url(self):
         morpheus._last_url = "https://youtu.be/abc"
         with mock.patch("tools.morpheus.available", return_value=self._AVAIL), \
+                mock.patch("tools.morpheus.status", return_value={"running": True}), \
                 mock.patch("tools.morpheus.play") as play:
-            out = morpheus.resume_music()
-        self.assertEqual(out, {"resumed_url": "https://youtu.be/abc"})
+            out = morpheus.control_music("replay")
+        self.assertEqual(out["action"], "replay")
         play.assert_called_once_with("https://youtu.be/abc")
 
     def test_play_tracks_last_url(self):
@@ -177,7 +183,7 @@ class TestMorpheusResumeMusic(unittest.TestCase):
 class TestNewToolsRegisteredWithPythia(unittest.TestCase):
     def test_new_handles_reach_pythia(self):
         for name in ("get_network_summary", "get_sun_times", "get_sky_tonight",
-                     "get_moon_phase", "play_music", "resume_music",
+                     "get_moon_phase", "play_music", "control_music",
                      "search_web", "fetch_page"):
             self.assertIn(name, pythia._DISPATCH)
 

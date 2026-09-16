@@ -18,9 +18,25 @@ If mpv / yt-dlp aren't found, both tab bodies show a placeholder and the
 transport controls are inert (rendered dim, never bound) — the dashboard never
 crashes over a missing binary (Midas no_key precedent).
 
+The transport is dimmed a SECOND way, for a different reason: the binaries can
+be present and mpv still not be running (nothing played yet, or it died). The
+IPC write is silent in that state — morpheus._ipc() never raises and has nobody
+to deliver to — so a lit ⏭ would accept a click, do nothing, and say nothing.
+Worse, ⏯ flipped its glyph optimistically, showing a state change that never
+happened until the next tick corrected it. Both are gated on self._live now,
+driven off the Kairos tick the panel already receives (see _set_transport_live).
+The signal is `running`, which IS pipe liveness: status() reports running False
+both when the process is gone and when every property came back None. So a load
+FAILURE leaves the transport live on purpose — mpv is up and the pipe answers,
+the commands land, there is simply nothing loaded; and ⏹ stays reachable, which
+is what clears the sticky error.
+
 Kairos contract: update(data) is called every 2 s with morpheus.fetch()'s dict
 (or None). It refreshes the transport row and — importantly — drains the search
-result queue (see the threading note below).
+result queue (see the threading note below). A dict carrying an "error" slug
+renders as red transport text via _ERROR_TEXT and takes priority over the
+idle/playing split — after a failed load mpv is genuinely running-and-idle, so
+the honest-looking "nothing playing" would otherwise hide it (2026-08-20).
 
 ─────────────────────────────────────────────────────────────────────────────
 SEARCH THREADING — a documented deviation from the house rule.
@@ -80,6 +96,16 @@ from tools import morpheus
 # space is intentional (the bin\ directory).
 _NO_BIN_MSG = ("mpv / yt-dlp not found — drop mpv.exe and yt-dlp.exe in "
                "bin\\ or install to PATH")
+
+# Human text per status() error slug, with a raw-slug fallback so an unmapped
+# code is surfaced rather than swallowed (the echo_panel _ERROR_TEXT precedent).
+# The message names the log because the SLUG deliberately carries no detail —
+# mpv's own reason lines can't be spliced into it (CONVENTIONS §2).
+# It names last_failure.log, not mpv.log: the distilled few lines, not the
+# ~420 KB-per-load scratch buffer they were cut from.
+_ERROR_TEXT = {
+    "load_failed": "could not load that track — see logs\\mpv\\last_failure.log",
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -161,6 +187,10 @@ class MorpheusPanel(tk.Frame):
 
         avail = morpheus.available()
         self._enabled = bool(avail["mpv"] and avail["ytdlp"])
+        # Can mpv actually hear a transport click right now? Binaries being
+        # present is not the same question (see the module docstring). Starts
+        # False — mpv is not running until something plays.
+        self._live = False
 
         # Search threading (see module docstring).
         self._search_q: queue.Queue = queue.Queue()
@@ -240,17 +270,45 @@ class MorpheusPanel(tk.Frame):
             ("next", "⏭", morpheus.next_track),
             ("stop", "⏹", morpheus.stop),
         ]
+        # Built DIM, whatever the binaries say: at construction mpv has not been
+        # started, so there is nothing for a click to reach. The first Kairos
+        # tick lights them (_set_transport_live) if it finds mpv running.
         for key, glyph, fn in reversed(spec):
             b = tk.Label(
-                ctrl, text=glyph, font=FONTS["medium"],
-                fg=C["text1"] if self._enabled else C["text3"],
+                ctrl, text=glyph, font=FONTS["medium"], fg=C["text3"],
                 bg=C["card"], padx=6,
             )
             b.pack(side="right")
             if self._enabled:
-                b.config(cursor="hand2")
-                b.bind("<Button-1>", lambda e, f=fn: f())
+                b.bind("<Button-1>", lambda e, f=fn: self._on_transport(f))
             self._btns[key] = b
+
+    def _on_transport(self, fn) -> None:
+        """Every transport click funnels through here, so the dead-pipe refusal
+        is ONE decision rather than four (and one place to test).
+
+        Bindings stay attached while dim rather than being unbound, because the
+        flag can be up to one tick (~2 s) stale — mpv can die between ticks —
+        and a guard read at click time is the honest check. Refusing silently is
+        deliberate: the transport row already reads "nothing playing", so the
+        dim glyph and that line are the feedback, and a click that reaches a
+        dead pipe should not look different from one that never happened."""
+        if not self._live:
+            return
+        fn()
+
+    def _set_transport_live(self, live: bool) -> None:
+        """Light or dim the transport to match whether mpv can actually hear us.
+
+        Returns early when nothing changed: update() runs every 2 s for the life
+        of the app, and reconfiguring four labels on every tick is churn for a
+        value that changes a handful of times a session."""
+        if live == self._live:
+            return
+        self._live = live
+        for b in self._btns.values():
+            b.config(fg=C["text1"] if live else C["text3"],
+                     cursor="hand2" if live else "")
 
     def _on_toggle_pause(self) -> None:
         """Play/pause click handler. Flips the ⏯ glyph immediately instead of
@@ -635,7 +693,22 @@ class MorpheusPanel(tk.Frame):
         if not self._enabled:
             return
 
-        if data is None or not data.get("running"):
+        # Gate the transport on whether mpv can hear it. Read before the
+        # error branch, not inside it: `running` answers "is the pipe alive",
+        # which is a different question from "did the last load work", and a
+        # failed load leaves mpv up and reachable (see the module docstring).
+        self._set_transport_live(bool(data and data.get("running")))
+
+        # A failed load outranks the idle/playing split: mpv IS running and
+        # idle after one, so without this the panel would calmly say "nothing
+        # playing" and the user would never learn the click did anything.
+        err = data.get("error") if data else None
+        if err:
+            self._now_lbl.config(
+                text=_ERROR_TEXT.get(err, f"error: {err}"), fg=C["red"])
+            self._pos_lbl.config(text="-:-- / -:--")
+            self._btns["play"].config(text="▶")
+        elif data is None or not data.get("running"):
             self._now_lbl.config(text="nothing playing", fg=C["text3"])
             self._pos_lbl.config(text="-:-- / -:--")
             self._btns["play"].config(text="▶")

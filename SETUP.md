@@ -91,7 +91,7 @@ https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/v
 
 fp32 is used on purpose — on a CPU it is ~3.5× *faster* than the smaller int8
 build (RTF 0.44 vs 1.54; int8's quantize/dequantize overhead dominates).
-Filler audio and all voice/latency tuning live in `metis_toolbox/config/calliope_config.json`.
+All voice and latency tuning lives in `metis_toolbox/config/calliope_config.json`.
 If the models are absent, Calliope logs it once and stays silent — nothing else
 is affected.
 

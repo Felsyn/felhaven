@@ -113,6 +113,86 @@ class TestMorpheusPanelEnabled(unittest.TestCase):
         self.root.update_idletasks()
         self.assertEqual(self.panel._btns["play"].cget("text"), "▶")
 
+    def test_failed_load_renders_red_and_beats_the_idle_line(self):
+        """After a failed load mpv really is running-and-idle, so "nothing
+        playing" would be an honest-looking lie. The error must win, and it must
+        name where the reason is (the slug deliberately carries no detail —
+        CONVENTIONS §2, since mpv's own lines hold signed URLs)."""
+        from panels.morpheus_panel import _ERROR_TEXT
+
+        # running=True is what status() really reports here — the process is up
+        # and the pipe answered; only the load failed. The fixture used to say
+        # False, contradicting this docstring, which mattered once `running`
+        # started driving the transport gate.
+        self.panel.update({"running": True, "error": "load_failed"})
+        self.root.update_idletasks()
+        self.assertEqual(self.panel._now_lbl.cget("text"),
+                         _ERROR_TEXT["load_failed"])
+        # The distilled file, not the ~420 KB-per-load scratch buffer.
+        self.assertIn("last_failure.log", self.panel._now_lbl.cget("text"))
+        self.assertEqual(str(self.panel._now_lbl.cget("fg")), theme.C["red"])
+        # ...and the transport stays reachable, because ⏹ is what clears the
+        # sticky error. Dimming here would strand the user in the red state.
+        self.assertTrue(self.panel._live)
+
+    def test_unmapped_slug_is_surfaced_not_swallowed(self):
+        """The echo_panel fallback: a code with no human text still shows."""
+        self.panel.update({"running": False, "error": "some_new_code"})
+        self.root.update_idletasks()
+        self.assertIn("some_new_code", self.panel._now_lbl.cget("text"))
+
+    def test_recovering_from_an_error_restores_the_normal_line(self):
+        self.panel.update({"running": False, "error": "load_failed"})
+        self.panel.update({"running": True, "title": "Song", "paused": False,
+                           "pos": 65, "dur": 200})
+        self.root.update_idletasks()
+        self.assertEqual(self.panel._now_lbl.cget("text"), "Song")
+        self.assertEqual(str(self.panel._now_lbl.cget("fg")), theme.C["text1"])
+
+    def test_transport_starts_dim_because_mpv_is_not_running_yet(self):
+        # Binaries present is not the same as mpv up. Before the first tick
+        # there is nothing to click, so nothing should look clickable.
+        self.assertFalse(self.panel._live)
+        for key, b in self.panel._btns.items():
+            with self.subTest(button=key):
+                self.assertEqual(str(b.cget("fg")), theme.C["text3"])
+
+    def test_transport_lights_and_dims_with_the_pipe(self):
+        self.panel.update({"running": True, "title": "Song", "paused": False,
+                           "pos": 1, "dur": 2})
+        self.root.update_idletasks()
+        self.assertTrue(self.panel._live)
+        self.assertEqual(str(self.panel._btns["next"].cget("fg")), theme.C["text1"])
+        self.assertEqual(str(self.panel._btns["next"].cget("cursor")), "hand2")
+
+        self.panel.update({"running": False})
+        self.root.update_idletasks()
+        self.assertFalse(self.panel._live)
+        self.assertEqual(str(self.panel._btns["next"].cget("fg")), theme.C["text3"])
+        self.assertEqual(str(self.panel._btns["next"].cget("cursor")), "")
+
+    def test_a_dead_pipe_swallows_the_click_instead_of_writing_into_the_void(self):
+        """The bug: _ipc() never raises and has nobody to deliver to, so the
+        click used to 'succeed' silently. Guard, not hope."""
+        calls = []
+        self.panel.update({"running": False})
+        self.panel._on_transport(lambda: calls.append("fired"))
+        self.assertEqual(calls, [], "wrote to mpv while the pipe was down")
+
+        self.panel.update({"running": True, "title": "S", "paused": False,
+                           "pos": 1, "dur": 2})
+        self.panel._on_transport(lambda: calls.append("fired"))
+        self.assertEqual(calls, ["fired"], "refused a click mpv could have heard")
+
+    def test_dead_pipe_does_not_let_the_play_glyph_lie(self):
+        """_on_toggle_pause flips ⏯ optimistically so it beats the 2 s tick.
+        With no mpv that flip advertised a state change that never happened."""
+        self.panel.update({"running": False})
+        self.root.update_idletasks()
+        before = self.panel._btns["play"].cget("text")
+        self.panel._on_transport(self.panel._on_toggle_pause)
+        self.assertEqual(self.panel._btns["play"].cget("text"), before)
+
     def test_tab_switch(self):
         self.panel._show_tab("search")
         self.root.update_idletasks()

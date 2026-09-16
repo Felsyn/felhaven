@@ -6,6 +6,6 @@ timing.
 - **UI:** none — infrastructure
 - **Brain tool:** none
 - **Files:** `kairos.py`
-- **Test:** `python -X utf8 -m unittest tests.test_kairos`
+- **Test:** `python -X utf8 -m unittest discover -s tests -p "test_kairos.py"`
 
 Details: see the docstring in `kairos.py`.

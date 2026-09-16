@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -34,7 +35,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import tkinter as tk
 
 import theme
-from tools import artemis, morpheus, orpheus
+from tools import ammit, artemis, morpheus, orpheus
+
+# TestHomePanelTeardown builds a HomePanel, which now constructs an AmmitBadge
+# (panels/horai_panel.py) that reads ammit.query_all() — swap ammit.STATE_FILE
+# for the whole module so nothing here touches the real timer_state.json.
+_orig_ammit_state = None
+_ammit_tmp = None
+
+
+def setUpModule():
+    global _orig_ammit_state, _ammit_tmp
+    _orig_ammit_state = ammit.STATE_FILE
+    _ammit_tmp = tempfile.TemporaryDirectory()
+    ammit.STATE_FILE = Path(_ammit_tmp.name) / "timer_state.json"
+
+
+def tearDownModule():
+    ammit.STATE_FILE = _orig_ammit_state
+    _ammit_tmp.cleanup()
 
 
 class _TeardownCase(unittest.TestCase):
@@ -92,33 +111,18 @@ class TestHomePanelTeardown(_TeardownCase):
         panel.destroy()
         self.assertEqual(self._pending() - baseline, set())
 
-    def test_latency_filler_is_cancelled(self):
-        """The filler is armed by _on_submit when auto-speak is on. A long delay
-        keeps it pending so destroy() is what clears it, not the clock."""
-        def arm(panel):
-            panel._entry.insert(0, "what day is it?")
-            with mock.patch("panels.home_panel.calliope.auto_speak_enabled",
-                            return_value=True), \
-                 mock.patch("panels.home_panel.calliope.filler_delay_ms",
-                            return_value=60_000), \
-                 mock.patch("panels.home_panel.calliope.stop"), \
-                 mock.patch("panels.home_panel.pythia.ask", return_value="ok"):
-                panel._on_submit()
-                panel._thread.join(timeout=5)
-            self.assertIsNotNone(panel._filler_after_id)
-
-        self.assertNoTimersSurvive(self._build, arm)
-
-    def test_resubmitting_does_not_orphan_the_previous_filler(self):
-        """Only one filler is ever outstanding — _on_submit cancels the last
-        one before arming a new one, which is what lets a single stored id
-        cover it at teardown."""
+    def test_resubmitting_orphans_no_timers(self):
+        """Three questions in a row must leave exactly the one standing poll
+        chain behind — no per-turn timer accumulating outside destroy()'s
+        reach. This used to also cover a latency-filler timer (removed
+        2026-09-07, when the pre-rendered fillers went); the count dropped from
+        two to one, and the property it guards did not change."""
         def arm(panel):
             with mock.patch("panels.home_panel.calliope.auto_speak_enabled",
                             return_value=True), \
-                 mock.patch("panels.home_panel.calliope.filler_delay_ms",
-                            return_value=60_000), \
                  mock.patch("panels.home_panel.calliope.stop"), \
+                 mock.patch("panels.home_panel.calliope.end_turn"), \
+                 mock.patch("panels.home_panel.calliope.speak"), \
                  mock.patch("panels.home_panel.pythia.ask", return_value="ok"):
                 for i in range(3):
                     panel._entry.insert(0, f"q{i}")
@@ -129,10 +133,55 @@ class TestHomePanelTeardown(_TeardownCase):
         panel = self._build()
         panel.pack()
         arm(panel)
-        # One poll + one filler, never three fillers.
-        self.assertEqual(len(self._pending() - baseline), 2)
+        self.assertEqual(len(self._pending() - baseline), 1)   # the poll chain
         panel.destroy()
         self.assertEqual(self._pending() - baseline, set())
+
+
+class TestPythiaFaceTeardown(_TeardownCase):
+    """The face is CONVENTIONS §6's animation exception — a 24 fps redraw
+    cannot ride Kairos's 500 ms tick — so the whole justification rests on the
+    loop being bounded and cancelled. Assert both ends of that.
+
+    Armed with an explicit start(): the face normally runs itself off <Map>,
+    which does not fire on this suite's withdrawn root, and the guard fails
+    loudly rather than passing vacuously if nothing was scheduled."""
+
+    def _build(self):
+        from panels.pythia_face import PythiaFace
+        return PythiaFace(self.root)
+
+    def test_animation_loop_is_cancelled(self):
+        def arm(panel):
+            panel.start()
+            self.assertIsNotNone(panel._job)
+
+        self.assertNoTimersSurvive(self._build, arm)
+
+    def test_repeated_starts_never_leave_a_second_loop_running(self):
+        """start() guards on _running, so a repeated <Map> — which happens on
+        every view switch — cannot double-schedule into a loop destroy() can
+        only half cancel."""
+        baseline = self._pending()
+        panel = self._build()
+        panel.pack()
+        for _ in range(3):
+            panel.start()
+        self.assertEqual(len(self._pending() - baseline), 1)
+        panel.destroy()
+        self.assertEqual(self._pending() - baseline, set())
+
+    def test_hidden_face_stops_burning_frames(self):
+        """<Unmap> stops the loop, which is what makes a face on a packed-away
+        view free. felhaven._show_view pack_forget()s the whole panel."""
+        baseline = self._pending()
+        panel = self._build()
+        panel.pack()
+        panel.start()
+        panel.stop()
+        self.assertFalse(panel._running)
+        self.assertEqual(self._pending() - baseline, set())
+        panel.destroy()
 
 
 class TestEmanonPanelTeardown(_TeardownCase):

@@ -4,8 +4,10 @@ test_harmonia.py — unit tests for harmonia.py (the output-device authority).
 No real audio device: sounddevice is stubbed into sys.modules with a fake
 sd.OutputStream whose start() spins a daemon that pulls audio through Harmonia's
 callback exactly like PortAudio would — so the buffer really drains and
-is_playing() really flips. tools.morpheus.stop is mocked so no mpv process is
-touched. harmonia.play() is async by design (there is no synchronous escape
+is_playing() really flips. tools.morpheus.duck/unduck are mocked so no mpv
+process is touched — morpheus.stop is deliberately left REAL, so that
+test_play_never_stops_morpheus can catch a regression to the old kill-the-music
+yield rather than silently swallowing it. harmonia.play() is async by design (there is no synchronous escape
 hatch — that's the point of the module), so round-trip tests poll is_playing()
 with a short timeout instead of asserting instantly.
 
@@ -54,9 +56,14 @@ class _FakeStream:
         self._thread = None
         self._emit_lock = threading.Lock()
         self._emitted: list = []
+        # The two flags sounddevice exposes and Harmonia now reads to tell a
+        # live stream from one PortAudio tore down under it.
+        self.active = False
+        self.closed = False
         _FakeStream.instances.append(self)
 
     def start(self):
+        self.active = True
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -81,9 +88,13 @@ class _FakeStream:
             return list(self._emitted)
 
     def abort(self):
+        """Also what PortAudio does to us on a device change."""
+        self.active = False
         self._stop.set()
 
     def close(self):
+        self.active = False
+        self.closed = True
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=1.0)
@@ -103,7 +114,7 @@ class _ManualStream(_FakeStream):
     threaded drain keeps its coverage in the is_playing()/drain tests."""
 
     def start(self):
-        pass
+        self.active = True          # live, just not self-draining
 
     def pull(self, frames: int = 1024) -> None:
         """Run one callback block on the calling thread, and record it."""
@@ -127,25 +138,136 @@ class _HarmoniaBase(unittest.TestCase):
         self._modules_patcher = mock.patch.dict(sys.modules, {"sounddevice": self._sd_stub})
         self._modules_patcher.start()
 
-        self._morpheus_patcher = mock.patch.object(harmonia.morpheus, "stop")
-        self.mock_morpheus_stop = self._morpheus_patcher.start()
+        # duck/unduck only. morpheus.stop stays real on purpose — see the
+        # module docstring and test_play_never_stops_morpheus.
+        self._duck_patcher = mock.patch.object(harmonia.morpheus, "duck")
+        self.mock_duck = self._duck_patcher.start()
+        self._unduck_patcher = mock.patch.object(harmonia.morpheus, "unduck")
+        self.mock_unduck = self._unduck_patcher.start()
+
+        harmonia._yielded = False        # no restore owed from a prior test
+        harmonia._silent_since = None
 
     def tearDown(self):
         harmonia.shutdown()
-        self._morpheus_patcher.stop()
+        harmonia._yielded = False
+        harmonia._silent_since = None
+        self._duck_patcher.stop()
+        self._unduck_patcher.stop()
         self._modules_patcher.stop()
 
 
 class TestYieldsMorpheus(_HarmoniaBase):
-    def test_play_calls_morpheus_stop_first(self):
+    def test_play_ducks_morpheus_first(self):
         harmonia.play(np.zeros(4, dtype=np.float32), 24000, tag="t")
-        self.mock_morpheus_stop.assert_called_once()
+        self.mock_duck.assert_called_once()
 
-    def test_play_still_plays_if_morpheus_stop_raises(self):
-        self.mock_morpheus_stop.side_effect = RuntimeError("pipe gone")
+    def test_play_never_stops_morpheus(self):
+        """The bug, in one assertion.
+
+        harmonia.play() used to call morpheus.stop(), which killed a track
+        whose URL yt-dlp was still resolving — so asking Pythia to play a song
+        stopped the song it had just started, silently. Narration must lower
+        the volume and never stop playback."""
+        with mock.patch.object(harmonia.morpheus, "stop") as never:
+            harmonia.play(np.zeros(4, dtype=np.float32), 24000)
+            never.assert_not_called()
+
+    def test_play_still_plays_if_morpheus_duck_raises(self):
+        self.mock_duck.side_effect = RuntimeError("pipe gone")
         harmonia.play(np.ones(20000, dtype=np.float32), 24000)   # must not raise
         self.assertTrue(harmonia.is_playing())                   # audio was buffered
         self.assertTrue(_wait_until(lambda: not harmonia.is_playing()))   # and drained
+
+    def test_play_arms_the_restore_even_with_no_output_device(self):
+        """_arm_yield() runs BEFORE play()'s no-device early return. A duck
+        taken on a box whose stream will not open must still be handed back,
+        or the music stays quiet forever."""
+        self._sd_stub.OutputStream = mock.Mock(side_effect=RuntimeError("no device"))
+        harmonia.play(np.zeros(4, dtype=np.float32), 24000)
+        self.assertFalse(harmonia.is_playing())      # nothing buffered
+        self.assertTrue(harmonia._yielded)           # but a restore is owed
+
+
+class TestYieldRestore(_HarmoniaBase):
+    """tick_yield() — the main-thread reconcile that gives the volume back."""
+
+    def _age_the_silence(self):
+        """Pretend the buffer went quiet longer ago than _UNDUCK_HOLD."""
+        harmonia._silent_since -= harmonia._UNDUCK_HOLD + 0.05
+
+    def test_tick_yield_is_free_when_nothing_was_ever_played(self):
+        harmonia.tick_yield()
+        self.mock_unduck.assert_not_called()
+
+    def test_tick_yield_does_not_restore_while_audio_is_buffered(self):
+        self._sd_stub.OutputStream = _ManualStream
+        harmonia.play(np.ones(20000, dtype=np.float32), 24000)
+        for _ in range(5):
+            harmonia.tick_yield()
+        self.mock_unduck.assert_not_called()
+
+    def test_tick_yield_waits_out_the_hold_before_restoring(self):
+        harmonia.play(np.zeros(4, dtype=np.float32), 24000)
+        self.assertTrue(_wait_until(lambda: not harmonia.is_playing()))
+        harmonia.tick_yield()                    # stamps _silent_since
+        self.mock_unduck.assert_not_called()     # ...but the hold has not run
+        self._age_the_silence()
+        harmonia.tick_yield()
+        self.mock_unduck.assert_called_once()
+
+    def test_a_new_chunk_inside_the_hold_cancels_the_restore(self):
+        """Why _UNDUCK_HOLD exists. Calliope's buffer legitimately empties
+        mid-answer (between one synthesized chunk and the next), so a restore
+        counting down must be cancelled by the next chunk — otherwise the music
+        pumps up and down inside one sentence."""
+        harmonia.play(np.zeros(4, dtype=np.float32), 24000)
+        self.assertTrue(_wait_until(lambda: not harmonia.is_playing()))
+        harmonia.tick_yield()                    # starts the countdown
+        self._age_the_silence()
+        harmonia.play(np.zeros(4, dtype=np.float32), 24000)   # the next chunk
+        harmonia.tick_yield()
+        self.mock_unduck.assert_not_called()
+        self.assertIsNone(harmonia._silent_since)
+
+    def test_restore_happens_once_not_every_tick(self):
+        harmonia.play(np.zeros(4, dtype=np.float32), 24000)
+        self.assertTrue(_wait_until(lambda: not harmonia.is_playing()))
+        harmonia.tick_yield()
+        self._age_the_silence()
+        for _ in range(5):
+            harmonia.tick_yield()
+        self.mock_unduck.assert_called_once()
+
+    def test_barge_in_then_silence_restores(self):
+        harmonia.play(np.ones(200000, dtype=np.float32), 24000)
+        harmonia.stop()                          # Vox End mid-narration
+        self.assertFalse(harmonia.is_playing())
+        harmonia.tick_yield()
+        self._age_the_silence()
+        harmonia.tick_yield()
+        self.mock_unduck.assert_called_once()
+
+    def test_shutdown_restores_morpheus(self):
+        """The safety net: teardown hands the volume back while mpv is still
+        alive to hear it (felhaven calls harmonia.shutdown() first)."""
+        harmonia.play(np.zeros(4, dtype=np.float32), 24000)
+        harmonia.shutdown()
+        self.mock_unduck.assert_called_once()
+
+    def test_shutdown_does_not_unduck_when_nothing_was_owed(self):
+        harmonia.shutdown()
+        self.mock_unduck.assert_not_called()
+
+    def test_tick_yield_never_raises_when_unduck_fails(self):
+        self.mock_unduck.side_effect = RuntimeError("pipe gone")
+        harmonia.play(np.zeros(4, dtype=np.float32), 24000)
+        self.assertTrue(_wait_until(lambda: not harmonia.is_playing()))
+        harmonia.tick_yield()
+        self._age_the_silence()
+        harmonia.tick_yield()                    # must not raise
+        self.mock_unduck.assert_called_once()
+        self.assertFalse(harmonia._yielded)       # and the debt is cleared
 
 
 class TestPlayRoundTrip(_HarmoniaBase):
@@ -227,6 +349,74 @@ class TestStop(_HarmoniaBase):
         harmonia.play(np.ones(24000, dtype=np.float32), 24000)
         harmonia.stop()
         self.assertTrue(_wait_until(lambda: not harmonia.is_playing()))
+
+
+class TestStreamOutlivesTheDevice(_HarmoniaBase):
+    """PortAudio can stop the stream underneath us — a device change or
+    removal, a driver reset, another app taking the device in exclusive mode,
+    a sleep/resume. Harmonia keeps ONE stream for the app's life, so before
+    2026-09-09 it handed the dead one back to every later play() and appended
+    to a buffer nothing drained: narration went silent for the rest of the
+    session, is_playing() stuck true (Vox End stayed lit), and nothing was
+    logged. Felhaven gets left running for days, so this is not exotic."""
+
+    def _first_stream(self):
+        harmonia.play(np.zeros(4, dtype=np.float32), 24000)
+        self.assertTrue(_wait_until(lambda: not harmonia.is_playing()))
+        return harmonia._stream
+
+    def test_a_live_stream_is_reused(self):
+        """The reopen must be rare. Churning a new stream per chunk would be
+        the shared-stream race this module exists to avoid."""
+        first = self._first_stream()
+        harmonia.play(np.zeros(4, dtype=np.float32), 24000)
+        self.assertIs(harmonia._stream, first)
+        self.assertEqual(len(_FakeStream.instances), 1)
+
+    def test_a_dead_stream_is_replaced(self):
+        first = self._first_stream()
+        first.abort()                        # the device went away
+        harmonia.play(np.zeros(4, dtype=np.float32), 24000)
+        self.assertIsNot(harmonia._stream, first)
+        self.assertEqual(len(_FakeStream.instances), 2)
+
+    def test_audio_plays_again_on_the_replacement(self):
+        """The point of the whole thing: narration comes back."""
+        self._first_stream().abort()
+        harmonia.play(np.ones(20000, dtype=np.float32), 24000)
+        self.assertTrue(_wait_until(lambda: not harmonia.is_playing()),
+                        "narration never drained after the device came back")
+
+    def test_the_audio_in_flight_when_it_died_is_dropped(self):
+        """What was mid-answer when the device went is stale by the time one
+        comes back. Playing it on the replacement would talk over whatever the
+        user asked next. (_ManualStream so nothing drains behind the test.)"""
+        self._sd_stub.OutputStream = _ManualStream
+        harmonia.play(np.ones(20000, dtype=np.float32), 24000)
+        self.assertEqual(harmonia._buffered_samples, 20000)
+        harmonia._stream.abort()             # died mid-answer, audio still queued
+        harmonia.play(np.ones(8, dtype=np.float32), 24000)    # the recovering call
+        self.assertEqual(harmonia._buffered_samples, 8)
+
+    def test_the_replacement_is_logged(self):
+        """It was silent before, which is why it took two bug reports."""
+        self._first_stream().abort()
+        with self.assertLogs("METIS.harmonia", level="WARNING") as caught:
+            harmonia.play(np.zeros(4, dtype=np.float32), 24000)
+        self.assertTrue(any("went dead" in line for line in caught.output))
+
+    def test_a_backend_without_liveness_flags_is_treated_as_live(self):
+        """Guessing "dead" would reopen the stream on every single call."""
+        class _Opaque:
+            def __getattr__(self, name):
+                raise AttributeError(name)
+        self.assertTrue(harmonia._stream_is_live(_Opaque()))
+
+    def test_a_closed_stream_is_dead_even_if_active_lies(self):
+        class _Closed:
+            closed = True
+            active = True
+        self.assertFalse(harmonia._stream_is_live(_Closed()))
 
 
 class TestPlayDeviceDegradation(_HarmoniaBase):

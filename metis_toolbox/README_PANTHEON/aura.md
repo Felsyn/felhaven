@@ -1,7 +1,8 @@
 # Aura
 
 Report current weather: temperature, sky, wind, and forecast. The toolbox's only
-weather fetch — Helios, Selene, and Hypatia read what it returns.
+weather fetch — Helios, Selene, and Hypatia read what it returns. Fetches from
+wttr.in, falling back to Open-Meteo.
 
 - **UI:** Atmospherics view (NOW + FORECAST tabs)
 - **Brain tool:** `get_weather`
