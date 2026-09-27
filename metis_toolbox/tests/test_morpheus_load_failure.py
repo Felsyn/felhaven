@@ -8,15 +8,21 @@ not one METIS.morpheus line across the whole outage. The bug was findable only
 by running mpv by hand outside the app.
 
 So these tests are not really about mpv. They are about the property that was
-missing: a failed load must become visible. They pin the four states apart
-(loading / playing / failed / deliberately stopped), because the failure state
-and the stopped state look IDENTICAL to mpv and only Python-side intent
-separates them — get that wrong and the panel cries wolf on every stop, or on
-every track that reaches its natural end.
+missing: a failed load must become visible. They pin the states apart
+(loading / playing / ended / skipped / failed / deliberately stopped), because
+most of those look IDENTICAL to mpv and only Python-side intent separates them —
+get that wrong and the panel cries wolf on every stop, or on every track that
+reaches its natural end.
+
+This file used to say the failed and STOPPED states were the identical pair.
+That was backwards, and the fixtures carried the error: a deliberate stop is the
+one state a property does separate (playlist-count 0), while ended, skipped and
+failed are the three that are indistinguishable. Corrected 2026-09-16 — see the
+module-level _ENDED.
 
 No mpv process and no pipe: _get_props is mocked with the real signatures
-measured off mpv 0.41 on 2026-08-20 (recorded in morpheus.py's "Load failures"
-docstring section).
+measured off mpv 0.41 on 2026-08-20, extended 2026-09-16 (recorded in
+morpheus.py's "Load failures" docstring section).
 
     python -X utf8 -m unittest tests.test_morpheus_load_failure
 """
@@ -36,11 +42,30 @@ from tools import morpheus
 # Exactly what mpv reports in each phase. Keep these honest — they are the whole
 # basis for telling the states apart.
 #
-# `path` is kept here even though status() no longer asks for it, because it is
-# the trap: it is set during LOADING as well as playing, and confirming a load
-# on it is precisely the bug test_loading_does_not_CONFIRM_the_load guards.
-# A stray key in a _get_props stub is harmless — the real one returns only what
-# was requested, and nothing reads this one.
+# `path` is READ now — status() has published it since 2026-09-20, because it
+# is the only exact identity in the snapshot and awen needs it to tell its own
+# pick from a song the listener started. It used to sit here unread, purely as
+# documentation of the trap, and its VALUE was an assumption nothing checked.
+#
+# Measured against a live mpv on 2026-09-21, because the assumption was doing
+# real work by then: `path` is the watch URL handed to loadfile, NOT the signed
+# googlevideo stream URL yt-dlp resolves it to (ytdl_hook rewrites
+# stream-open-filename, and leaves this alone). That distinction is the whole
+# fixture. Had it gone the other way, euterpe.video_id() would return None on
+# every real load, awen._whose_song would fall back to the title comparison
+# every time, and the id half of the 2026-09-20 fix would be dead code with
+# this entire file still green — a check that never runs looks exactly like one
+# that passes.
+#
+# The trap still stands, and publishing the field did not soften it: `path` is
+# set during LOADING as well as playing, so confirming a load on it is precisely
+# the bug test_loading_does_not_CONFIRM_the_load guards. It is in props now and
+# must go on being ignored by _judge_pending_load.
+#
+# Every fixture here must therefore CARRY it. The real _get_props returns one
+# entry per requested name — None for anything it could not read — so a stub
+# that omits a key models something the real function cannot produce, and
+# status() indexing it would KeyError on a state that cannot happen.
 
 _LOADING = {"media-title": "watch?v=abc", "pause": False, "time-pos": None,
             "duration": None, "playlist-pos": 0, "playlist-count": 1,
@@ -50,12 +75,32 @@ _PLAYING = {"media-title": "Clair de Lune", "pause": False, "time-pos": 7.5,
             "duration": 314.0, "playlist-pos": 0, "playlist-count": 1,
             "idle-active": False, "path": "https://youtu.be/abc"}
 
-# A failed load and a deliberate stop differ ONLY in playlist-count (1 vs 0),
-# which is why we track intent in Python instead of trusting this shape.
 _FAILED = {"media-title": None, "pause": False, "time-pos": None,
            "duration": None, "playlist-pos": -1, "playlist-count": 1,
            "idle-active": True, "path": None}
 
+# A track that reached its natural end. IDENTICAL to _FAILED, field for field —
+# and that is not this fixture being lazy, it is what mpv actually does.
+#
+# This file used to model a natural end as _STOPPED (playlist-count 0), which
+# was simply wrong, and wrong in the direction that flatters the code: it made
+# the two states look separable by a property when they are not. The tests
+# passed anyway, because a real natural end has its load CONFIRMED long before
+# EOF, so nothing was outstanding either way — the bad fixture was never the
+# thing keeping them green. Corrected 2026-09-16 against real mpv (local file
+# and YouTube URL, same result):
+#     ended -> idle-active True, path None, playlist-pos -1, playlist-count 1
+#
+# Kept as its own name rather than aliased to _FAILED so a test reads as the
+# state it means, and so the day mpv does start distinguishing them there is one
+# place to change.
+_ENDED = {"media-title": None, "pause": False, "time-pos": None,
+          "duration": None, "playlist-pos": -1, "playlist-count": 1,
+          "idle-active": True, "path": None}
+
+# A DELIBERATE stop — the only one of the four idle shapes any property
+# separates, by playlist-count 0. Ended, skipped and failed all leave 1, so
+# intent tracked in Python is the only thing that tells those three apart.
 _STOPPED = {"media-title": None, "pause": False, "time-pos": None,
             "duration": None, "playlist-pos": -1, "playlist-count": 0,
             "idle-active": True, "path": None}
@@ -135,12 +180,14 @@ class TestIsAudible(_MorpheusStateCase):
 
     _PLAYING = {"media-title": "Song", "pause": False, "time-pos": 12.0,
                 "duration": 200.0, "playlist-pos": 0, "playlist-count": 1,
-                "idle-active": False}
+                "idle-active": False, "path": "https://youtu.be/abc"}
     # A track that reached its natural end: mpv stays alive and idle. This is
     # the state that would leave the face lit forever on `running` alone.
+    # playlist-count 1, not 0 — see the module-level _ENDED for the measurement
+    # and for why the 0 this used to carry was wrong.
     _ENDED = {"media-title": None, "pause": False, "time-pos": None,
-              "duration": None, "playlist-pos": -1, "playlist-count": 0,
-              "idle-active": True}
+              "duration": None, "playlist-pos": -1, "playlist-count": 1,
+              "idle-active": True, "path": None}
 
     def test_false_before_anything_has_been_polled(self):
         self.assertFalse(morpheus.is_audible())
@@ -278,12 +325,27 @@ class TestNoFalsePositives(_MorpheusStateCase):
         self.assertNotIn("error", self._status(_FAILED))
 
     def test_natural_end_of_track_is_not_a_failure(self):
-        """A finished track leaves mpv in the same idle state a failure does.
-        The load was confirmed while it played, so nothing is outstanding."""
+        """A finished track leaves mpv in the EXACT idle state a failure does —
+        _ENDED and _FAILED are identical dicts. Confirmation while it played is
+        the only thing separating them, which is the point.
+
+        This asserted against _STOPPED until 2026-09-16, so it was really
+        testing the stopped shape under the natural-end name."""
         self._arm_load(age=morpheus._PENDING_GRACE + 1)
         self._status(_PLAYING)                     # confirms the load
         self.assertIsNone(morpheus._pending_load)
-        self.assertNotIn("error", self._status(_STOPPED))
+        self.assertNotIn("error", self._status(_ENDED))
+
+    def test_the_ended_and_failed_shapes_really_are_identical(self):
+        """The load-bearing fact, asserted rather than left in a comment: if a
+        future mpv starts separating them, this fails and the docstring's
+        "decided in Python, never from properties" rule can be revisited."""
+        self.assertEqual(_ENDED, _FAILED)
+
+    def test_only_a_deliberate_stop_differs_by_playlist_count(self):
+        self.assertEqual(_ENDED["playlist-count"], 1)
+        self.assertEqual(_FAILED["playlist-count"], 1)
+        self.assertEqual(_STOPPED["playlist-count"], 0)
 
     def test_idle_with_no_pending_load_is_not_a_failure(self):
         """Nothing was ever asked for — e.g. a freshly started mpv."""
@@ -360,7 +422,49 @@ class TestErrorLifecycle(_MorpheusStateCase):
         # module owns outright (see "Ducking"), so it costs no property read.
         self.assertEqual(out, {"running": True, "title": "Clair de Lune",
                                "paused": False, "pos": 7.5, "dur": 314.0,
-                               "pl_pos": 0, "pl_n": 1, "volume": 100.0})
+                               "pl_pos": 0, "pl_n": 1, "volume": 100.0,
+                               "idle": False, "loading": False,
+                               "path": "https://youtu.be/abc"})
+
+    def test_status_publishes_the_loaded_path(self):
+        """The only exact identity in the snapshot. awen compares video ids
+        with it rather than comparing two spellings of a title, which is what
+        filed the DJ's own picks as the listener's taste until 2026-09-20."""
+        self.assertEqual(self._status(_PLAYING)["path"],
+                         "https://youtu.be/abc")
+
+    def test_a_failed_load_publishes_no_path_though_last_url_still_names_it(self):
+        """The argument for publishing `path` rather than _last_url, made
+        executable. _last_url is INTENT — it records what play() asked for and
+        goes on naming it after the load failed. `path` is what mpv HOLDS, and
+        a caller asking "which URL produced the audio I can hear" is asking
+        about the second one. Attributing a song off the first would credit the
+        DJ with a pick that never made a sound."""
+        self._arm_load(age=morpheus._PENDING_GRACE + 1)
+        out = self._status(_FAILED)
+        self.assertIsNone(out["path"])
+        self.assertEqual(morpheus._last_url, "https://youtu.be/abc")
+
+    def test_path_still_does_not_CONFIRM_a_load(self):
+        """It is in props now. That is not permission to read it here — `path`
+        is set the instant mpv accepts the URL, while yt-dlp is still resolving
+        and long before anyone knows whether it will work."""
+        self._arm_load()
+        self._status(_LOADING)
+        self.assertIsNotNone(morpheus._pending_load,
+                             "a load was confirmed on `path` alone")
+
+    def test_the_model_never_sees_the_path(self):
+        """control_music hands its result straight into the model's context,
+        and a resolved YouTube URL is not a thing to put there. Measured off a
+        real load failure: the stream URL behind one song was 1110 characters
+        of signed, expiring, IP-bound query string. In-process callers get the
+        field; the model does not."""
+        with mock.patch("tools.morpheus._get_props",
+                        return_value=dict(_PLAYING)):
+            out = morpheus.control_music(action="status")
+        self.assertNotIn("path", out["status"])
+        self.assertEqual(out["status"]["title"], "Clair de Lune")
 
 
 class TestFailureReport(_MorpheusStateCase):
@@ -472,7 +576,11 @@ class TestMpvLogIsCapped(_MorpheusStateCase):
 
     def _play(self):
         """play() against a stub mpv. Returns the patched shutdown()."""
-        with mock.patch("tools.morpheus._MPV_LOG_MAX_BYTES", self._CAP),                 mock.patch("tools.morpheus.shutdown") as shutdown,                 mock.patch("tools.morpheus._ensure_mpv", return_value=True),                 mock.patch("tools.morpheus._checkpoint"),                 mock.patch("tools.morpheus._ipc"):
+        with mock.patch("tools.morpheus._MPV_LOG_MAX_BYTES", self._CAP), \
+                mock.patch("tools.morpheus.shutdown") as shutdown, \
+                mock.patch("tools.morpheus._ensure_mpv", return_value=True), \
+                mock.patch("tools.morpheus._checkpoint"), \
+                mock.patch("tools.morpheus._ipc"):
             morpheus.play("https://youtu.be/abc")
         return shutdown
 
@@ -506,7 +614,8 @@ class TestMpvLogIsCapped(_MorpheusStateCase):
         """status()/fetch() are READ-ONLY and Kairos drives them every 2 s. The
         cap belongs on play(), which is the only thing that grows the log."""
         self._write_log(self._CAP + 1)
-        with mock.patch("tools.morpheus._MPV_LOG_MAX_BYTES", self._CAP),                 mock.patch("tools.morpheus.shutdown") as shutdown:
+        with mock.patch("tools.morpheus._MPV_LOG_MAX_BYTES", self._CAP), \
+                mock.patch("tools.morpheus.shutdown") as shutdown:
             self._status(_PLAYING)
             morpheus.fetch()
         shutdown.assert_not_called()
@@ -551,6 +660,111 @@ class TestMpvLogWiring(unittest.TestCase):
         args = self._spawn_args(makedirs_side_effect=OSError("read-only"))
         self.assertTrue(args, "mpv was not spawned at all")
         self.assertFalse(any(a.startswith("--log-file=") for a in args))
+
+
+class TestIdleAndLoadingAreReported(_MorpheusStateCase):
+    """status() reads idle-active for _judge_pending_load and knows whether a
+    load is outstanding, and until 2026-09-16 published neither — so NO caller
+    could tell a stream still resolving from one that had ended. Both look the
+    same from outside: no title, no time-pos, no duration.
+
+    That gap is why these two keys exist. They are not new information, they are
+    information that was being computed and thrown away.
+    """
+
+    def test_playing_is_neither_idle_nor_loading(self):
+        out = self._status(_PLAYING)
+        self.assertIs(out["idle"], False)
+        self.assertIs(out["loading"], False)
+
+    def test_a_resolving_stream_reads_as_loading_and_not_idle(self):
+        self._arm_load()
+        out = self._status(_LOADING)
+        self.assertIs(out["loading"], True)
+        self.assertIs(out["idle"], False)
+
+    def test_an_ended_track_reads_as_idle_and_not_loading(self):
+        self._arm_load(age=morpheus._PENDING_GRACE + 1)
+        self._status(_PLAYING)                     # confirm the load
+        out = self._status(_ENDED)
+        self.assertIs(out["idle"], True)
+        self.assertIs(out["loading"], False)
+
+    def test_loading_and_ended_are_now_distinguishable(self):
+        """The whole point, stated as one assertion. These two produce the same
+        title/pos/dur, so before this pair there was nothing to branch on."""
+        self._arm_load()
+        loading = self._status(_LOADING)
+        self._status(_PLAYING)                     # confirm, so nothing pends
+        ended = self._status(_ENDED)
+        self.assertEqual((loading["title"], loading["pos"], loading["dur"]),
+                         (loading["title"], None, None))
+        self.assertEqual((ended["pos"], ended["dur"]), (None, None))
+        self.assertNotEqual((loading["idle"], loading["loading"]),
+                            (ended["idle"], ended["loading"]))
+
+    def test_a_failed_load_is_no_longer_loading(self):
+        """The verdict is in, so the caller must stop waiting on it."""
+        self._arm_load(age=morpheus._PENDING_GRACE + 1)
+        out = self._status(_FAILED)
+        self.assertIs(out["loading"], False)
+        self.assertEqual(out["error"], "load_failed")
+
+    def test_inside_the_grace_window_still_reads_as_loading(self):
+        """Undecided is not decided. Reporting this as ended would let a caller
+        act on a load that is about to be confirmed."""
+        self._arm_load(age=0.0)
+        self.assertIs(self._status(_FAILED)["loading"], True)
+
+    def test_a_dead_pipe_reports_neither(self):
+        """{"running": False} keeps its exact shape — a caller that branches on
+        `running` first must not find half a snapshot behind it."""
+        self._arm_load(age=morpheus._PENDING_GRACE + 1)
+        self.assertEqual(self._status(_DEAD_PIPE), {"running": False})
+
+
+class TestLastSnapshot(_MorpheusStateCase):
+    """last_snapshot() is is_audible()'s bargain generalised: the whole cached
+    dict, free, so a caller wanting more than one field still never becomes a
+    second status() caller. That matters beyond cost — status() runs
+    _judge_pending_load, so a second poller would confirm and condemn loads on
+    its own schedule, between Kairos's ticks."""
+
+    def test_empty_shape_before_anything_is_polled(self):
+        self.assertEqual(morpheus.last_snapshot(), {"running": False})
+
+    def test_it_returns_what_status_last_saw(self):
+        out = self._status(_PLAYING)
+        self.assertEqual(morpheus.last_snapshot(), out)
+
+    def test_it_never_touches_the_pipe(self):
+        """The reason it exists. _get_props is patched to explode: a single IPC
+        read from here would be a round trip on somebody's fast chain."""
+        self._status(_PLAYING)
+        with mock.patch("tools.morpheus._get_props",
+                        side_effect=AssertionError("last_snapshot did IPC")):
+            self.assertTrue(morpheus.last_snapshot()["running"])
+
+    def test_the_caller_cannot_corrupt_the_cache(self):
+        """A copy, not the live dict — the TestIsAudible precedent. A caller
+        that mutates its own snapshot must not reach in here."""
+        self._status(_PLAYING)
+        snap = morpheus.last_snapshot()
+        snap["title"] = "something else"
+        snap["running"] = False
+        self.assertEqual(morpheus.last_snapshot()["title"], "Clair de Lune")
+        self.assertTrue(morpheus.last_snapshot()["running"])
+
+    def test_it_carries_the_error_slug_through(self):
+        self._arm_load(age=morpheus._PENDING_GRACE + 1)
+        self._status(_FAILED)
+        self.assertEqual(morpheus.last_snapshot()["error"], "load_failed")
+
+    def test_it_follows_mpv_going_away(self):
+        self._status(_PLAYING)
+        morpheus._proc = None
+        morpheus.status()
+        self.assertEqual(morpheus.last_snapshot(), {"running": False})
 
 
 if __name__ == "__main__":

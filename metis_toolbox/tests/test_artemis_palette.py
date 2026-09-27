@@ -1,14 +1,15 @@
 """
-test_artemis_palette.py — lockstep guard for the one colour set that exists
-twice.
+test_artemis_palette.py — the map's colour rules.
 
-tools/demeter.py renders the terrain raster headless (a tools/ module must
-not import Tk), so it carries the three band colours as RGB tuples while
-panels/artemis_panel.py draws vectors from theme.C's map_* keys. Two copies
-of one palette is a drift waiting to happen: the raster would band in one
-green ramp and the legend/vectors in another, and nothing would fail. This
-asserts the pair agrees — derived from the actual constants, never a
-hardcoded duplicate of either.
+Until 2026-09-26 this was a lockstep guard for the one colour set that existed
+twice: tools/demeter.py carried the terrain bands as RGB tuple copies of
+theme.C's map_* keys. Those copies are gone — demeter now calculates its bands
+from palette.py, which is Tk-free and annotated, so a tools/ module can import
+it (CONVENTIONS §12, 2026-09-26). What remains here are the map's own rules:
+which palette role each raster band is drawn from, that every key the panel
+draws with exists, and that nothing on the map reaches text brightness.
+Keeping ANY colour literal out of every file but palette.py is
+test_palette_guard's job, not this file's.
 
     python -X utf8 -m unittest tests.test_artemis_palette
 """
@@ -19,15 +20,17 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import theme
+import palette
 from tools import demeter
 
-# demeter constant name -> the theme.C key it must equal.
-_PAIRS = {
+# demeter band constant -> the palette role it is drawn from. A decision, not
+# a copy: the raster's missing data renders as the panel background, so it
+# looks missing rather than looking like a valley.
+_BANDS = {
     "RGB_VALLEY": "map_terrain_lo",
     "RGB_MID": "map_terrain_mid",
     "RGB_PEAK": "map_terrain_hi",
-    "RGB_NODATA": "bg",          # missing data renders as the panel background
+    "RGB_NODATA": "bg",
 }
 
 # Every map key the panel draws with, so a rename fails here rather than at
@@ -40,45 +43,41 @@ _MAP_KEYS = [
 ]
 
 
-def _rgb(hex_colour):
-    value = hex_colour.lstrip("#")
-    return (int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16))
+class TestMapPalette(unittest.TestCase):
 
-
-class TestPaletteLockstep(unittest.TestCase):
-
-    def test_demeter_bands_match_theme(self):
-        for const_name, theme_key in _PAIRS.items():
+    def test_each_band_is_drawn_from_its_role(self):
+        for const_name, role in _BANDS.items():
             with self.subTest(constant=const_name):
                 self.assertEqual(getattr(demeter, const_name),
-                                 _rgb(theme.C[theme_key]),
-                                 f"demeter.{const_name} and theme.C"
-                                 f"[{theme_key!r}] have drifted apart")
+                                 palette.rgb(palette.C[role]),
+                                 f"demeter.{const_name} is not drawn from "
+                                 f"palette.C[{role!r}]")
 
-    def test_every_pair_is_covered(self):
-        # Derived, not counted: a new RGB_* constant in demeter must be
-        # claimed here or this fails.
+    def test_every_band_is_claimed(self):
+        # Derived, not counted: a new RGB_* constant in demeter must name the
+        # palette role it is drawn from here, or this fails.
         declared = {name for name in vars(demeter)
                     if name.startswith("RGB_")}
-        self.assertEqual(declared, set(_PAIRS))
+        self.assertEqual(declared, set(_BANDS))
 
-    def test_map_keys_exist_and_are_hex(self):
+    def test_map_keys_exist(self):
         for key in _MAP_KEYS:
             with self.subTest(key=key):
-                self.assertIn(key, theme.C)
-                self.assertRegex(theme.C[key], r"^#[0-9A-Fa-f]{6}$")
+                self.assertTrue(key in palette.C,
+                                f"{key!r} is drawn by the map but missing "
+                                f"from palette.C")
 
     def test_no_map_key_reaches_text_brightness(self):
         # The chart must stay readable *under* the phosphor text: nothing on
         # the map may be as luminous as C["text1"] (spec §11 palette rule).
         def luminance(hex_colour):
-            r, g, b = _rgb(hex_colour)
+            r, g, b = palette.rgb(hex_colour)
             return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
-        text = luminance(theme.C["text1"])
+        text = luminance(palette.C["text1"])
         for key in _MAP_KEYS:
             with self.subTest(key=key):
-                self.assertLess(luminance(theme.C[key]), text)
+                self.assertLess(luminance(palette.C[key]), text)
 
 
 if __name__ == "__main__":

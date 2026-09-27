@@ -8,21 +8,27 @@ same pattern as the panel smoke tests) exercises theme's public seams:
   - the shared widgets (Card header + set_header, TabHost tab switching,
     PhosphorScroll's fits-vs-overflows thumb),
   - the right-click menu primitives (themed_menu builds in-theme, popup_menu
-    pops and releases the grab).
+    pops and releases the grab),
+  - the widget defaults (_init_widget_defaults: the selection and cursor
+    colours no widget sets, and every root that inits fonts inits them too).
 
     python -X utf8 -m unittest tests.test_theme
 """
 
+import ast
 import os
+import subprocess
 import sys
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _APP_ROOT)
 
 import tkinter as tk
 
 import theme
+from panels.zeno_panel import ZenoPanel
 
 # Arbitrary baseline geometry for the rescale tests (felhaven's real one).
 _BW, _BH = 960, 620
@@ -184,6 +190,95 @@ class ThemeTests(unittest.TestCase):
             theme.popup_menu(menu, event)
         pop.assert_called_once_with(42, 42)
         release.assert_called_once()
+
+
+class WidgetDefaultsTests(unittest.TestCase):
+    """_init_widget_defaults: the colours Tk would otherwise take from Windows.
+
+    Its own root on purpose: each tk.Tk() is a separate Tcl interpreter with
+    its own option database, so these defaults cannot leak into ThemeTests."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tk.Tk()
+        cls.root.withdraw()
+        theme._init_fonts(cls.root)
+        theme._init_widget_defaults(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+
+    def _make(self, widget_class, **kw):
+        widget = widget_class(self.root, **kw)
+        self.addCleanup(widget.destroy)
+        return widget
+
+    def test_a_bare_entry_selects_and_types_in_theme(self):
+        """Nothing here sets these options; the theme does. Until 2026-09-27
+        every Entry selected in Windows blue with a black cursor, and
+        test_palette_guard could not see it, because nobody wrote either."""
+        entry = self._make(tk.Entry)
+        self.assertEqual(entry.cget("selectbackground"), theme.C["select_bg"])
+        self.assertEqual(entry.cget("selectforeground"), theme.C["select_fg"])
+        self.assertEqual(entry.cget("insertbackground"), theme.C["text1"])
+
+    def test_a_bare_text_keeps_its_selection_when_focus_leaves(self):
+        """Tk's default inactiveselectbackground is '' (draw nothing), so a
+        Text's selection vanished as soon as focus moved elsewhere."""
+        text = self._make(tk.Text)
+        self.assertEqual(text.cget("selectbackground"), theme.C["select_bg"])
+        self.assertEqual(text.cget("inactiveselectbackground"),
+                         theme.C["select_bg"])
+
+    def test_a_real_panel_field_gets_them_too(self):
+        """A representative field built by a panel rather than by this test:
+        Zeno's entry sets its own bg, fg and cursor, and no selection option."""
+        panel = self._make(ZenoPanel)
+        self.assertEqual(panel._entry.cget("selectbackground"),
+                         theme.C["select_bg"])
+
+    def test_an_explicit_option_still_wins(self):
+        """A default, not an override: a panel can still opt out."""
+        entry = self._make(tk.Entry, selectbackground=theme.C["red"])
+        self.assertEqual(entry.cget("selectbackground"), theme.C["red"])
+
+    def test_the_selection_outranks_tags_made_after_it(self):
+        """A Text draws its selection as the "sel" tag, and Tk creates that tag
+        first, so every tag a panel adds outranks it. Measured on screen: the
+        selected text kept its tag's colour, so Home's chat ignored
+        selectforeground. The class binding raises "sel" when it changes."""
+        text = self._make(tk.Text)
+        text.insert("end", "an answer", "late")
+        text.tag_configure("late", foreground=theme.C["amber"])
+        text.tag_add("sel", "1.0", "end")
+        self.root.update()                  # <<Selection>> is queued, not immediate
+        self.assertEqual(text.tag_names()[-1], "sel")   # lowest priority first
+
+    def test_every_root_that_inits_fonts_inits_widget_defaults(self):
+        """Felhaven and Sphynx each own a tk.Tk(). A third root that copied
+        only _init_fonts would quietly select in Windows blue again. Tracked
+        files, not the filesystem (CONVENTIONS §10); tests/ is exempt, since a
+        test root may init fonts alone."""
+        try:
+            out = subprocess.run(["git", "ls-files", "*.py"], cwd=_APP_ROOT,
+                                 check=True, capture_output=True, text=True).stdout
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest("git is not available")
+        callers = {"_init_fonts": set(), "_init_widget_defaults": set()}
+        for rel in (line.replace("\\", "/") for line in out.splitlines()):
+            if not rel or rel.startswith("tests/"):
+                continue
+            with open(os.path.join(_APP_ROOT, rel), encoding="utf-8") as fh:
+                tree = ast.parse(fh.read())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    func = node.func
+                    name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+                    if name in callers:
+                        callers[name].add(rel)
+        self.assertIn("felhaven.py", callers["_init_fonts"])   # the scan found them
+        self.assertEqual(callers["_init_fonts"], callers["_init_widget_defaults"])
 
 
 if __name__ == "__main__":

@@ -14,6 +14,190 @@ New here? Start with [`README.md`](README.md) for what Felhaven is,
 [`SETUP.md`](SETUP.md) to run it, and [`CONVENTIONS.md`](CONVENTIONS.md) for how
 the code is put together.
 
+- `2026-09-27` — `theme.py`: new `_init_widget_defaults(root)` — via Tk's option database, every Entry/Text selects in `select_bg`/`select_fg` and types with a `text1` cursor, not Windows blue and black. `felhaven.py` and `sphynx_panel.py` call it.
+- `2026-09-27` — `palette.py`: new identity aliases `select_bg` (→ `border`) and `select_fg` (→ `text1`), the look of a hovered menu item.
+- `2026-09-27` — `theme.py`: a Text's `sel` tag is raised on every `<<Selection>>`, so selected text in Home's and Emanon's tagged logs takes the selection colours instead of keeping its tag's.
+- `2026-09-27` — `tests/test_theme.py`: coverage for the widget defaults, and a guard that every file calling `_init_fonts` also calls `_init_widget_defaults`.
+- `2026-09-26` — `palette.py`: new — the one file allowed to contain a colour value; `theme.py` re-exports `C` and `rgb()`. Identity aliases (`green`, `season_fg`, the accents) are calculated from their targets via `_SAME_AS`.
+- `2026-09-26` — `tools/demeter.py`: the terrain bands are calculated from `palette.C` with `rgb()`, no longer RGB tuple copies of it.
+- `2026-09-26` — `panels/pythia_face.py`: the glow ramps burn out toward new key `C["burnout"]` (`#FFFFFF`) instead of a hardcoded white; its own hex parser is gone.
+- `2026-09-26` — `tests/test_palette_guard.py`: new — fails red on a hex string, a Tk colour name in a colour option, or an RGB triple outside `palette.py`, and on an undeclared shared palette value.
+- `2026-09-26` — `tests/test_artemis_palette.py`: the lockstep half is retired (no copy left to hold); the map's band-role and text-brightness rules stay.
+- `2026-09-26` — `theme.py`: new base key `verbatim` (`#2E8B99`, the map's water cyan as its own key); Daedalus's `daedalus ›` block in the chat uses it instead of `teal`.
+- `2026-09-25` — `felhaven.py`: the minimum window is 760 px wide (`MIN_W`), not 700. At 700 the seven-tab Moderati bar dropped DAEDALUS entirely; `test_moderati_panel_smoke` now holds the bar to `MIN_W`.
+- `2026-09-25` — `tools/daedalus.py`: new — Felhaven's map of itself. Reads every module with `ast`, never importing one, into nodes, import edges and docstrings; brain tool `get_module_docstring`.
+- `2026-09-25` — `pythia.py`: `ask(on_verbatim=...)` — a tool's `verbatim` text goes to the UI and never into the model's context; a round made only of such calls ends the turn on the tool's `ack` line.
+- `2026-09-25` — `pythia.py`: `daedalus` joins `_TOOL_MODULES`. Its enum and per-module glosses are built from the index at import — measured at +1,943 prefix tokens, a warmed question unchanged.
+- `2026-09-25` — `panels/home_panel.py`: verbatim tool output prints as its own `daedalus ›` block, exactly as given — never spoken, never in `_history`.
+- `2026-09-25` — `panels/daedalus_panel.py`: new — the import graph (hover lights a module's neighbours; dashed = a lazy import) and the chosen module's docstring, with OPEN IN NOTEPAD.
+- `2026-09-25` — `panels/moderati_panel.py`: a seventh tab, DAEDALUS, accent `C["gray"]`.
+- `2026-09-25` — `README_PANTHEON/daedalus.md`: new stub and index row.
+- `2026-09-25` — `tests/`: new `test_daedalus`, `test_daedalus_panel_smoke`, `test_pythia_verbatim`; the HomePanel and Moderati smoke tests cover the verbatim block and the seventh tab.
+- `2026-09-20` — `tools/euterpe.py`: `_clean()` folds Unicode form to NFC first. `casefold()` folds case and not form, so one song spelled two ways keyed twice — breaking attribution, no-repeat and one-row-per-song at once.
+- `2026-09-20` — `awen.py`: new `_whose_song()` decides whose song is audible by VIDEO ID, not by comparing two spellings of a title — which filed the DJ's own picks as the listener's taste when yt-dlp and mpv disagreed about one.
+- `2026-09-20` — `awen.py`: `_whose_song()` has a THIRD answer. A song it cannot attribute is filed `dj` and its held introduction is not spoken — a wrong `dj` costs one run, a wrong `user` is permanent.
+- `2026-09-20` — `awen.py`: an unprovable attribution logs at WARNING, the third exception to this module's no-INFO rule; the routine per-song verdicts now exist at DEBUG on both branches. The `record()` branch had no line at all.
+- `2026-09-20` — `awen.py`: `_note_playing()` passes mpv's loaded URL to `euterpe.record()`, so a ledger row carries a `video_id`. Every existing row had `null`, leaving the id branch of `was_recently_played()` dead.
+- `2026-09-20` — `awen.py`: `_last_played_key` is keyed to match the list the row lands in — with the pending channel when ours, without it when `record()` re-derives it. A key matching neither named an unheard song.
+- `2026-09-20` — `tools/morpheus.py`: `status()` publishes `path`, the URL mpv actually loaded. `_last_url` is intent and still names a URL after that load failed; `path` is what mpv holds. It still must not CONFIRM a load.
+- `2026-09-20` — `tools/morpheus.py`: new `_model_status()` strips `path` from what `control_music` hands the model. Measured: the stream URL behind one song was 1110 characters of signed, expiring, IP-bound query string.
+- `2026-09-20` — `tests/test_awen.py`: the PLAYING fixture carries a `path`, and its video id is deliberately NOT the search fixture's. Every test built both sides of the identity comparison from ONE string.
+- `2026-09-19` — `tools/morpheus.py`: the handover taper's hold is CONDITIONAL now — new `release_taper()` ends it the instant Awen sees the next song audible; `taper()`'s old fixed 6s hold is now a 12s backstop (`_TAPER_HOLD_MAX`) for a load that never lands.
+- `2026-09-19` — `awen.py`: `_note_playing()` calls `morpheus.release_taper()` the moment a NEW song is audible, so the up-ramp and the held introduction start together rather than the ramp finishing on its own clock first.
+- `2026-09-19` — `tools/euterpe.py`: `_save()` force-bumps the ledger's mtime past its prior value (`_bump_mtime`). Two close writes could share an mtime, and `stamp()`'s equality check silently let a save through it exists to refuse.
+- `2026-09-19` — `panels/queue_panel.py`: new `QueueBox` — a Toplevel listing the Auto-DJ queue in play order, one click to drop a song. Takes rows and a callback and imports nothing from `awen`, the `RiteLog` discipline.
+- `2026-09-19` — `panels/home_panel.py`: the Auto-DJ status line is a CONTROL — clicking `Auto-DJ: N queued` opens the queue. Hover brightens amber to `amber_bright`, the one documented §7 inversion.
+- `2026-09-19` — `panels/home_panel.py`: new `_set_status()` owns the label's text AND cursor. Five sites write it and only one is clickable; without one owner the hand cursor survived into `consulting the oracle…` for a whole answer.
+- `2026-09-19` — `panels/home_panel.py`: `_tick_queue()` rides the 60ms chain beside the other four passengers, so the box needs no timer and `test_panel_after_teardown`'s one-pending-timer rule stays literally true.
+- `2026-09-19` — `panels/queue_panel.py`: a row reddens and grows a ✕ on hover — red, not amber, because the click destroys. One click, no confirm: the DJ tops the queue back up within twenty seconds.
+- `2026-09-19` — `awen.py`: new `queue_view()` and `queue_revision()` — a snapshot of the waiting picks, and one int to tell a UI when it changed. Rows carry an id and a name and nothing else.
+- `2026-09-19` — `awen.py`: new `remove_queued(id)` — the second writer of `_queue`, the Tk main thread. Identity is a SERIAL, never an index: the worker pops from the head, so row n is a different song by the time a click lands.
+- `2026-09-19` — `awen.py`: a removed song is also DECLINED and folded into `_known_plays()`. Without it the entry leaves the do-not-choose list as it leaves the queue, and the next top-up banks it again inside twenty seconds.
+- `2026-09-19` — `awen.py`: `_declined` goes in `_known_plays()`, not `_played_rows()` — it was chosen, never heard, and the pop's revalidation reads the latter.
+- `2026-09-19` — `awen.py`: the deep pass KEEPS `describe()`'s artist/track. It is the only source that knows which half of a title is which; `has_music_evidence()` read the same two fields and threw the values away.
+- `2026-09-19` — `awen.py`: `status_line()` reports `Auto-DJ: N queued`, below both lines that explain a silence. It reverses the old rule that the label says nothing mid-song: the label is a control now, and an invisible affordance is not one.
+- `2026-09-19` — `tools/euterpe.py`: `_DASH_TAIL_JUNK` keeps only `remaster` and `live at/in/from`. `radio edit` and `acoustic version` came out: stripping them for one spelling only recreated the asymmetry.
+- `2026-09-19` — `tools/euterpe.py`: `_JUNK_WORDS` excludes `version` because an acoustic version is a different RECORDING, and the dash list must not strip what the paren list keeps.
+- `2026-09-19` — `tools/euterpe.py`: `_FEAT_TAIL`'s cost is stated — it cannot tell a credit from a place, so `Blues in Ft. Worth` keys as `blues in`. The `_names_the_song` ADIDAS trade, with the same recourse: a line typed into TUNES.
+- `2026-09-19` — `tools/euterpe.py`: `_halves()` folds CASE as well as order. The live ledger held one song twice — `Cage The Elephant - ...` and its own folded form — typed through TUNES, which does not re-derive keys, and both reached the model as separate songs.
+- `2026-09-19` — `tools/euterpe.py`: `recent_titles()` and `taste_anchor()` de-dupe through `same_song()` instead of `key not in seen`. A raw-string membership test could disagree with the guard about what one song is, and only one of the two was enforced.
+- `2026-09-19` — `tools/euterpe.py`: new `_DASH_TAIL_JUNK` — `- Remastered 2011` / `- Live at X` are stripped before the channel-derived artist is applied, so a Topic-channel upload keys as `queen - bohemian rhapsody`.
+- `2026-09-19` — `tools/euterpe.py`: that form is the house style of the `- Topic` channels the DJ started preferring on 2026-09-18, so its favourite picks were the ones keying worst.
+- `2026-09-19` — `tools/euterpe.py`: the dash list is deliberately narrower than `_JUNK_WORDS` — a bare `live` in a dash tail may be the track (`Live and Let Die`), so every pattern needs a year, a preposition or a word that cannot be a song title.
+- `2026-09-19` — `tools/euterpe.py`: new `_FEAT_TAIL`, and `feat.` joins `_JUNK_WORDS`. `[feat. X]` was stripped wholesale while `(feat. X)` and bare `ft. X` survived, so one song had two keys decided by the uploader's choice of bracket.
+- `2026-09-19` — `awen.py`: `_note_playing()` asks `same_song()` instead of `==`. The pending key comes from the search result and the live one from mpv's title, so any spelling difference filed the DJ's own pick as the listener's taste.
+- `2026-09-18` — `tools/morpheus.py`: the volume mpv holds is now a composition — user level x duck latch x taper gain — written in one private place. `_user_volume` stays authoritative; the taper adds a factor, not a second writer.
+- `2026-09-18` — `tools/morpheus.py`: new `taper()` and `tick_fade()` — a bounded dip (down, hold, up) whose floor is never 0, so a mispredicted handover is one dip-and-swell rather than a silence and nothing ever owes a restore.
+- `2026-09-18` — `tools/morpheus.py`: `unduck()` routes through the composed writer. Writing `_user_volume` flat mid-dip slammed the music to full over a fade that was still running.
+- `2026-09-18` — `panels/home_panel.py`: `_poll` drives `morpheus.tick_fade()` — the second passenger on the 60ms chain, beside `harmonia.tick_yield()`. Kairos at 2s cannot ramp anything.
+- `2026-09-18` — `tools/morpheus.py`: the ramp is rate-limited to `_FADE_MIN_INTERVAL`. Measured against a live mpv on the main thread: `_apply_volume()` is 0.10ms median, 50.7ms p95; a dip cost 85 writes at 60ms and costs 30 now.
+- `2026-09-18` — `awen.py`: the pop arms a taper, and `_maybe_taper()` arms one a few seconds before a song ends. The second is ADVISORY — it sets no latch, so whether a track ended is still decided in Python.
+- `2026-09-18` — `tools/morpheus.py`: new `describe(url)` — one FULL yt-dlp extraction, without `--flat-playlist`, for the music metadata a flat search cannot see. It reports; euterpe still owns every judgment.
+- `2026-09-18` — `tools/euterpe.py`: `is_a_song()` takes an optional third argument, `details`. With two arguments the answer is byte-identical, so the ledger path is untouched; with details it can only ADD a refusal, never remove one.
+- `2026-09-18` — `tools/euterpe.py`: new slug `not_music_category` — YouTube files it as instructional AND nothing in its metadata says music. Both halves required, so a real track miscategorised is still a track.
+- `2026-09-18` — `tools/euterpe.py`: new `has_music_evidence()` and `not_music_categories()` + shipped `not_music_categories` config key. Evidence is the Music category, a track/artist pair, or a `- Topic` channel.
+- `2026-09-18` — `awen.py`: the guard runs two passes — free checks on all five results, then a full extraction on up to `_DEEP_CHECK_MAX` survivors. A chainsaw-sharpening video is now refused; it passed every check a title and a duration could make.
+- `2026-09-18` — `awen.py`: the deep pass SELECTS on evidence of music and REJECTS on evidence of something else. No evidence either way falls back to the old rules, so a yt-dlp outage degrades rather than taking Auto-DJ off the air.
+- `2026-09-18` — `awen.py`: a QUEUE. Songs are chosen four deep while a song plays, so a song ending is a pop rather than a turn. The 4-20s silent gap between every song is gone; picking was the gap.
+- `2026-09-18` — `awen.py`: `_guarded_play_music()` queues and `_play_from_queue()` plays. Entries are revalidated at the pop — local checks only — because an entry can be minutes old and both the ledger and euterpe's config move under it.
+- `2026-09-18` — `awen.py`: `_known_plays()` splits into `_played_rows()` + `_queued_rows()`, so a queued song is refused by the guard AND named in the model's do-not-choose list from the one source that cannot disagree with itself.
+- `2026-09-18` — `awen.py`: the top-up runs only while something is audible and at most every `_FILL_COOLDOWN`, so an idle dashboard cannot spend the model all night and a failing search cannot run yt-dlp every 2s.
+- `2026-09-18` — `awen.py`: a top-up that queues nothing counts NO failure. The breaker means "an attempt to fill a silence that produced no song"; counting during playback would switch Auto-DJ off mid-song.
+- `2026-09-18` — `awen.py`: the breaker's one counting site moved to `fetch()`, the only place that knows whether a song actually started.
+- `2026-09-18` — `awen.py`: a song's introduction is HELD until the song is audible and released by `_note_playing()`. `morpheus.play()` sends a loadfile and returns, so the intro was read out before anything knew the stream would open — and on 2026-09-17 it did not.
+- `2026-09-18` — `awen.py`: the line is held ON `_pending_pick`, so a failed load, a vanished mpv or the listener starting something else drops the sentence with the pick it described — no new rule for any of them.
+- `2026-09-18` — `awen.py`: `_observe()` returns a payload rather than a line, and `_note_playing()` returns the released intro. New `_spoken()` builds one only when there is something to say.
+- `2026-09-18` — `awen.py`: new `_owe_a_pick()` — a turn that played nothing re-arms the latch. `fetch()` cleared `_want_pick` before the turn and nothing put it back, so one bad turn took Auto-DJ off the air, silent, until the app restarted (2026-09-16 19:07).
+- `2026-09-18` — `awen.py`: `_observe()` counts the DJ's OWN pick failing to load. `_playing_title` is already `None` by then, so the `was is None` return dropped it before it read the error slug — the 2026-08-20 outage the breaker was written for.
+- `2026-09-18` — `awen.py`: that failure is consumed with `_pending_pick`, so a sticky `load_failed` slug is counted once per pick and not once per tick.
+- `2026-09-18` — `awen.py`: the breaker count clears in `_note_playing()`, when a song becomes AUDIBLE, not in `_take_a_turn()` when `play()` was called. Resetting on the call made it oscillate 0-1-0-1 and never reach three.
+- `2026-09-18` — `awen.py`: `_observe()` returns the breaker's line and `fetch()` relays it. Tripping from the observer used to turn the lamp off in silence while tripping from a turn said so.
+- `2026-09-18` — `awen.py`: anything audible clears the owed pick, whoever started it, and `_quiet()` also holds while the player is mid-load — both so a re-armed pick cannot open over a song the listener just chose.
+- `2026-09-17` — `tools/euterpe.py`: new `same_song()` — song identity ignores the order across the dash. `Linkin Park - In The End` and `In The End - Linkin Park` are one song; the guard let the second through and the DJ repeated it.
+- `2026-09-17` — `tools/euterpe.py`: the COMPARISON moved, not the key — stored keys keep the order they arrived in, so TUNES and the model's list still read like titles and nothing needed re-keying.
+- `2026-09-17` — `tools/euterpe.py`: the guard, `record()`'s move-on-replay and `replace_all()`'s duplicate check all ask `same_song()` — if they could disagree, a song the guard refused could still be filed twice.
+- `2026-09-17` — `tools/euterpe.py`: new `pretty()` — `normalize()` with the case kept, for a display name. Both go through `_clean()`, so a name that stripped differently from the key cannot exist.
+- `2026-09-17` — `awen.py`: new `_names_the_song()` — an intro that does not name the song playing is replaced by the built line. The model announced a different Linkin Park song while holding the right title in its own tool result.
+- `2026-09-17` — `awen.py`: the built line and the check both read `euterpe.pretty()`, so the spoken name comes from the resolved search result and never from the model.
+- `2026-09-17` — `tools/euterpe.py`: one row per song. `record()` MOVES a song already on the list — drops the old row, appends the new one — instead of adding a second copy.
+- `2026-09-17` — `tools/euterpe.py`: identity for that is the normalized key alone, never also the video id — a second test on the id could only split a row the key had already joined.
+- `2026-09-17` — `tools/euterpe.py`: `replace_all()` refuses a duplicate with `duplicate_row`, naming BOTH rows and the key — it is the path that promises not to rewrite what was typed, so it does not collapse them.
+- `2026-09-17` — `tools/euterpe.py`: the docstring stops calling this an append-only log, because it is not one any more.
+- `2026-09-17` — `tests/test_euterpe.py`: a replay cannot push another song off the list — the cap trims from the front, so duplicates used to cost the oldest song the listener actually liked.
+- `2026-09-17` — `awen.py`: the DJ stops writing to the ledger. Its own picks no longer become `dj` rows — the file is the listener's list, and a job that writes to the list it reads from is a feedback loop.
+- `2026-09-17` — `awen.py`: new `_session_plays` — the DJ's picks this run, in memory only, which is now the whole of its "don't replay myself" memory. A restart may let it replay something from earlier the same day.
+- `2026-09-17` — `awen.py`: session rows are shaped like ledger rows and carry `source: "dj"`, so euterpe's existing views read one concatenated list and `taste_anchor()` skips them by the rule it already had.
+- `2026-09-17` — `awen.py`: new `_known_plays()` — ledger plus session, built in one place so the guard and the list the model reads cannot disagree about what has been played.
+- `2026-09-17` — `awen.py`: new `_last_played_key` — "Just finished" reads it rather than the newest row of either list, because the two interleave in time and neither holds both halves.
+- `2026-09-17` — `awen.py`: `_guarded_play_music` reads the combined list once outside the result loop, instead of re-reading the ledger file for each of five results.
+- `2026-09-17` — `awen.py`: switching Auto-DJ on gates on `taste_anchor()` rather than `entries()` — a ledger of hand-typed `dj` rows is not empty and has no vibe in it either.
+- `2026-09-17` — `awen.py`: the listener's own plays are still recorded, still with the flag off; toggling off no longer being a licence to repeat is why `_session_plays` survives it.
+- `2026-09-17` — `tests/test_awen.py`: new `test_a_song_the_DJ_ITSELF_played_is_refused_on_the_next_turn` — the guard's only real pin. Every existing no-repeat test seeded `source="user"`, so the suite would have stayed green while the DJ looped one song.
+- `2026-09-17` — `tests/test_awen.py`: `_session_plays` and `_last_played_key` added to the harness reset — a leaked session row refuses a later test's pick as "already played".
+- `2026-09-17` — `tests/test_awen.py`: the 2026-09-16 dashless-title regression now asserts ONCE in session memory, and that the second sighting did not leak into the listener's list.
+- `2026-09-17` — `tools/euterpe.py`: `SOURCES` keeps `"dj"` — old rows are still there and TUNES can still type one, meaning "this played, but it is not my taste".
+- `2026-09-17` — `panels/euterpe_panel.py`: the hint says the list is yours and that Auto-DJ never adds to it.
+- `2026-09-17` — `panels/euterpe_panel.py`: a BASE COPY row — RESTORE and TAKE FROM SAVED, on their own line because they act on a different file from SAVE and RELOAD.
+- `2026-09-17` — `panels/euterpe_panel.py`: RESTORE is preview-only (the `machine_spirit_panel.py` Revert precedent) — it fills the box and writes nothing until SAVE.
+- `2026-09-17` — `panels/euterpe_panel.py`: RESTORE does NOT re-take the staleness stamp — restoring drops every play since the base, so a song landing underneath must still stop the save.
+- `2026-09-17` — `panels/euterpe_panel.py`: TAKE FROM SAVED is refused while the box is dirty — the base comes from disk, so taking one mid-edit would capture the older state and report success.
+- `2026-09-17` — `panels/euterpe_panel.py`: the base row carries a caption saying when the base was taken and how many plays are in it — the two facts that answer "is my restore point stale?".
+- `2026-09-17` — `panels/euterpe_panel.py`: the four label-as-buttons come from one `_button()` helper rather than four copies of the hover pair.
+- `2026-09-17` — `tools/euterpe.py`: new `base_snapshot()` and `take_base()` — `euterpe_ledger.json.base`, a restore point nothing but the operator replaces. The `.bak` rolls; this does not.
+- `2026-09-17` — `tools/euterpe.py`: `take_base()` reads the ledger from DISK, never from typed text — a base copy is a state that was actually saved.
+- `2026-09-17` — `tools/euterpe.py`: a corrupt base copy reads as `plays: None` with its text intact, not as no base at all — a restore point you cannot open is worse than one you can see is broken.
+- `2026-09-17` — `tools/euterpe.py`: validation extracted to `_validate()`, asked by both `replace_all()` and `take_base()` — they must not disagree about what a ledger is, or a base copy could be taken that SAVE would refuse to restore.
+- `2026-09-17` — `panels/euterpe_panel.py`: new — the TUNES tab. Euterpe's ledger as plain editable JSON, with SAVE, RELOAD and the phosphor scrollbar.
+- `2026-09-17` — `panels/euterpe_panel.py`: SAVE refuses when the file's mtime moved since the box was loaded — Awen records plays on a 2s tick, and the save would have deleted the song that just finished.
+- `2026-09-17` — `panels/euterpe_panel.py`: a refusal keeps the typed text; a success reloads from disk, because euterpe writes its own indentation and applies the 200-play cap.
+- `2026-09-17` — `panels/euterpe_panel.py`: right-click Cut/Copy/Paste/Select All (the `echo_panel.py` menu), `Control-a` bound to select-all, and `undo=True` for Ctrl+Z.
+- `2026-09-17` — `tools/euterpe.py`: new `replace_all()` — validate a whole ledger and write it, returning a slug naming the row rather than raising; the first write path that is not `record()`.
+- `2026-09-17` — `tools/euterpe.py`: new `raw_text()` and `stamp()` — the file verbatim for the editor to show, and the mtime it compares before saving.
+- `2026-09-17` — `tools/euterpe.py`: new `_backup()` — every hand edit copies the log to `euterpe_ledger.json.bak` first, and a save whose backup fails is refused rather than taken blind.
+- `2026-09-17` — `tools/euterpe.py`: `replace_all()` applies the same `_MAX_ENTRIES` trim `record()` does — an editor around the cap would be a hole in the only thing keeping the file finite.
+- `2026-09-17` — `panels/vox_array_panel.py`: a fourth tab, TUNES, in amber — Auto-DJ's colour everywhere else in the stack. Request-driven, so nothing is registered with Kairos.
+- `2026-09-17` — `.gitignore`: `euterpe_ledger.json` becomes `euterpe_ledger.json*` — it now covers the `.bak` and the dated copy left by the 2026-09-16 repair, which `git add -A` would have staged.
+- `2026-09-17` — `tests/test_euterpe.py`: 38 new tests over the editor's write path, every refusal asserting the file did not move, and that euterpe still exports no `clear()` and is still not a brain tool.
+- `2026-09-17` — `tests/test_vox_array_panel_smoke.py`: the ledger is redirected at a temp file for EVERY case, not just the saving ones — building the host now builds a tab that reads it.
+- `2026-09-17` — `README.md`, `SETUP.md`, `README_PANTHEON/euterpe.md`: Euterpe's `UI:` stops saying "none — never drawn", and Vox Array's row says four tabs.
+- `2026-09-16` — `awen.py`: a playing song is identified by its RAW title, not its normalized key — the key depends on the channel, so every DJ pick with a dashless title was recorded twice, the second time as a `user` pick.
+- `2026-09-16` — `awen.py`: that duplicate fed the taste anchor, so the DJ's own choices became "what the listener likes" — one gear-manual video steered a whole evening.
+- `2026-09-16` — `tools/euterpe.py`: new `is_a_song()` — one judgment shared by the ledger and Awen's guard, so they cannot disagree about what a song is.
+- `2026-09-16` — `tools/euterpe.py`: new `min_song_seconds` (90) and `not_music` title denylist, both config — duration alone does not separate a song from a 282s gear manual.
+- `2026-09-16` — `awen.py`: a pick walks five search results and takes the first that passes every guard, instead of judging the top hit and handing the turn back as an error.
+- `2026-09-16` — `awen.py`: guard refusals share one `no_usable_result` slug with the reason in the human half — a slug read from a variable is not verifiable by `test_tool_output_contract`.
+- `2026-09-16` — `awen.py`: a degraded ask() answer never becomes a song intro — a turn that played a song then ran out of tool rounds spoke "The oracle got stuck consulting its tools. Try rephrasing." aloud.
+- `2026-09-16` — `pythia.py`: the five give-up answers are named once and recognised by new `is_degraded()` — for callers that ACT on the text rather than print it.
+- `2026-09-16` — `awen.py`: new `status_line()` — a free read naming the two states worth showing, "choosing the next song…" and "waiting for quiet…".
+- `2026-09-16` — `panels/home_panel.py`: `_tick_warmup` becomes `_tick_status` — one label, three claimants in strict priority: a question in flight, the startup warm, then Auto-DJ.
+- `2026-09-16` — `README.md`: the Views table gains **Cartograph** — the Artemis local-map view shipped in August 2026 and the table never mentioned it.
+- `2026-09-16` — `tests/test_sidebar_view_parity.py`: the README's Views table is held to the sidebar's labels, in rail order — the third place a view is named, and the only one that failed silently.
+- `2026-09-16` — `awen.py`: every routine log line drops from INFO to DEBUG — Emanon shows 40 lines, and an unattended job at INFO would flush every real failure out of it; Euterpe's ledger is the record of what played.
+- `2026-09-16` — `awen.py`: a vanished player (`running: False`) clears state without arming a pick — `_on_close` shuts mpv down before Kairos stops, so a worker mid-`fetch()` would have spawned an orphan mpv via `play()`.
+- `2026-09-16` — `tests/test_awen.py`: `TestLogHygiene` — a whole good turn, the idle ticks, a stop, a load failure and a single failed turn all assert silence at INFO; the breaker and a failed tick still reach Emanon.
+- `2026-09-16` — `config/cerberus_manifest.json`: `euterpe_config.json` registered in Custody — it was the first config to ship unlisted after seven-for-seven.
+- `2026-09-16` — `tests/test_cerberus.py`: the shipped manifest is held to `config/` via `git ls-files`/`check-ignore` — nothing read the real manifest before, which is why it drifted.
+- `2026-09-16` — `README.md`: the Felhaven row names the Auto-DJ toggle, and Awen/Euterpe are described as the one job that acts without being asked and the history it picks from.
+- `2026-09-16` — `SETUP.md`: §8 documents `config/euterpe_config.json` — the no-repeat window, taste anchor and song-length cap, and why they are dials rather than constants.
+- `2026-09-16` — `specs/master_vox_handoff.md`: dated note — §2's coupling snippet still showed `morpheus.stop()` (it became `duck()` on 2026-09-07), and Awen is a third writer that no user action starts.
+- `2026-09-16` — `panels/vox_controls.py`: a fourth control, Auto-DJ, directly above Reset Session — amber when on, read from `awen` every refresh because the breaker can turn it off with nobody clicking.
+- `2026-09-16` — `panels/vox_controls.py`: the row hands a toggle's notice UP through `on_notice` rather than speaking it — it owns styling and nothing else.
+- `2026-09-16` — `panels/home_panel.py`: new `DjRider` + `dj_says()` — Auto-DJ's line prints on its own amber `dj ›` line and is spoken; never enters `_history`.
+- `2026-09-16` — `panels/home_panel.py`: DJ lines are spoken with Vox Response off (the AmmitAlarm precedent) and do NOT barge in — Awen already waited for quiet.
+- `2026-09-16` — `panels/home_panel.py`: `_tick_face` re-reads the vox row's flags, so the Auto-DJ lamp follows the breaker turning itself off.
+- `2026-09-16` — `panels/hestia_panel.py`: passes `on_notice` through and gains `refresh_vox()`; layout diagram updated to four controls.
+- `2026-09-16` — `felhaven.py`: registers `HomePanel.dj_rider` under Kairos's `awen` worker — the rider, not the view, since `update()` is already taken by the Ammit badge.
+- `2026-09-16` — `tests/test_awen.py`: asserts every Kairos worker has a registered consumer — an unregistered `awen` would play songs in total silence.
+- `2026-09-16` — `awen.py`: new — Auto-DJ. When a song ends and the flag is on, Pythia picks the next one, plays it and hands back a spoken intro; a Kairos worker, no new thread.
+- `2026-09-16` — `awen.py`: the trigger tracks intent, not properties — a natural end, a skip and a failed load are byte-identical in mpv, and only a deliberate stop differs.
+- `2026-09-16` — `awen.py`: guards run in code at the moment a pick would play — `recently_played`, `too_long` (including a duration-less live stream) and `no_results`, each a slug the model can re-pick from.
+- `2026-09-16` — `awen.py`: a turn that called no tool stays silent and feeds the breaker; a turn that played a song but wrote no intro gets a line built from the resolved title.
+- `2026-09-16` — `awen.py`: breaker — three turns in a row with nothing playing turn Auto-DJ off with one WARNING and one spoken line.
+- `2026-09-16` — `pythia.py`: `ask()` gains `tool_overrides` — one turn may supply its own handler behind a tool's own schema, for a caller whose preconditions do not belong inside the tool.
+- `2026-09-16` — `kairos.py`: `awen` registered at 2s, matching morpheus — it reads morpheus's cached snapshot, so polling faster would re-read the same tick.
+- `2026-09-16` — `tests/test_awen.py`: new — 68 tests, most of them about when Auto-DJ must NOT fire.
+- `2026-09-16` — `CONVENTIONS.md`: §2 gains the "polled actor" flavor — `fetch()` that acts rather than reports, with no brain tool and no UI of its own.
+- `2026-09-16` — `pythia.py`: `ask()` gains `system` and `allow_tools` — one turn may carry its own system prompt and a tool allowlist; both default to today's behaviour, so chat is unchanged.
+- `2026-09-16` — `pythia.py`: `_dispatch()` enforces the allowlist ahead of the registry lookup — a call outside it returns a `tool_not_available` slug and never runs, because omitting a schema is a hint and not a boundary.
+- `2026-09-16` — `pythia.py`: `_chat()` takes the tool list; `_tool_schemas()` filters the live `TOOLS` rather than rebuilding them, and logs an allowlist name the registry does not know.
+- `2026-09-16` — `pythia.py`: new `is_busy()` — true while any `ask()` is generating, so a worker can yield to a chat turn it has no other way to see.
+- `2026-09-16` — `tests/test_pythia_seam.py`: new — 31 tests over the override, the schema narrowing, dispatch-level refusal and the turn counter's leak paths.
+- `2026-09-16` — `tools/euterpe.py`: new — the song ledger. An append-only log of confirmed plays, plus the no-repeat window and taste anchor derived from it; no `fetch()`, no brain tool, never raises.
+- `2026-09-16` — `tools/euterpe.py`: `normalize()` keys a song across its uploads — one measured search returned the same track five times under five titles, and an exact-title check passes every one.
+- `2026-09-16` — `tools/euterpe.py`: `normalize()` borrows the artist from the channel when the title omits it, and only then — one of those five uploads was titled just "Dreams (2004 Remaster)".
+- `2026-09-16` — `tools/euterpe.py`: a play is recorded only with a known duration inside `max_song_seconds` — hour-long lore videos and duration-less live streams must never become priors.
+- `2026-09-16` — `config/euterpe_config.json`: new — `no_repeat_window` 20, `taste_anchor` 5, `max_song_seconds` 900, asserted against the code defaults in lockstep.
+- `2026-09-16` — `.gitignore`: `euterpe_ledger.json` — generated per-user state, same bucket as `plutus_ledger.json`.
+- `2026-09-16` — `tests/test_euterpe.py`: new — 62 tests over normalization, the duration rule, both dedupe keys, degraded reads, the atomic write and the config lockstep.
+- `2026-09-16` — `README_PANTHEON/euterpe.md`, `README_PANTHEON/README.md`: Euterpe's stub and index row.
+- `2026-09-16` — `tools/morpheus.py`: `next_track()` sends `playlist-next force` — `weak` does nothing on the last playlist entry, so ⏭ and `control_music("next")` were silent no-ops for every single track `play_music` loads.
+- `2026-09-16` — `tools/morpheus.py`: `prev_track()` deliberately stays `weak`, with the reason in its docstring — backwards off the front of a playlist has no meaningful destination.
+- `2026-09-16` — `tools/morpheus.py`: `status()` publishes `idle` and `loading` — both were already computed and thrown away, leaving no caller able to tell a resolving stream from an ended track.
+- `2026-09-16` — `tools/morpheus.py`: new `last_snapshot()` — a free copy of the cached status dict, so a caller needing more than `is_audible()`'s bool never becomes a second `status()` poller.
+- `2026-09-16` — `tools/morpheus.py`: `play(url, from_start=True)` passes mpv a per-file `start=0`, so a re-picked track can open at 0 while watch-later resume is untouched for every other caller.
+- `2026-09-16` — `tools/morpheus.py`: the "Load failures" measured table gains the ended/skipped rows and the corrected loading title — ended, skipped and failed are identical; only a deliberate stop differs.
+- `2026-09-16` — `tests/test_morpheus_load_failure.py`: the natural-end fixture corrected from `playlist-count 0` to `1` — it had been modelling a deliberate stop under the natural-end name since 2026-08-20.
+- `2026-09-16` — `tests/test_morpheus_control.py`, `tests/test_morpheus_load_failure.py`: +24 tests for the force skip, `play(from_start=)`, the two new status keys and `last_snapshot()`.
 - `2026-09-15` — `README_PANTHEON/kairos.md`: documented test command corrected to the `discover` form — `unittest tests.test_kairos` has never worked, as the stub's own test file says.
 - `2026-09-15` — `kairos.py`: new `RETRY_DELAYS` ladder + `_note_outcome()` — a failed fetch retries in 60s/300s/900s instead of waiting out its whole interval, then resumes normal cadence.
 - `2026-09-15` — `kairos.py`: `refetch()` validates against the instance's `_intervals`, not the `WORKERS` class attribute, so it agrees with everything else that schedules.

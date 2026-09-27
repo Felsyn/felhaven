@@ -3,6 +3,8 @@
 **Status:** proposal. **F1 and F2 were fixed on 2026-09-07** (ducking — see §3
 and §5); F3 and F4 are still open and the Master Vox question in §1 is still
 unanswered. This is a *discussion* brief, not a spec.
+**Auto-DJ landed on 2026-09-16 and adds a third writer to §2** — read the note
+below before designing against that section.
 **Written:** 2026-08-20, after an audio-stack audit and the `ac52404` Morpheus fix.
 **Revised:** 2026-09-01, after the Hestia redesign moved the surfaces it inventories.
 **Audience:** a fresh session with no memory of that audit.
@@ -30,6 +32,51 @@ rather than merely renumbering it:
   wireframe face. The *speech* arm of that state is built and running; the
   *music* arm is the piece still missing. Read that method before designing a
   new state source — do not build a second one.
+
+### What changed under this document on 2026-09-16
+
+Auto-DJ (`awen.py`) shipped. Two things in §2 are now out of date, and one of
+them was already stale before this feature.
+
+- **§2's code block is wrong about the coupling.** It shows
+  `morpheus.stop()   # before buffering ANY audio` at `harmonia.py:231`. That
+  became `morpheus.duck()` when F1/F2 were fixed on 2026-09-07 — the header
+  above says so, but the snippet was never updated. It is now
+  `harmonia.py:323`, and the comment beside it reads "lower the music — do NOT
+  kill it". Anyone quoting §2 as evidence should quote the code instead.
+- **There is now a THIRD writer, and it is the first one no user asked for.**
+  `awen.py` writes the music path (`morpheus.play(..., from_start=True)`) and
+  produces the text that goes down the speech path, on its own Kairos tick.
+  Everything §2 inventories starts from a click or a typed question; this does
+  not. Update the diagram in your head accordingly:
+
+  ```
+  mpv.exe        <-- Morpheus  <-- MorpheusPanel | chat Pythia | Awen
+  OutputStream   <-- Harmonia  <-- Calliope <-- HomePanel (answers AND dj lines)
+                               <-- Orpheus
+  ```
+
+- **The one-direction claim still holds, and Awen adds a second yield going the
+  same way.** Harmonia can still silence Morpheus and Morpheus still never
+  learns Harmonia exists. Awen reads `harmonia.is_playing()` and declines to
+  take a turn while anything is audible — a voluntary yield, not a new coupling,
+  and in the same direction as the existing one. Nothing was added to Morpheus.
+- **F3's ergonomics gap narrowed twice.** `resume_music` became
+  `control_music(action="replay")` on 2026-09-15, and `next_track()` actually
+  works now (it sent `playlist-next weak`, which does nothing on a single loaded
+  track — fixed 2026-09-16). There is still no resume BUTTON, so F3 stands as
+  written.
+- F4 is untouched.
+
+### What changed under this document on 2026-09-17
+
+Vox Array grew a fourth tab, **TUNES** (`panels/euterpe_panel.py`) — Euterpe's
+song ledger as editable JSON. **§4's inventory is unchanged at nine surfaces on
+purpose:** it plays nothing, stops nothing and ducks nothing, so there is no
+tenth meaning of "stop" in it. It is in this host because it is the history of
+what this host played. Nothing in §5 moves either — the tab is playback
+*history*, not playback *selection*, and the "Master Vox must not grow a second
+way to start audio" line still stands.
 
 ---
 

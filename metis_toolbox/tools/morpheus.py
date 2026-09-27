@@ -22,6 +22,12 @@ Contract:    A hybrid flavor, new to the stack — document it here so future-yo
                             face tick). No IPC, so it can be one Kairos tick
                             stale. Its docstring says why "running" is not the
                             test — mpv stays up and idle after a track ends.
+               - last_snapshot(): the same free read, but the whole dict rather
+                            than one derived bool — for a caller that needs more
+                            than "is it making noise". Same staleness, same no
+                            IPC, and the same reason: status() is a round trip
+                            AND judges pending loads, so it must keep exactly
+                            one caller (Kairos).
                - mutations: play / toggle_pause / set_paused / next_track /
                             prev_track / stop / set_volume fire from
                             deliberate UI action in
@@ -120,11 +126,30 @@ failures:    yt-dlp asynchronously and reports nothing back on the write. So a
              _pending_load; status() then watches for mpv having gone back to
              idle with nothing loaded (idle-active True, path None) while a load
              was outstanding, and calls that a failure. Measured signatures
-             (2026-08-20, real mpv):
-                 loading  — idle-active False, path <url>, time-pos None
-                 playing  — idle-active False, path <url>, time-pos advancing
-                 FAILED   — idle-active True,  path None,  playlist-count 1
-                 stopped  — idle-active True,  path None,  playlist-count 0
+             (2026-08-20, extended 2026-09-16 — real mpv, local file and
+             YouTube URL alike):
+                 loading   — idle-active False, path <url>, time-pos None,
+                             media-title the URL fragment ("watch?v=abc")
+                 playing   — idle-active False, path <url>, time-pos advancing
+                 ENDED     — idle-active True,  path None,  playlist-count 1
+                 skipped   — idle-active True,  path None,  playlist-count 1
+                 FAILED    — idle-active True,  path None,  playlist-count 1
+                 stopped   — idle-active True,  path None,  playlist-count 0
+
+             Read that table carefully, because it says something stronger than
+             "a failed load looks idle". A track that reached its natural end, a
+             track ended by next_track(), and a load that never resolved are
+             INDISTINGUISHABLE at the property level — same idle-active, same
+             path, same playlist-count. The only one any property separates is a
+             deliberate stop(), by playlist-count 0.
+
+             So nothing downstream may decide "did that track end or fail?" from
+             mpv's properties. It is decided HERE, by whether a load was ever
+             confirmed: media that existed and then stopped existing ended, and
+             media that never existed failed. That is the same Python-side
+             intent this whole section is built on, and the 2026-09-16
+             measurement is what promoted it from a claim to a rule.
+
              mpv never passes through idle-active True during a good load, so
              the signal is definitive rather than a heuristic. _PENDING_GRACE
              exists only to cover the few ms between our loadfile write and mpv
@@ -134,6 +159,14 @@ failures:    yt-dlp asynchronously and reports nothing back on the write. So a
              as during playing, so it means "mpv accepted this URL", not "the
              load worked". Confirmation therefore reads time-pos/duration —
              media existing — and _judge_pending_load explains why at length.
+
+             Since 2026-09-20 status() PUBLISHES `path`, because it is the only
+             exact identity in the snapshot and awen needs it to tell its own
+             pick from a song the listener started (awen._whose_song). Publishing
+             it does not loosen anything above: it still must not confirm a load,
+             for exactly the reason in the paragraph before this one. It is also
+             stripped from the model's copy (_model_status) — in-process callers
+             get it, the model does not.
 
              Deliberately NOT an event-subscription reader: mpv's end-file event
              would need a persistent pipe connection and a dedicated reader
@@ -250,6 +283,56 @@ mpv log:     TWO files in logs/mpv/, because mpv's own log is unusable as-is.
 
 Upstream:    kairos.py (calls fetch), panels/morpheus_panel.py (UI mutations),
              felhaven.py (calls shutdown() on close)
+Tapering:    The volume mpv holds is a COMPOSITION of three factors, written in
+             one private place (_apply_volume): the user's level, times the duck
+             latch, times a taper gain.
+
+             §12's claim survives intact with one word widened. _user_volume is
+             still authoritative and there is still exactly ONE writer — what
+             the taper adds is a factor, not a second writer, which is the thing
+             that section says would break the model. unduck() routes through
+             the same writer for exactly this reason: writing _user_volume flat
+             mid-dip would slam the music to full over a fade still running.
+
+             The taper is a bounded DIP — down, hold, up — and its floor is
+             never 0. Everything safe about it follows from that: a mispredicted
+             handover is one dip-and-swell rather than a silence, is_audible()'s
+             `_user_volume > 0` keeps meaning what it says, and nothing ever
+             owes a restore, so there is no cancel_taper() to forget. "Cannot
+             get stuck" is proved by construction.
+
+             The hold is CONDITIONAL, not timed, since 2026-09-19. taper() arms
+             a generous backstop (_TAPER_HOLD_MAX); release_taper() is the real
+             release, called by Awen the instant anything becomes audible,
+             however long that actually took. Before this split the hold was a
+             fixed 6s racing a load that routinely took 4.5-6.5s, so the ramp
+             climbed back to full over silence about as often as it caught the
+             song — see release_taper()'s own docstring for the measurement.
+             The backstop exists only so a load that never lands does not hold
+             the floor forever; it is not meant to be the common case.
+
+             tick_fade() rides HomePanel's 60 ms drain, beside
+             harmonia.tick_yield() — a passenger on a listed §6 exception, not a
+             new one, because Kairos at 2 s cannot ramp anything. Edge-derived
+             from one monotonic stamp, so a skipped tick only makes the ramp
+             coarser. Free when no taper is running.
+
+             Rate-limited, and that number is measured rather than guessed.
+             2026-09-18, against a live mpv on the main thread: _apply_volume()
+             is 0.10 ms at the median and 50.7 ms at p95 — the pipe stalls
+             occasionally, and this chain is Tk's. At 60 ms a dip costs 85
+             writes; at _FADE_MIN_INTERVAL it costs 30.
+
+Metadata:    search() runs --flat-playlist, which is what makes ten results one
+             fast call instead of ten slow ones. The cost is that flat entries
+             carry no music metadata at all, so the only facts a caller had
+             about a candidate were a title, a channel, a duration and a URL.
+
+             describe() is the same call WITHOUT --flat-playlist, for one video,
+             for a caller with a reason to pay seconds for it. It REPORTS —
+             euterpe owns every judgment about what a song is, exactly as it did
+             when a title was all there was (§0).
+
 Downstream:  mpv.exe (audio engine) + yt-dlp.exe (search / URL resolution)
 
 Requires:    mpv + yt-dlp binaries (bin/ or PATH).
@@ -271,6 +354,13 @@ still hold; what it did not ask was whether a failure could be SEEN. See the
 "Load failures" and "mpv log" sections. fetch() gained an "error" key, so the §2
 error vocabulary now applies to this module's polled output as well as its tool
 handles — the slug is bare and deliberately carries none of mpv's own text.
+
+NOTE (2026-09-19, post-audit): the taper's hold stopped being a fixed 6s and
+became a conditional one, released by a new function (release_taper()) rather
+than by its own clock. See "Tapering" and release_taper()'s docstring. The
+audit above never touched taper() — it did not exist yet — so nothing it
+verified is at stake; this is a new capability on the same volume-composition
+model, through the same one writer.
 """
 
 import json
@@ -366,6 +456,46 @@ _PENDING_GRACE = 4.0   # seconds
 _DUCK_RATIO = 0.30
 _FULL_VOLUME = 100.0
 
+# ── Taper ─────────────────────────────────────────────────────────────────────
+# A bounded DIP: down, hold, up, and then it is over. Auto-DJ arms one when it
+# hands one song to the next, so the seam sits under the DJ's voice instead of
+# being a cut.
+#
+# The FLOOR is the load-bearing constant, and it is never 0. Three things follow
+# from that single choice:
+#   - a mispredicted handover is one dip-and-swell over a song that keeps
+#     playing, never a silence;
+#   - is_audible()'s `_user_volume > 0` keeps meaning what it says;
+#   - nothing ever owes a restore, so there is no cancel_taper() to forget.
+# "Cannot get stuck" is then proved by construction rather than by remembering
+# to call something.
+_TAPER_DOWN = 2.5               # seconds fading out
+# Until 2026-09-19 this was a FIXED wait — the ramp climbed back to full on this
+# clock whether or not anything was audible yet. Measured against a real
+# handover: yt-dlp resolving a queued pick takes roughly 4.5-6.5s, against an
+# arming window itself uncertain by up to one 2s Kairos tick (awen._TAPER_LEAD),
+# so a fixed 6s hold raced a load it could not see and regularly lost — the
+# volume climbed back to full over silence, and the song then started abruptly
+# once it actually arrived. release_taper() is the real release now, called the
+# instant awen sees anything become audible; THIS is only the backstop for a
+# load that never lands, generous on purpose because a hold that expires too
+# eagerly reproduces the exact bug it exists to fix. See release_taper().
+_TAPER_HOLD_MAX = 12.0          # seconds at the floor, worst case, unreleased
+_TAPER_UP = 2.5                 # seconds fading back in
+_TAPER_FLOOR = 0.15             # lowest gain. NEVER 0 — see above.
+
+# Volume points. Below this the write is skipped, which is what makes the 6 s
+# hold cost zero pipe traffic.
+_FADE_MIN_STEP = 1.0
+
+# Seconds between ramp writes. MEASURED 2026-09-18 against a live mpv on the
+# main thread: _apply_volume() is 0.10 ms at the median but 50.7 ms at p95 —
+# occasionally the named pipe stalls, and this chain is the Tk main thread. At
+# 60 ms the two ramps cost 85 writes a dip; at 150 ms they cost 33, and 17 steps
+# across a 2.5 s ramp is still smooth. The quantiser alone was not enough
+# because the ramp crosses 85 volume points and every one of them clears it.
+_FADE_MIN_INTERVAL = 0.15
+
 # ── Module state ──────────────────────────────────────────────────────────────
 _proc: "subprocess.Popen[bytes] | None" = None   # the headless mpv process, or None
 _request_id = 0                            # IPC request id counter (see _ipc)
@@ -377,6 +507,24 @@ _pending_load: "float | None" = None
 _load_error: "str | None" = None
 # Ducking (see "Ducking"). A latch, not a counter.
 _ducked: bool = False
+
+# The running taper as ONE tuple — (started_at, down, hold, up) — or None.
+# Rebound whole and never mutated, the trick status() already uses for
+# _last_status, so a reader on another thread sees one record or the other and
+# never a torn mix. release_taper() rebinds it too, shortening `hold` rather
+# than touching the other three fields — see that function.
+_fade: "tuple[float, float, float, float] | None" = None
+
+# Where that taper has got to, 0.15-1.0. Derived from _fade every tick and never
+# accumulated, so a skipped tick makes the ramp coarser and changes nothing
+# about where it ends up.
+_fade_gain: float = 1.0
+
+# The last level actually sent, for the step quantiser. -1 means "unknown".
+_volume_written: float = -1.0
+
+# When the ramp last wrote, for the interval limiter above.
+_fade_last_write: float = 0.0
 # The level the user chose, and what unduck() restores to. AUTHORITATIVE, not a
 # cache: this module is mpv's only volume writer, so what we last set is what
 # mpv has. See "Ducking" for the full argument and what would invalidate it.
@@ -416,7 +564,7 @@ def _ensure_mpv() -> bool:
     Returns False (logging one ERROR) if a binary is missing or the pipe never
     appears — callers (play) simply do nothing in that case.
     """
-    global _proc, _ducked
+    global _proc, _ducked, _fade, _fade_gain, _volume_written, _fade_last_write
     if _proc is not None and _proc.poll() is None:
         return True
 
@@ -486,6 +634,10 @@ def _ensure_mpv() -> bool:
     # A fresh mpv starts at volume 100, so a latch left over from a process
     # that died while ducked would suppress the next duck entirely.
     _ducked = False
+    _fade = None
+    _fade_gain = 1.0
+    _volume_written = -1.0
+    _fade_last_write = 0.0
     try:
         _proc = subprocess.Popen(args, creationflags=_NO_WINDOW)
     except Exception as e:
@@ -507,7 +659,7 @@ def _ensure_mpv() -> bool:
         # respawn silently returns a user who chose 40 to full blast. Skipped at
         # the default, where the write would be a no-op.
         if _user_volume != _FULL_VOLUME:
-            _ipc(["set_property", "volume", _user_volume])
+            _apply_volume()
         return True
 
     log.error("mpv started but its IPC pipe never appeared")
@@ -525,9 +677,14 @@ def shutdown() -> None:
     here (a failure you close the app on is the one you come back to read).
     """
     global _proc, _pending_load, _load_error, _ducked, _last_status
+    global _fade, _fade_gain, _volume_written, _fade_last_write
     _pending_load = None
     _load_error = None
     _ducked = False
+    _fade = None
+    _fade_gain = 1.0
+    _volume_written = -1.0
+    _fade_last_write = 0.0
     _last_status = {"running": False}   # nothing is audible after this
     if _proc is None:
         _discard_mpv_log()
@@ -740,12 +897,21 @@ def _checkpoint() -> None:
     _ipc(["write-watch-later-config"])
 
 
-def play(url: str) -> None:
+def play(url: str, *, from_start: bool = False) -> None:
     """Load (and start) a URL, replacing whatever was playing. Starts mpv if
     needed. mpv natively queues a full playlist URL; next/prev then walk it.
     Bookmarks the outgoing track first so switching videos keeps its place.
     Remembers `url` as the resume target (resume_music) once actually loaded —
     not on an early return, so a failed mpv start never overwrites a good one.
+
+    `from_start=True` opens the URL at 0 instead of wherever its watch-later
+    file left off. Resume is right for the long lore videos this plays (see
+    "Resume") and WRONG for a caller picking songs unattended: a track skipped
+    halfway and chosen again later would start halfway. Measured against this
+    build (2026-09-16) — stopped at 3.97 s, a plain replay reopened at 4.03 s
+    and `start=0` reopened at 0.23 s. It is a per-file option on this one
+    loadfile, so nothing about the watch-later mechanism itself changes and
+    every other caller keeps resuming.
 
     Also arms load tracking: loadfile reports nothing back, so status() is what
     finds out whether this actually landed (see "Load failures").
@@ -757,7 +923,13 @@ def play(url: str) -> None:
     if not _ensure_mpv():
         return
     _checkpoint()                      # bookmark the outgoing track, if any
-    _ipc(["loadfile", url, "replace"])
+    if from_start:
+        # loadfile <url> <flags> <index> <options> — the -1 is "append at the
+        # end", which `replace` makes moot; the options dict is what we are
+        # here for. Verified accepted by this build.
+        _ipc(["loadfile", url, "replace", -1, {"start": "0"}])
+    else:
+        _ipc(["loadfile", url, "replace"])
     _last_url = url
     _pending_load = time.monotonic()   # status() confirms or condemns it
     _load_error = None                 # a new attempt clears the last verdict
@@ -778,10 +950,30 @@ def set_paused(flag: bool) -> None:
 
 
 def next_track() -> None:
-    _ipc(["playlist-next", "weak"])
+    """Advance to the next playlist entry — and END the current track when
+    there is no next one.
+
+    `force` rather than `weak`, and that is the whole fix: `weak` does NOTHING
+    on the LAST playlist entry, and every single track play_music loads is
+    exactly that. So ⏭ and control_music(action="next") were silent no-ops for
+    every track this module plays — and control_music reported the post-action
+    status as if the skip had happened. Measured against this build (mpv
+    v0.41, 2026-09-16): with one entry loaded, `playlist-next weak` left
+    time-pos advancing 2.96 -> 4.46, while `force` ended it into the
+    idle-active/playlist-count 1 shape a natural end leaves (see "Load
+    failures").
+
+    The two differ ONLY on the last entry — mid-playlist both advance — so
+    walking a real playlist is unchanged.
+    """
+    _ipc(["playlist-next", "force"])
 
 
 def prev_track() -> None:
+    """Step back one playlist entry. Deliberately still `weak`, unlike
+    next_track(): running forward off the END of a playlist means "this track
+    is over", which is a real destination, while running back off the FRONT
+    would mean ending playback — which is not what ⏮ says it does."""
     _ipc(["playlist-prev", "weak"])
 
 
@@ -805,6 +997,172 @@ def stop() -> None:
 
 
 # ── Public API — ducking (harmonia's yield) ───────────────────────────────────
+
+def _effective_volume() -> float:
+    """What mpv should be holding right now.
+
+    The user's level, times the duck latch, times the taper gain. _user_volume
+    stays the USER's level and stays authoritative — §12's claim is unchanged
+    with one word widened: the value a read would return is the value this
+    module already holds, and "holds" is now this composition rather than one
+    variable. There is still exactly one writer and still no read-back.
+    """
+    level = _user_volume * (_DUCK_RATIO if _ducked else 1.0) * _fade_gain
+    return max(0.0, min(_FULL_VOLUME, level))
+
+
+def _apply_volume(*, force: bool = True) -> None:
+    """THE write. Every path that moves any of the three factors ends here.
+
+    Adding a second writer of mpv's volume is what §12 says breaks the whole
+    model, so the taper is not one: it moves a factor and calls this.
+
+    Write-only and fire-and-forget, for the reason duck() gives at length — this
+    also runs on the Tk main thread at 16 Hz, where waiting on a reply would
+    stall the UI as surely as it would stall narration.
+
+    `force=False` applies the step quantiser, for the ramp: below
+    _FADE_MIN_STEP volume points nobody can hear the difference and the write is
+    skipped, which is what makes the taper's 6 s hold cost zero pipe traffic.
+    Never raises (_ipc doesn't).
+    """
+    global _volume_written
+    if _proc is None or _proc.poll() is not None:
+        return                              # no mpv — nothing to set
+    level = _effective_volume()
+    if not force and abs(level - _volume_written) < _FADE_MIN_STEP:
+        return
+    _ipc(["set_property", "volume", level])
+    _volume_written = level
+
+
+def _gain_at(record: "tuple[float, float, float, float]", now: float) -> float:
+    """Where a taper has got to: 1.0 before and after, _TAPER_FLOOR across the
+    hold, linear in between.
+
+    Derived from one monotonic stamp rather than accumulated, which is what
+    makes a skipped tick harmless and an expiry automatic. `hold` is whatever
+    the record currently says it is — release_taper() rewrites it in place of
+    the record to cut the hold short, and this function does not need to know
+    that happened; it just reads the field.
+    """
+    start, down, hold, up = record
+    elapsed = now - start
+    if elapsed <= 0:
+        return 1.0
+    span = 1.0 - _TAPER_FLOOR
+    if elapsed < down:
+        return 1.0 - span * (elapsed / down)
+    if elapsed < down + hold:
+        return _TAPER_FLOOR
+    if elapsed < down + hold + up:
+        return _TAPER_FLOOR + span * ((elapsed - down - hold) / up)
+    return 1.0                              # expired
+
+
+def taper() -> None:
+    """Dip the music and bring it back. Never raises.
+
+    For a handover: the outgoing song falls away, the swap happens under the
+    floor, and the incoming one rises. Auto-DJ arms it; this module owns it,
+    because this module owns the player (§0).
+
+    Writes NOTHING. The next tick_fade() does, which keeps every volume write on
+    the one thread that is allowed to be slow about it.
+
+    The hold armed here is `_TAPER_HOLD_MAX` — a BACKSTOP, not the real release.
+    The real one is release_taper(), called the instant the incoming song is
+    confirmed audible, however long that actually took. See its docstring for
+    why the two are split.
+
+    IGNORED while one is already running, so a trigger that fires repeatedly —
+    a snapshot that keeps saying "nearly over" — cannot extend the hold for
+    ever. The dip is bounded and expires on its own; nothing ever owes a
+    restore, which is why there is no cancel_taper() to forget.
+    """
+    global _fade, _fade_last_write
+    if _fade is not None:
+        return
+    _fade = (time.monotonic(), _TAPER_DOWN, _TAPER_HOLD_MAX, _TAPER_UP)
+    _fade_last_write = 0.0
+
+
+def release_taper() -> None:
+    """End the hold early: the incoming song is confirmed audible, so stop
+    waiting and start the up-ramp NOW. Never raises.
+
+    Until 2026-09-19 the hold was a fixed 6s, on a clock that had no idea
+    whether yt-dlp had actually resolved anything — a load routinely took
+    4.5-6.5s against an arming window uncertain by up to one 2s Kairos tick, so
+    the ramp climbed back to full over silence about as often as it caught the
+    song. Awen calls this the instant it sees ANY media become audible
+    (awen._note_playing), which is the one signal that was always the right
+    clock and was simply never wired to this one.
+
+    Rewrites the RECORD rather than the gain: `hold` is shortened to exactly
+    "how long the down-ramp and the hold have actually run", which is a no-op
+    if release comes after the hold would have ended anyway (nothing to
+    shorten) and, if release comes mid-down-ramp, lets that ramp finish before
+    the up-ramp begins rather than reversing direction mid-fall. Either way
+    _gain_at reads the same record it always did and does not need to know a
+    release happened — continuity comes from the arithmetic, not from a special
+    case here.
+
+    A no-op with no taper running, or one already past its hold — release_taper
+    only ever pulls the up-ramp EARLIER, never later, so a second call (or a
+    call after _TAPER_HOLD_MAX has already released it) costs one comparison.
+    """
+    global _fade
+    record = _fade
+    if record is None:
+        return
+    start, down, hold, up = record
+    elapsed = time.monotonic() - start
+    if elapsed >= down + hold:
+        return                              # already released, or expired
+    _fade = (start, down, max(0.0, elapsed - down), up)
+
+
+def tick_fade() -> None:
+    """Advance a running taper. Call from the MAIN THREAD, on a chain that
+    already exists — HomePanel's 60 ms drain, beside harmonia.tick_yield().
+    Never raises.
+
+    A passenger on a listed §6 exception, not a new one: Kairos at 2 s cannot
+    ramp anything, and a thread or an after() loop of its own would be a new
+    exception in a section that says to stop and give Kairos a worker instead.
+
+    FREE unless a taper is running — one identity check — so an idle dashboard
+    does zero IPC at 16 Hz, the same bargain tick_yield() already makes.
+
+    Edge-derived: every tick re-reads the clock and recomputes the gain, so a
+    skipped tick simply makes the ramp one step coarser. There is no counter to
+    fall behind and no state that a missed call can strand.
+    """
+    global _fade, _fade_gain, _fade_last_write
+    record = _fade
+    if record is None:
+        return
+    start, down, hold, up = record
+    now = time.monotonic()
+    # Expiry is read off the CLOCK, never off the gain. The gain is legitimately
+    # 1.0 at the very start of the ramp as well as at its end, so "gain >= 1.0"
+    # means finished only if you never tick on the same instant you armed —
+    # which the 60 ms chain is under no obligation to avoid.
+    if now - start >= down + hold + up:
+        _fade = None
+        _fade_gain = 1.0
+        _apply_volume()                     # forced: land exactly on the level
+        return
+    # Rate-limited, and the EXPIRY above deliberately is not: the last write of
+    # a dip must land exactly on the user's level whatever the clock says, or a
+    # taper can leave the music a point or two low for ever.
+    if now - _fade_last_write < _FADE_MIN_INTERVAL:
+        return
+    _fade_last_write = now
+    _fade_gain = _gain_at(record, now)
+    _apply_volume(force=False)
+
 
 def duck() -> None:
     """Lower mpv's volume so narration can be heard over it. Harmonia calls
@@ -837,8 +1195,8 @@ def duck() -> None:
         return                              # no mpv — nothing to duck
     if _ducked:
         return                              # already quiet; no pipe traffic
-    _ipc(["set_property", "volume", _user_volume * _DUCK_RATIO])
     _ducked = True
+    _apply_volume()
 
 
 def unduck() -> None:
@@ -857,9 +1215,11 @@ def unduck() -> None:
     if not _ducked:
         return
     _ducked = False
-    if _proc is None or _proc.poll() is not None:
-        return          # mpv died while ducked — latch cleared, nothing to say
-    _ipc(["set_property", "volume", _user_volume])
+    # Through the composed writer, NOT a bare _user_volume. Mid-taper at gain
+    # 0.4 with the user at 100 this writes 40 and the ramp carries on from
+    # there; writing 100 here would slam the music to full over the top of a
+    # fade that is still running.
+    _apply_volume()
 
 
 def set_volume(level: float) -> float:
@@ -879,9 +1239,7 @@ def set_volume(level: float) -> float:
     _user_volume = max(0.0, min(100.0, float(level)))
     if _ducked:
         return _user_volume         # unduck() will apply it — see above
-    if _proc is None or _proc.poll() is not None:
-        return _user_volume         # no mpv; _ensure_mpv reapplies on spawn
-    _ipc(["set_property", "volume", _user_volume])
+    _apply_volume()             # no-op when mpv is not running
     return _user_volume
 
 
@@ -927,6 +1285,64 @@ def search(query: str, limit: int = 10) -> list[dict[str, Any]]:
     return rows
 
 
+# What describe() keeps. Everything else yt-dlp returns is dropped, and two
+# omissions are deliberate: `description` and `tags` are unbounded,
+# uploader-controlled text heading into a small model's context, and they
+# decide nothing that categories/track/artist do not decide better.
+_DESCRIBE_FIELDS = ("title", "channel", "duration", "categories",
+                    "track", "artist", "album")
+
+
+def describe(url: str) -> dict[str, Any]:
+    """One FULL yt-dlp extraction for a single video. BLOCKS for seconds.
+
+    search() runs with --flat-playlist, which is right for a search — it is what
+    makes ten results one fast call instead of ten slow ones. The cost is that
+    flat entries carry no music metadata at all, so the only facts any caller
+    had about a candidate were a title, a channel, a duration and a URL. That is
+    how a video about sharpening a chainsaw was played and announced as Linkin
+    Park: no rule that reads only a title and a duration could have caught it.
+
+    This is the same call WITHOUT --flat-playlist, for one video, when a caller
+    has a reason to pay for it. Reports; decides nothing — euterpe.is_a_song()
+    and euterpe.has_music_evidence() own the judgment, exactly as they did when
+    a title was all there was (§0).
+
+    Returns the _DESCRIBE_FIELDS it could read, or {"error": "describe_failed"}
+    on any failure — a bare slug (§2), never yt-dlp's stderr, which carries
+    signed URLs. Never raises.
+    """
+    ytdlp = _resolve("yt-dlp")
+    if not ytdlp:
+        log.warning("describe: yt-dlp not found")
+        return {"error": "describe_failed"}
+
+    args = [ytdlp, url, "-J", "--no-playlist", "--no-warnings"]
+    try:
+        proc = subprocess.run(args, capture_output=True, timeout=20,
+                              creationflags=_NO_WINDOW)
+        if proc.returncode != 0:
+            log.warning("describe: yt-dlp exit %s: %s",
+                        proc.returncode,
+                        proc.stderr.decode("utf-8", "replace")[:200])
+            return {"error": "describe_failed"}
+        data = json.loads(proc.stdout)
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
+        log.warning("describe failed: %s", e)
+        return {"error": "describe_failed"}
+
+    if not isinstance(data, dict):
+        return {"error": "describe_failed"}
+    out: dict[str, Any] = {}
+    for field in _DESCRIBE_FIELDS:
+        if field in data:
+            out[field] = data[field]
+    # Same fallback search() uses, so the two agree about what a channel is.
+    if not out.get("channel") and data.get("uploader"):
+        out["channel"] = data["uploader"]
+    return out
+
+
 # ── Public API — status / Kairos entry point ──────────────────────────────────
 
 def status() -> dict[str, Any]:
@@ -947,13 +1363,22 @@ def status() -> dict[str, Any]:
         return dict(_last_status)
 
     props = _get_props(["media-title", "pause", "time-pos", "duration",
-                        "playlist-pos", "playlist-count", "idle-active"])
+                        "playlist-pos", "playlist-count", "idle-active",
+                        "path"])
 
     # Liveness check: if EVERY property came back None, the pipe is dead or
     # unresponsive even though the process is alive (rare) — fall back to
-    # idle. A None title alone (stream still resolving, everything else live)
-    # is not a liveness failure — the panel renders that as "(loading…)".
-    # A live mpv always answers idle-active, so this now really does mean the
+    # idle. A missing title ALONE (everything else live) is not a liveness
+    # failure — the panel renders that as "(loading…)".
+    #
+    # Note what a resolving stream actually reports, because this comment used
+    # to say the opposite: media-title is the URL FRAGMENT, not None —
+    # "watch?v=tCDvOQI3pco" (measured 2026-09-16, matching the _LOADING fixture
+    # in tests/test_morpheus_load_failure.py). None appears only in the
+    # sub-tick between our loadfile write and mpv accepting it. Either way the
+    # title is not the evidence; time-pos/duration is (see _judge_pending_load).
+    #
+    # A live mpv always answers idle-active, so all-None really does mean the
     # pipe is gone; we must NOT read that as a load failure.
     if all(v is None for v in props.values()):
         _last_status = {"running": False}
@@ -969,6 +1394,33 @@ def status() -> dict[str, Any]:
         "dur":    props["duration"],             # float seconds | None
         "pl_pos": props["playlist-pos"],         # int | None
         "pl_n":   props["playlist-count"],       # int | None
+        # The two fields that separate mpv's three idle-looking states. Both
+        # were already computed — idle-active is read for _judge_pending_load
+        # and _pending_load is its verdict — and simply never published, which
+        # left NO caller able to tell a stream still resolving from one that
+        # has ended. See "Load failures" for the full measured table.
+        "idle":    props["idle-active"],         # bool | None
+        # WHAT is loaded, as opposed to what it is CALLED. The one exact
+        # identity in this snapshot: media-title is text, and yt-dlp and mpv
+        # spell the same upload differently often enough that a caller deciding
+        # "is this the thing I asked for?" off two spellings is deciding it off
+        # a coincidence (awen._whose_song, and the 2026-09-20 scar there).
+        #
+        # Published rather than _last_url deliberately, and the difference is
+        # the one this module is built on. _last_url is INTENT — it is set the
+        # instant loadfile is written, and it still names a URL after that load
+        # FAILED, is a whole track stale after a playlist walk or next_track(),
+        # and already names the new song in the window where mpv is still
+        # sounding the old one. `path` is what mpv HOLDS. The question a caller
+        # asks here is "which URL produced the audio I can hear", and only one
+        # of those two answers it.
+        #
+        # This does NOT loosen _judge_pending_load. `path` is set while yt-dlp
+        # is still resolving (see "Load failures"), so it must never confirm a
+        # load; that stays time-pos/duration, and the field being in `props`
+        # now is not permission to read it there.
+        "path":    props["path"],                # str | None — URL or file
+        "loading": _pending_load is not None,    # bool — a load not yet judged
         # Not read off the pipe — we are mpv's only volume writer, so this is
         # exact and free. It is also what lets the model answer "turn it down a
         # bit": read the level, do the arithmetic, set the result.
@@ -1005,6 +1457,27 @@ def is_audible() -> bool:
              or _last_status.get("dur") is not None)
         and _user_volume > 0
     )
+
+
+def last_snapshot() -> dict[str, Any]:
+    """A COPY of the snapshot status() last took. FREE — never touches the pipe,
+    never raises, and mutating the result cannot reach this module.
+
+    The is_audible() bargain, generalised: a caller that wants more than one
+    field would otherwise call status(), which is an mpv IPC round trip AND runs
+    _judge_pending_load — so a second caller polling it would start confirming
+    and condemning loads on its own schedule, between Kairos's ticks. This hands
+    over the same dict Kairos's 2 s poll already paid for, so the answer can be
+    up to one tick stale and costs nothing.
+
+    Safe to read off another thread: status() REBINDS _last_status to a freshly
+    built dict rather than mutating the live one, so a reader sees either the
+    whole old snapshot or the whole new one, never a torn mix.
+
+    {"running": False} before anything has been polled — the same shape status()
+    returns for a dead or absent mpv, so callers need no special first-run case.
+    """
+    return dict(_last_status)
 
 
 def _mpv_error_lines() -> list[str]:
@@ -1068,6 +1541,11 @@ def _judge_pending_load(props: dict[str, Any]) -> None:
     Confirming on that silently disarmed the detector and let the exact outage
     this was written for slip through again (caught end-to-end against real mpv,
     2026-08-20 — tests/test_morpheus_load_failure.py pins it).
+
+    `path` is in `props` since 2026-09-20 because status() publishes it for
+    awen. That is not permission to read it HERE, and the paragraph above is
+    the whole reason — it arrives in this function now, and it must go on being
+    ignored by it.
     """
     global _pending_load, _load_error
     if _pending_load is None:
@@ -1311,6 +1789,29 @@ def _replay() -> "dict[str, Any] | None":
     return None
 
 
+def _model_status() -> dict[str, Any]:
+    """The snapshot MINUS what the model has no business holding.
+
+    One key today: `path`. It is in the snapshot for awen's attribution check,
+    which runs in THIS process and compares video ids — but control_music hands
+    its result straight into the model's context, and a resolved YouTube URL is
+    not a thing to put there. Measured 2026-09-20 off logs/mpv/last_failure.log:
+    the stream URL behind one song was 1110 characters of signed, expiring,
+    IP-bound query string. Even the watch?v= form is context the model cannot
+    use — it names songs by title, and every tool that takes a URL is handed one
+    by this module rather than by the model.
+
+    A DENYLIST rather than an allowlist, deliberately. An allowlist would make
+    every future snapshot field invisible to the model until somebody remembered
+    to add it, which is the failure that is silent; a denylist makes the next
+    sensitive field visible until somebody removes it, which is the failure that
+    gets noticed. The fields here are few and the judgment is per-field.
+    """
+    out = status()
+    out.pop("path", None)
+    return out
+
+
 def control_music(action: str = "status",
                   level: "float | None" = None) -> dict[str, Any]:
     """Toolbox entry: the transport state machine over whatever is playing.
@@ -1331,7 +1832,7 @@ def control_music(action: str = "status",
                          f"{', '.join(_CONTROL_ACTIONS)}."}
 
     if action == "status":
-        return {"action": action, "status": status()}
+        return {"action": action, "status": _model_status()}
 
     # Volume is the one action that works with no mpv running: the level is
     # module state, and _ensure_mpv applies it on the next spawn. Gating it on
@@ -1340,7 +1841,7 @@ def control_music(action: str = "status",
         if level is None:
             return {"error": "no_level: volume needs a level from 0 to 100."}
         return {"action": action, "volume": set_volume(level),
-                "status": status()}
+                "status": _model_status()}
 
     # Every remaining action mutates. _ipc() is silent when the pipe is down
     # (see "Control surface"), so refuse rather than report a success nothing
@@ -1364,7 +1865,7 @@ def control_music(action: str = "status",
     else:                       # "previous" — the enum check above admits no other
         prev_track()
 
-    return {"action": action, "status": status()}
+    return {"action": action, "status": _model_status()}
 
 
 # ── Standalone test ───────────────────────────────────────────────────────────

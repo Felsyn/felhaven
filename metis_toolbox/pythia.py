@@ -10,7 +10,8 @@ Job:         Answer a question by talking to the local LLM, using toolbox
              the background thread; Pythia is a pure request/response function.
 
 Contract:    ask(message, history=None, on_delta=None, on_event=None,
-                 cancel=None) -> str
+                 cancel=None, system=None, allow_tools=None,
+                 tool_overrides=None, on_verbatim=None) -> str
                  Runs the Ollama tool-calling loop and returns the model's
                  final answer as plain text. Degrades gracefully — on any
                  network/LLM failure it returns a short human-readable string
@@ -22,11 +23,28 @@ Contract:    ask(message, history=None, on_delta=None, on_event=None,
                  included, for the caller to persist as history); cancel is a
                  threading.Event checked mid-stream AND between tool calls for
                  cooperative Stop.
+                 `system` and `allow_tools` narrow ONE turn — a different
+                 system prompt, and a tool allowlist enforced at DISPATCH, not
+                 merely by omitting schemas. Both default to today's behaviour,
+                 so chat is unchanged. They exist for unattended callers
+                 (awen.py), which put text they did not write into a small
+                 model's context with nobody reading the transcript.
+                 `on_verbatim` is the one path a tool's output takes AROUND
+                 the model: a result carrying a "verbatim" payload is handed
+                 to it and kept out of the model's context, and a round made
+                 only of such calls ends the turn (CONVENTIONS §12).
              TOOLS / _DISPATCH are built once, at import, by reading each tool
              module's own TOOL_DEFINITION — so the registry can never drift
-             out of sync with the handlers. The system prompt itself lives in
+             out of sync with the handlers. The DEFAULT system prompt lives in
              machine_spirit.py (effective_prompt(), read fresh each call) —
-             Pythia owns no prompt text of its own.
+             Pythia owns no prompt text of its own, and a caller's `system`
+             override is that caller's text, never this module's.
+
+             is_busy() -> bool
+                 True while any ask() is generating. The is_warming() shape,
+                 and it exists because nothing else could answer: HomePanel
+                 knows about its own turn through a Tk object on the main
+                 thread, which a Kairos worker cannot reach.
 
              prewarm() -> threading.Thread / is_warming() -> bool
                  Startup preload, called once by felhaven.py. prewarm() loads
@@ -47,7 +65,7 @@ Endpoint:    Reads OLLAMA_HOST (default 127.0.0.1:11435 — the standalone
 
 Upstream:    panels/home_panel.py (calls ask() on a worker thread)
 Downstream:  tools/{horai,hephaestus,aura,ammit,midas,aether,pheme,zeno,
-             eudoxus,argus,helios,hypatia,selene,morpheus}.py — each
+             eudoxus,argus,helios,hypatia,selene,morpheus,daedalus}.py — each
              contributes TOOL_DEFINITION + handle(). tools/callimachus.py and
              tools/herodotus.py are MULTI-TOOL modules (TOOL_DEFINITIONS +
              one function per tool). Pythia is their SOLE registry consumer —
@@ -69,7 +87,7 @@ import re
 import threading
 import time
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 import requests
 
@@ -77,6 +95,7 @@ import machine_spirit
 from tools import (
     horai, hephaestus, aura, ammit, midas, aether, pheme, zeno, eudoxus,
     argus, helios, hypatia, selene, morpheus, callimachus, herodotus,
+    daedalus,
 )
 
 log = logging.getLogger("METIS.pythia")
@@ -91,6 +110,7 @@ log = logging.getLogger("METIS.pythia")
 _TOOL_MODULES = [
     horai, hephaestus, aura, ammit, midas, aether, pheme, zeno, eudoxus,
     argus, helios, hypatia, selene, morpheus, callimachus, herodotus,
+    daedalus,
 ]
 
 
@@ -149,6 +169,42 @@ _KEEP_ALIVE = -1
 # that runner away and reloaded at 8192. Both _chat() and _warm() read this one
 # dict so the two can never drift apart again; the lockstep test enforces it.
 _OPTIONS = {"num_ctx": _NUM_CTX, "num_predict": _NUM_PREDICT}
+
+# ── Degraded answers ─────────────────────────────────────────────────────────
+# What ask() returns when there is no answer to give: the model went silent, ran
+# out of tool rounds, or Ollama was unreachable. They read as prose, which is
+# right for a transcript a human is looking at and WRONG for any caller that
+# will act on the text.
+#
+# Awen learned that the hard way. A DJ turn that played a song and then ran out
+# of rounds spoke "The oracle got stuck consulting its tools. Try rephrasing."
+# aloud as the song's introduction — advice to rephrase a question the listener
+# never asked. So the family is named here rather than left as five literals,
+# and is_degraded() is the seam that lets a caller tell "no answer" from "an
+# answer".
+#
+# They all open with the same two words ON PURPOSE. Two of the five interpolate
+# (the endpoint, an exception class), so there is no exact set to match against,
+# and a prefix is the only honest test. Keep new ones in the family.
+_DEGRADED_PREFIX = "The oracle"
+_SILENT_ANSWER = "The oracle answered but said nothing. Try asking again."
+_STUCK_ANSWER = "The oracle got stuck consulting its tools. Try rephrasing."
+_TIMEOUT_ANSWER = ("The oracle is slow to answer (LLM timed out). Is the model "
+                   "still loading?")
+
+
+def is_degraded(answer: str) -> bool:
+    """Is this ask() result a FAILURE dressed as prose, rather than an answer?
+
+    For callers that act on the text instead of merely printing it. HomePanel
+    prints whatever comes back and is right to — a human reading "the oracle is
+    unreachable" is being told something true. A caller that speaks the text to
+    someone who asked no question needs to know the difference.
+
+    Cheap and deliberately conservative: a false positive costs a caller its
+    fallback path, a false negative costs it nonsense out loud."""
+    return (answer or "").strip().startswith(_DEGRADED_PREFIX)
+
 
 # ── Rite records — per-tool-invocation diagnostics for the Rite Log ───────────
 # One record per tool call, handed to the UI in the stats payload. Pythia builds
@@ -251,14 +307,44 @@ def _error_text(result: dict[str, Any]) -> str:
 
 
 
-def _dispatch(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+def _dispatch(tool_name: str, arguments: dict[str, Any],
+              allowed: Optional[set[str]] = None,
+              overrides: Optional[dict[str, Callable[..., dict[str, Any]]]] = None,
+              ) -> dict[str, Any]:
     """Route one tool call to its handler: forward the model's arguments as
     kwargs (call with none if it gave none) and turn any handler failure into
     an error dict so the model can recover rather than the whole turn crashing.
     The error identifier is a §2 slug: the caught exception's *message* is kept
     out of the returned dict (it feeds straight into the LLM context) — only
-    its class name travels, the raw text stays in the log."""
-    fn = _DISPATCH.get(tool_name)
+    its class name travels, the raw text stays in the log.
+
+    `allowed` restricts which tools may actually RUN, and the check sits here —
+    ahead of the _DISPATCH lookup — rather than only in the schema list handed
+    to the model. Leaving a name out of `tools` is a hint, not a boundary: this
+    function runs any name present in _DISPATCH, so a model that emits one
+    anyway would have it executed. That matters because ask()'s narrowed-tool
+    callers are the unattended ones, feeding text they did not write (YouTube
+    titles, page contents) into a small model's context with nobody reading the
+    transcript. None means no restriction, which is every chat turn.
+
+    `overrides` swaps the HANDLER behind a tool name for this turn, leaving its
+    schema — the text the model reads — exactly as its owning module wrote it.
+    It exists because a tool's job and a particular caller's PRECONDITIONS are
+    different things. `play_music` searches and plays in one call, so a caller
+    that must check something between those two steps cannot express it by
+    calling the tool; and those checks belong to the caller, not to the module
+    that plays music. Teaching Morpheus about them would give it a second job
+    (§0). The override is per-turn and never mutates _DISPATCH, so a chat turn
+    running at the same moment still gets the real handler.
+
+    A refused call returns a §2 slug like any other failure, so the model can
+    recover inside the same turn, and it is recorded as a failed rite — a
+    refusal is a real event, not a silent drop."""
+    if allowed is not None and tool_name not in allowed:
+        log.warning("Pythia: refused out-of-allowlist tool %r (allowed: %s)",
+                    tool_name, ", ".join(sorted(allowed)) or "none")
+        return {"error": f"tool_not_available: {tool_name!r} cannot be used here."}
+    fn = (overrides or {}).get(tool_name) or _DISPATCH.get(tool_name)
     if fn is None:
         return {"error": f"unknown_tool: {tool_name!r}"}
     try:
@@ -268,13 +354,56 @@ def _dispatch(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return {"error": f"tool_failed: {tool_name!r} raised {type(e).__name__}"}
 
 
+def _split_verbatim(
+    result: dict[str, Any],
+    on_verbatim: Optional[Callable[[dict[str, Any]], None]],
+) -> tuple[dict[str, Any], Optional[str]]:
+    """Take a tool's VERBATIM text out of its result before the model sees it.
+
+    A tool that must show the user something exactly — Daedalus's docstrings —
+    returns it under "verbatim" ({"label", "title", "text", "ack"}). Anything
+    that reaches the model comes back paraphrased, whatever the prompt says, so
+    the text goes to `on_verbatim` (the UI) and the model gets the rest of the
+    result plus "shown_to_user": True. Returns (what the model sees, the ack
+    line to end the turn with) — the ack is None unless the text was shown.
+
+    The text never reaches the model on ANY path: with no sink to show it on,
+    or a sink that fails, the model gets a §2 slug instead and can say so.
+    Every result without the key passes through untouched, which is every
+    other tool."""
+    if "verbatim" not in result:
+        return result, None
+    payload = result["verbatim"]
+    if not (isinstance(payload, dict) and isinstance(payload.get("text"), str)):
+        log.error("Pythia: malformed verbatim payload withheld from the model")
+        return {"error": "tool_failed: malformed verbatim payload"}, None
+    if on_verbatim is None:
+        log.info("Pythia: verbatim result withheld — this caller has no display")
+        return {"error": "no_display: this conversation cannot show text verbatim"}, None
+    try:
+        on_verbatim(dict(payload))
+    except Exception as e:                       # the UI's bug must not kill the turn
+        log.error(f"Pythia: on_verbatim raised: {type(e).__name__}: {e}")
+        return {"error": "display_failed: the text could not be shown"}, None
+    shown = {k: v for k, v in result.items() if k != "verbatim"}
+    shown["shown_to_user"] = True
+    ack = payload.get("ack")
+    return shown, (ack.strip() if isinstance(ack, str) and ack.strip()
+                   else "Shown above.")
+
+
 def _chat(
     messages: list[dict[str, Any]],
     on_delta: Optional[Callable[[str], None]] = None,
     cancel: Optional[threading.Event] = None,
+    tools: Optional[list[dict[str, Any]]] = None,
 ) -> tuple[dict[str, Any], dict[str, int]]:
     """One STREAMING round trip to Ollama's /api/chat. Reads the newline-delimited
     JSON stream, calls on_delta(piece) for each content token as it arrives, and
+    `tools` is the schema list sent to the model; None means all of TOOLS,
+    which is every chat turn. A narrowed list is a HINT to the model and never a
+    guarantee — the boundary that actually holds is _dispatch's `allowed` set.
+
     returns (assembled_message, round_stats). assembled_message carries `content`
     plus any `tool_calls`; round_stats carries this round's prompt_tokens/
     output_tokens/eval_ms/load_ms/prompt_ms (0 for any count Ollama's `done`
@@ -297,7 +426,7 @@ def _chat(
     payload = {
         "model": _MODEL,
         "messages": messages,
-        "tools": TOOLS,
+        "tools": TOOLS if tools is None else tools,
         "stream": True,
         # Skip gemma4's reasoning trace — we want the answer. If a round returns
         # `thinking` anyway (this flipped, or a model that thinks regardless),
@@ -379,6 +508,68 @@ def _chat(
     return assembled, stats
 
 
+# ── Turn accounting ───────────────────────────────────────────────────────────
+# How many ask() calls are generating right now. A worker→main shared object,
+# which §6 otherwise reserves for the result queue; allowed here for exactly the
+# reason _WARMING is (below), and guarded rather than atomic because it is a
+# counter, not a flag — two callers can be mid-turn at once.
+#
+# is_busy() exists because nothing else could answer the question. HomePanel
+# knows about ITS turn via self._thread, and that is a Tk object on the main
+# thread — unreachable from a Kairos worker deciding whether now is a good
+# moment to take the model.
+_turns_lock = threading.Lock()
+_turns_in_flight = 0
+
+
+def is_busy() -> bool:
+    """True while any ask() is generating — the is_warming() shape.
+
+    Counts EVERY turn, chat and otherwise, because it answers "is the model
+    busy", not "is someone else busy". A caller using it to yield must
+    therefore read it BEFORE starting its own turn; reading it from inside one
+    is always True and means nothing.
+
+    It is a courtesy signal, not a lock. Two turns that overlap are handled —
+    Ollama queues them — so a caller that loses the race gets a slow answer,
+    never a broken one.
+    """
+    return _turns_in_flight > 0
+
+
+def _enter_turn() -> None:
+    global _turns_in_flight
+    with _turns_lock:
+        _turns_in_flight += 1
+
+
+def _leave_turn() -> None:
+    global _turns_in_flight
+    with _turns_lock:
+        _turns_in_flight = max(0, _turns_in_flight - 1)
+
+
+def _tool_schemas(allow_tools: Optional[Sequence[str]]) -> list[dict[str, Any]]:
+    """The schema list for this turn. None means all of TOOLS.
+
+    Filters the live TOOLS rather than rebuilding schemas, so a narrowed turn
+    sends the SAME text the full turn would — a hand-written copy would drift
+    from the module that owns it the first time a description changed.
+
+    An unregistered name is a caller bug that would otherwise be invisible: the
+    filter would quietly yield a shorter list (or none at all) and the model
+    would simply stop calling tools. It is logged rather than raised, because
+    ask() never raises."""
+    if allow_tools is None:
+        return TOOLS
+    wanted = set(allow_tools)
+    unknown = wanted - set(_DISPATCH)
+    if unknown:
+        log.warning("Pythia: allow_tools names unregistered tool(s): %s",
+                    ", ".join(sorted(unknown)))
+    return [t for t in TOOLS if t["function"]["name"] in wanted]
+
+
 # ── Contract ──────────────────────────────────────────────────────────────────
 
 def ask(
@@ -387,6 +578,10 @@ def ask(
     on_delta: Optional[Callable[[str], None]] = None,
     on_event: Optional[Callable[[dict[str, Any]], None]] = None,
     cancel: Optional[threading.Event] = None,
+    system: Optional[str] = None,
+    allow_tools: Optional[Sequence[str]] = None,
+    tool_overrides: Optional[dict[str, Callable[..., dict[str, Any]]]] = None,
+    on_verbatim: Optional[Callable[[dict[str, Any]], None]] = None,
 ) -> str:
     """
     Answer `message`, using tools as needed. `history` is prior turns —
@@ -428,6 +623,39 @@ def ask(
     it was dispatched is recorded not_run rather than run anyway. Never raises
     for this either.
 
+    `system` overrides the system prompt for this turn only. None — every chat
+    turn — reads machine_spirit.effective_prompt() as before, so Machine Spirit
+    remains the owner of PYTHIA's prompt and this module still holds no prompt
+    text of its own. It exists for callers that are not the chat: a job with its
+    own voice and its own instructions should not have to be expressed as an
+    edit to the operator's prompt, which would then apply to every chat answer
+    too. A blank string is treated as no override and logged, because silently
+    sending an empty system prompt is never what a caller meant.
+
+    `allow_tools` narrows this turn to the named tools, both in the schema list
+    the model sees and — the part that matters — at dispatch, so a call outside
+    it comes back as a `tool_not_available` slug and never runs. None means the
+    full registry. See _dispatch for why the schema list alone is not enough.
+
+    `tool_overrides` replaces the handler behind a tool name for this turn only,
+    keeping the schema its module wrote. See _dispatch for why a caller's own
+    preconditions do not belong inside the tool they guard.
+
+    All three default to today's behaviour exactly, so no existing caller
+    changes.
+
+    `on_verbatim` is where a tool's VERBATIM text goes — a result carrying a
+    "verbatim" payload ({"label", "title", "text", "ack"}; Daedalus's
+    docstrings) is shown through it and never enters the model's context; the
+    model sees only that it was shown (see _split_verbatim). It runs on the
+    worker thread, like `on_delta`. If EVERY call in a round was shown this
+    way, the turn ends there, with the payloads' "ack" lines as the answer: a
+    result that carries nothing is the shape that makes the model go blank,
+    and the blank-retry nudge would then have it say it knows nothing about
+    text already on screen. A mixed round goes back to the model as usual.
+    None — every caller but the chat — means such a result reaches the model
+    as a `no_display` slug instead.
+
     Never raises: network/LLM problems come back as a short readable string so
     the panel can print the result straight to the transcript. An empty reply
     (no content, no tool call — including a round that produced only a dropped
@@ -439,7 +667,14 @@ def ask(
     is never empty and never a bare placeholder.
     """
     t_start = time.perf_counter()
-    system_prompt = machine_spirit.effective_prompt()
+    if system is not None and not system.strip():
+        log.warning("Pythia: blank `system` override ignored — using the "
+                    "Machine Spirit prompt")
+        system = None
+    system_prompt = (machine_spirit.effective_prompt() if system is None
+                     else system)
+    tools = _tool_schemas(allow_tools)
+    allowed = None if allow_tools is None else set(allow_tools)
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     if history:
         messages.extend(history)
@@ -483,10 +718,16 @@ def ask(
     blank_rounds = 0
     nudge_pending = False
 
+    # Counted from here, not from the top of the function: everything above is
+    # assignment, so nothing between the increment and the try can fail and
+    # strand the count. The matching decrement is the `finally` on this same
+    # try, which every `return` below passes through.
+    _enter_turn()
     try:
         for round_i in range(_MAX_TOOL_ROUNDS):
             try:
-                reply, stats = _chat(messages, on_delta=on_delta, cancel=cancel)
+                reply, stats = _chat(messages, on_delta=on_delta, cancel=cancel,
+                                     tools=tools)
             finally:
                 # Drop the nudge the moment its round is over — including a round
                 # that raised, whose handler below still persists turn_messages.
@@ -535,12 +776,13 @@ def ask(
                 log.warning(
                     f"Pythia: still empty after {blank_rounds} round(s){why}"
                 )
-                silent = "The oracle answered but said nothing. Try asking again."
+                silent = _SILENT_ANSWER
                 messages.append({"role": "assistant", "content": silent})
                 return _emit(silent)
 
             # Run each requested tool, feed the JSON result back as a tool turn,
             # and record one rite per invocation for the Rite Log.
+            acks: list[str] = []                 # one per call shown verbatim
             for call in tool_calls:
                 fn = call.get("function", {})
                 name = fn.get("name", "")
@@ -575,7 +817,12 @@ def ask(
                     continue
 
                 t_call = time.perf_counter()
-                result = _dispatch(name, args)
+                result = _dispatch(name, args, allowed, tool_overrides)
+                # Before the record and the tool message are built: both must
+                # hold what the MODEL saw, never the text it was spared.
+                result, ack = _split_verbatim(result, on_verbatim)
+                if ack is not None:
+                    acks.append(ack)
                 record["duration_ms"] = int((time.perf_counter() - t_call) * 1000)
                 if "error" in result:
                     record["status"] = "failed"
@@ -597,13 +844,22 @@ def ask(
             if cancel is not None and cancel.is_set():
                 log.info(f"Pythia: ask() cancelled mid-round {_ms(t_start)}")
                 return _emit((reply.get("content") or "").strip())
+
+            # Every call this round was shown to the user word for word, so the
+            # answer is already on screen — end the turn with the ack lines
+            # rather than ask the model to talk about text it never saw.
+            if acks and len(acks) == len(tool_calls):
+                closing = " ".join(acks)
+                messages.append({"role": "assistant", "content": closing})
+                log.info(f"Pythia: ask() ended on verbatim output {_ms(t_start)}")
+                return _emit(closing)
         # Ran out of rounds still wanting tools — hand back whatever text we have.
-        stuck = "The oracle got stuck consulting its tools. Try rephrasing."
+        stuck = _STUCK_ANSWER
         messages.append({"role": "assistant", "content": stuck})
         return _emit(stuck)
     except requests.Timeout:
         log.warning("Pythia: Ollama request timed out.")
-        timed_out = "The oracle is slow to answer (LLM timed out). Is the model still loading?"
+        timed_out = _TIMEOUT_ANSWER
         messages.append({"role": "assistant", "content": timed_out})
         return _emit(timed_out)
     except requests.ConnectionError:
@@ -618,6 +874,8 @@ def ask(
         faltered = f"The oracle faltered ({type(e).__name__})."
         messages.append({"role": "assistant", "content": faltered})
         return _emit(faltered)
+    finally:
+        _leave_turn()
 
 
 # ── Preload ─────────────────────────────────────────────────────────────────

@@ -65,6 +65,28 @@ Rite Log:    The meta-line's tool counts are clickable; each opens a RiteLog
              or reshapes a record. The ring is bounded, so an old meta-line
              outlives its records and opens the window's expired view.
 
+Auto-DJ:     Awen decides WHAT to say and when it is ready; this panel decides
+             when it is heard and prints it — the same split narration already
+             follows. A DJ line lands on its own amber `dj ›` line and never
+             enters self._history (see *History* for why that window has to
+             stay the operator's own conversation). It is spoken whether or not
+             Vox Response is on, the AmmitAlarm precedent, and it does NOT
+             barge in: Awen already waited for quiet, so calling calliope.stop()
+             first would undo that. Vox End still silences it, because Vox End
+             IS calliope.stop().
+
+Verbatim:    Some tool output must be shown EXACTLY — today, a Daedalus
+             module docstring. pythia.ask() hands it to on_verbatim instead
+             of the model, and it lands here as its own block: a
+             `daedalus › <module> · <path>` header line, then the text as
+             given, untrimmed, in its own colour. The header is a line of its
+             own because a prefix on the docstring's first line would push it
+             right and misalign the `====` underline beneath it. The block is
+             never spoken and never enters self._history: the turn Pythia
+             stores holds only that the text was shown, and the short line she
+             ends such a turn on is what Vox Response reads aloud
+             (CONVENTIONS §12).
+
 Narration:   Each completed answer gets a "speak aloud" control plus a dim
              meta-line (tokens · wall time · tok/s · tool count, failures in
              red); if Calliope's auto-speak flag (set by Vox Response
@@ -89,24 +111,35 @@ Why a thread: LLM answers are slow (up to ~100s cold, seconds warm). tkinter
 
 Not Kairos-registered (mostly): the chat itself is event-driven (you press
              Enter), not timed, so it runs its own poll rather than riding
-             Kairos's tick. The one exception is AmmitBadge (panels/
-             horai_panel.py) — a display-only Ammit status readout on the
-             status row, next to Scraptoken Flux/Rites. It has no state of its
-             own worth ticking on this panel's 60 ms poll, so this panel
-             registers under "horai" in felhaven.py purely to refresh that one
-             badge on Kairos's 1 s tick; see update() below. Ammit's alarm
-             (popup + spoken announcement) is NOT owned here — that lives in
-             AmmitAlarm on HoraiPanel, which persists across view switches
-             and fires regardless of which sidebar view is showing.
+             Kairos's tick. There are two exceptions, and they attach
+             differently on purpose.
+
+             AmmitBadge (panels/horai_panel.py) is a display-only Ammit status
+             readout on the status row, next to Scraptoken Flux/Rites. It has
+             no state of its own worth ticking on this panel's 60 ms poll, so
+             this PANEL registers under "horai" in felhaven.py purely to
+             refresh that one badge on Kairos's 1 s tick; see update() below.
+             Ammit's alarm (popup + spoken announcement) is NOT owned here —
+             that lives in AmmitAlarm on HoraiPanel, which persists across view
+             switches and fires regardless of which sidebar view is showing.
+
+             DjRider is Auto-DJ's line (awen.py), and the RIDER registers, not
+             the panel — because update() is already spoken for by the badge
+             above and Kairos passes it the data with no worker name attached.
+             Two registrations on one update() could only be told apart by
+             sniffing the payload's shape, which would silently depend on
+             horai never growing a key of the same name. See DjRider.
 
 Face:        Hestia's wireframe face is told what Pythia is doing from that
-             same 60 ms drain chain — no second timer, the _tick_warmup trick.
+             same 60 ms drain chain — no second timer, the _tick_status trick.
              The mapping is derived, never stored: audible → speaking,
              thinking → a live worker or a warming model, otherwise idle.
 
 Upstream:    felhaven.py (builds it as the "felhaven" view, registers it under
              Kairos's "horai" for the Ammit badge — see above)
-Downstream:  pythia.py (the oracle), calliope.py (narration),
+Downstream:  pythia.py (the oracle, and via on_verbatim the text some
+             tools show exactly), calliope.py (narration),
+             awen.py (Auto-DJ's flag, via HestiaBar's vox row),
              panels/hestia_panel.py (title, face, controls),
              panels/horai_panel.py (AmmitBadge; transitively tools/ammit.py),
              theme.py (colors)
@@ -135,9 +168,11 @@ import tkinter as tk
 from collections import OrderedDict
 from typing import Any, Optional
 
+import awen
 import calliope
 import harmonia
 import pythia
+from panels.queue_panel import QueueBox
 from tools import morpheus
 from theme import C, FONTS, PhosphorScroll, themed_menu, popup_menu
 from panels.hestia_panel import HestiaBar
@@ -176,12 +211,44 @@ def _format_wall(ms: int) -> str:
     return f"{m}m {s:02d}s"
 
 
+class DjRider:
+    """Kairos rider for Awen's payload: print one DJ line and speak it.
+
+    A DEDICATED rider rather than a branch inside HomePanel.update(), and the
+    reason is structural. Kairos hands update() the data and never the worker
+    name, and HomePanel is already registered under "horai" for the Ammit
+    badge — so telling the two apart would mean sniffing the payload's shape,
+    which silently depends on horai never growing a key with the same name.
+    Registering the sub-object instead is the AmmitBadge / Moderati precedent
+    (felhaven.py registers `moderati.hephaestus`, not the view).
+
+    It holds the panel, not widgets: everything it does goes through one method,
+    so the transcript's formatting stays in one place.
+
+    Runs on the MAIN thread — Kairos drains its queue there — which is what
+    makes touching Tk and Calliope from here legal at all.
+    """
+
+    def __init__(self, panel: "HomePanel") -> None:
+        self._panel = panel
+
+    def update(self, data: Any) -> None:
+        """Kairos contract. `data` is awen.fetch()'s payload, or None if it
+        somehow failed — and every update() must survive None (§6)."""
+        if not isinstance(data, dict):
+            return
+        text = data.get("say")
+        if text:
+            self._panel.dj_says(str(text))
+
+
 class HomePanel(tk.Frame):
     def __init__(self, parent: tk.Widget) -> None:
         super().__init__(parent, bg=C["bg"])
 
         # Queue events: ("delta", token, epoch), ("stats", stats_dict, epoch),
-        # ("done", full_answer, epoch). See module docstring re: epochs.
+        # ("verbatim", payload, epoch), ("done", full_answer, epoch). See
+        # module docstring re: epochs.
         self._q: "queue.Queue[tuple[str, Any, int]]" = queue.Queue()
         self._thread: Optional[threading.Thread] = None
         self._cancel = threading.Event()
@@ -210,7 +277,21 @@ class HomePanel(tk.Frame):
         # Whether the status line is currently showing the warmup notice. Kept
         # so _poll() only writes on a transition — otherwise it would repaint
         # every 60 ms and could clobber a message set by the request path.
-        self._showing_warmup = False
+        # What _tick_status last wrote, so it only repaints on a real change.
+        # Was _showing_warmup (a bool) until Auto-DJ became a third claimant on
+        # the same label and the state stopped being two-valued.
+        self._status_shown = ""
+        # True while the status line is showing the Auto-DJ queue count, which
+        # is the ONE thing on that label you can click. Kept because four other
+        # sites write the label directly and every one of them has to be able
+        # to hand the affordance back.
+        self._status_clickable = False
+        # The one queue window, or None. One rather than RiteLog's many: those
+        # each show a different frozen turn, and every one of these would show
+        # the same live list and need its own refresh.
+        self._dj_queue_box = None
+        # The queue revision the open box was last drawn from.
+        self._queue_drawn = -1
         # Failing-tick bookkeeping (see _note_poll_failure).
         self._poll_fails = 0
         self._poll_fail_reported = 0.0
@@ -220,8 +301,14 @@ class HomePanel(tk.Frame):
         self._sess_fails = 0
 
         # ── Hestia — title, narration lamp, stop, refresh, session readouts ──
-        self._hestia = HestiaBar(self, on_stop=self._on_stop, on_refresh=self._on_refresh)
+        self._hestia = HestiaBar(self, on_stop=self._on_stop,
+                                 on_refresh=self._on_refresh,
+                                 on_notice=self.dj_says)
         self._hestia.pack(fill="x")
+
+        # Registered under Kairos's "awen" worker in felhaven.py — see DjRider
+        # for why it is a rider and not a branch in update().
+        self.dj_rider = DjRider(self)
 
         # ── Transcript ────────────────────────────────────────────────────────
         log_row = tk.Frame(self, bg=C["bg"])
@@ -247,6 +334,14 @@ class HomePanel(tk.Frame):
         self._log.tag_configure("you",     foreground=C["text2"])
         self._log.tag_configure("pythia",  foreground=C["text1"])
         self._log.tag_configure("stopped", foreground=C["text3"])
+        # Auto-DJ speaks on its own line and in its own colour, so a song intro
+        # is never mistaken for an answer to something you asked.
+        self._log.tag_configure("dj", foreground=C["amber"])
+        # Verbatim tool output (a Daedalus docstring): one colour for the
+        # header and the text, so the block reads as one thing that is not
+        # Pythia's own words — the palette's one non-map cyan.
+        self._log.tag_configure("verbatim_head", foreground=C["verbatim"])
+        self._log.tag_configure("verbatim", foreground=C["verbatim"])
         # Clickable "speak aloud" control appended after each answer.
         self._log.tag_configure("speak", foreground=C["text3"],
                                 font=FONTS["small"])
@@ -265,8 +360,8 @@ class HomePanel(tk.Frame):
 
         # Readouts are packed FIRST on purpose. Pack allocates in order, so
         # claiming their width up front means a long status string is clipped
-        # rather than shoving the counters off the edge — at the 700 px minimum
-        # window this row has only ~20 px to spare.
+        # rather than shoving the counters off the edge — at the old 700 px
+        # minimum window this row had only ~20 px to spare (~80 at today's 760).
         readouts = tk.Frame(status_row, bg=C["bg"])
         readouts.pack(side="right")
         self._flux = tk.Label(readouts, text="Scraptoken Flux: 0",
@@ -286,6 +381,9 @@ class HomePanel(tk.Frame):
         self._status = tk.Label(status_row, text="", font=FONTS["small_italic"],
                                 fg=C["amber"], bg=C["bg"], anchor="w")
         self._status.pack(side="left", fill="x", expand=True)
+        self._status.bind("<Button-1>", self._on_status_click)
+        self._status.bind("<Enter>", self._on_status_enter)
+        self._status.bind("<Leave>", self._on_status_leave)
 
         # ── Input row ─────────────────────────────────────────────────────────
         row = tk.Frame(self, bg=C["bg"])
@@ -454,6 +552,26 @@ class HomePanel(tk.Frame):
         # never arrive.
         calliope.end_turn()
 
+    def dj_says(self, text: str) -> None:
+        """Print and speak one Auto-DJ line. Main thread only.
+
+        Spoken whether or not Vox Response is on, the AmmitAlarm precedent: that
+        flag is about narrating ANSWERS, and a radio host that silently played
+        songs would not be a radio host. Vox End still silences it, because Vox
+        End is calliope.stop() and that reaches everything Harmonia is playing.
+
+        It does NOT barge in. AmmitAlarm calls calliope.stop() before speaking,
+        which is right for a timer going off and wrong for a song introduction —
+        Awen has already waited for quiet before producing this text (see its
+        *Trigger*), so cutting off whatever is talking would undo that.
+
+        Never enters self._history: this is not a turn Pythia took on Matthew's
+        behalf, and a few songs of patter would evict his actual conversation
+        from a three-turn window (see *History*)."""
+        self._print(f"dj › {text}\n\n", "dj")
+        calliope.speak(text)
+        calliope.end_turn()
+
     def _drain_sentences(self) -> None:
         """Hand every COMPLETE sentence in the say-buffer to Calliope, keeping the
         trailing partial for the next token. Lets speech start mid-answer."""
@@ -476,7 +594,7 @@ class HomePanel(tk.Frame):
             return
         self._entry.delete(0, "end")
         self._print(f"you › {msg}\n", "you")
-        self._status.config(text="consulting the oracle…")
+        self._set_status("consulting the oracle…")
 
         # New question → drop any narration still playing from the last answer.
         calliope.stop()
@@ -502,6 +620,7 @@ class HomePanel(tk.Frame):
                 on_delta=lambda p: self._q.put(("delta", p, ep)),
                 on_event=lambda ev: self._q.put(("stats", ev, ep)),
                 cancel=cxl,
+                on_verbatim=lambda v: self._q.put(("verbatim", v, ep)),
             )
             self._q.put(("done", answer, ep))
 
@@ -532,7 +651,7 @@ class HomePanel(tk.Frame):
         # are unreachable. _rite_seq deliberately does NOT reset (the _speak_seq
         # rule): a monotonic counter can never hand a new turn a stale tag name.
         self._rites.clear()
-        self._status.config(text="")
+        self._set_status("")
         self._resp_started = False
         self._say_buf = ""
         self._last_stats = None
@@ -587,14 +706,22 @@ class HomePanel(tk.Frame):
                     self._on_delta(payload)
                 elif kind == "stats":
                     self._on_stats(payload)
+                elif kind == "verbatim":
+                    self._on_verbatim(payload)
                 else:                           # "done"
                     self._on_done(payload)
-            self._tick_warmup()
+            self._tick_status()
             self._tick_face()
             # Harmonia is forbidden a timer of its own (§6), so this standing
             # chain supplies its heartbeat: it hands Morpheus its volume back
             # once narration has actually finished. Free when nothing is ducked.
             harmonia.tick_yield()
+            # The SECOND passenger on this chain, and for the same reason: a
+            # taper is a ramp, and Kairos at 2 s cannot ramp anything. Free
+            # when no taper is running — one identity check, no IPC.
+            morpheus.tick_fade()
+            # The queue window, when one is open. Free otherwise — one int.
+            self._tick_queue()
         except Exception:  # noqa: BLE001 — the chain must outlive any one tick
             self._note_poll_failure()
         finally:
@@ -621,20 +748,103 @@ class HomePanel(tk.Frame):
         self._poll_fails = 0
         self._poll_fail_reported = now
 
-    def _tick_warmup(self) -> None:
-        """Show 'waking the oracle…' while pythia.prewarm() is still loading.
+    def _set_status(self, text: str, *, clickable: bool = False) -> None:
+        """Write the status line, and say whether it is a control right now.
+
+        FIVE sites write this label — this method, _on_submit, _on_refresh,
+        _on_delta and _on_done — and only one of them ever sets a clickable
+        state. Without one owner, the hand cursor from "Auto-DJ: 4 queued"
+        survives into "consulting the oracle…" and stays for the whole answer,
+        because _tick_status returns early while a request is in flight and
+        never gets to repaint. A cursor that promises a click nothing handles
+        is worse than no cursor.
+        """
+        self._status_shown = text
+        self._status_clickable = clickable
+        self._status.config(text=text, cursor="hand2" if clickable else "",
+                            fg=C["amber"])
+
+    def _on_status_enter(self, _event: "tk.Event[Any]") -> None:
+        """Brighten WITHIN the state, never into amber. The label is already
+        amber, so amber cannot double as its hover colour — the Hestia
+        inversion, verbatim (§7, vox_controls.py)."""
+        if self._status_clickable:
+            self._status.config(fg=C["amber_bright"])
+
+    def _on_status_leave(self, _event: "tk.Event[Any]") -> None:
+        self._status.config(fg=C["amber"])
+
+    def _on_status_click(self, _event: "tk.Event[Any]") -> None:
+        """Open the queue, or lift the one already open."""
+        if not self._status_clickable:
+            return
+        if self._dj_queue_box is not None and self._dj_queue_box.winfo_exists():
+            self._dj_queue_box.lift()
+            return
+        self._queue_drawn = awen.queue_revision()
+        self._dj_queue_box = QueueBox(self, awen.queue_view(),
+                                      awen.remove_queued)
+
+    def _tick_queue(self) -> None:
+        """Repaint an open queue window when the queue has changed.
+
+        Rides this drain chain rather than arming a timer, the tick_status /
+        tick_face / harmonia.tick_yield / morpheus.tick_fade bargain — so the
+        window needs no destroy() of its own and test_panel_after_teardown's
+        "HomePanel leaves exactly ONE pending timer" stays literally true.
+
+        FREE unless something moved: awen.queue_revision() is one int, and only
+        a change pays for the snapshot. That is what lets this sit at 16 Hz
+        beside four other passengers.
+        """
+        box = self._dj_queue_box
+        if box is None:
+            return
+        if not box.winfo_exists():
+            self._dj_queue_box = None       # closed by Escape or the X
+            return
+        revision = awen.queue_revision()
+        if revision == self._queue_drawn:
+            return
+        self._queue_drawn = revision
+        box.show(awen.queue_view())
+
+    def _tick_status(self) -> None:
+        """Own the status line whenever the request path does not.
 
         Rides the drain chain rather than arming a timer of its own, so there is
         no second after() id for destroy() to chase (§6). Writes only on a
-        transition, and never while a question is in flight — that path owns the
-        status line and its 'consulting the oracle…' must win."""
+        TRANSITION — at 16 Hz an unconditional repaint would fight whatever the
+        request path last set, and would reset the label's own idea of itself
+        sixteen times a second for nothing.
+
+        One label, three claimants, in strict priority:
+
+          1. a question in flight. 'consulting the oracle…' is set by
+             _on_submit and cleared by _on_done, and nothing here may touch the
+             line while that is true — Matthew asked, so Matthew's turn wins.
+          2. the startup warm. Only reachable before anything else can be
+             happening, so the order between it and Auto-DJ is academic; it is
+             written down anyway because "academic today" is how precedence
+             bugs are born.
+          3. Auto-DJ, via awen.status_line() — a free read, the same bargain
+             morpheus.is_audible() makes for this chain.
+
+        Auto-DJ earns a place here because a DJ turn is a SILENT GAP: measured
+        4.2s typically and 17.1s at worst, during which the song has stopped and
+        the screen used to say nothing whatsoever. That is indistinguishable
+        from Auto-DJ being broken."""
         if self._thread is not None and self._thread.is_alive():
             return                              # the request path owns the label
-        warming = pythia.is_warming()
-        if warming == self._showing_warmup:
+        if pythia.is_warming():
+            wanted = "waking the oracle…"
+        else:
+            wanted = awen.status_line()
+        if wanted == self._status_shown:
             return                              # nothing changed; leave it alone
-        self._showing_warmup = warming
-        self._status.config(text="waking the oracle…" if warming else "")
+        # Clickable only while it is showing the QUEUE. "waking the oracle…"
+        # and the two Auto-DJ silence lines are facts, not controls.
+        self._set_status(wanted, clickable=wanted.endswith("queued"))
 
     # ── Session readouts (bottom row) ────────────────────────────────────────
     # Owned here rather than by Hestia: this panel computes the totals, so
@@ -649,7 +859,7 @@ class HomePanel(tk.Frame):
 
     def _tick_face(self) -> None:
         """Push Hestia's face state and the Vox End cue, derived fresh each
-        drain — like _tick_warmup, it rides the existing chain rather than
+        drain — like _tick_status, it rides the existing chain rather than
         arming a timer of its own (§6).
 
         Both setters are idempotent, so pushing at _POLL_MS (16 Hz) costs
@@ -681,17 +891,45 @@ class HomePanel(tk.Frame):
             state = "idle"
         self._hestia.set_face_state(state)
         self._hestia.set_running(busy or audible)
+        # Auto-DJ can turn ITSELF off (its breaker gives up after three turns
+        # that played nothing), so the lamp is re-read here rather than only on
+        # a click. Idempotent, like the two setters above — a VoxToggle repaints
+        # only on a real change.
+        self._hestia.refresh_vox()
 
     def _on_delta(self, piece: str) -> None:
         """A streamed token arrived: show it, and buffer it for narration."""
         if not self._resp_started:
-            self._status.config(text="")
+            self._set_status("")
             self._print("pythia › ", "pythia")
             self._resp_started = True
         self._print(piece, "pythia")
         if self._say_turn:
             self._say_buf += piece
             self._drain_sentences()
+
+    def _on_verbatim(self, payload: dict[str, Any]) -> None:
+        """Print a tool's text EXACTLY as given, as its own block. Not spoken.
+
+        The "verbatim" tag covers the text and nothing else — the header and
+        the blank line after are tagged separately — so the transcript holds
+        a range that is byte-for-byte the string the tool produced.
+
+        If the model said something before calling the tool, that line is
+        closed first (and its unspoken tail handed to Calliope), so any text
+        the model streams afterwards starts on a fresh `pythia ›` line
+        instead of running on from under the block."""
+        if self._resp_started:
+            self._print("\n", "pythia")
+            if self._say_turn and self._say_buf.strip():
+                calliope.speak(self._say_buf.strip())
+            self._say_buf = ""
+            self._resp_started = False
+        label = str(payload.get("label") or "tool")
+        title = str(payload.get("title") or "")
+        self._print(f"{label} › {title}\n", "verbatim_head")
+        self._print(str(payload.get("text", "")), "verbatim")
+        self._print("\n\n", "pythia")
 
     def _on_stats(self, stats: dict[str, Any]) -> None:
         """One stats event per ask() call — cache it for _on_done's meta-line,
@@ -712,13 +950,13 @@ class HomePanel(tk.Frame):
         if cancelled:
             calliope.stop()
             self._say_buf = ""
-            self._status.config(text="")
+            self._set_status("")
             if not self._resp_started:
                 self._print("pythia › ", "pythia")
             self._print("⏹ stopped\n\n", "stopped")
             return
 
-        self._status.config(text="")
+        self._set_status("")
         if not self._resp_started:
             # No tokens streamed (an error string, or an empty answer) — print it.
             self._print(f"pythia › {answer}", "pythia")

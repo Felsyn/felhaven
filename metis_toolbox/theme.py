@@ -4,14 +4,20 @@ theme.py — Visual Identity
 Metis Toolbox | Anti-Legion: ONE JOB
 
 Job:         Own the visual language of the Felhaven stack.
-             One source of truth for colors, fonts, and shared widgets.
-             Every GUI module imports from here — nothing duplicates here.
+             One source of truth for fonts and shared widgets, and the one
+             door panels use for colour: the values themselves live in
+             palette.py (Tk-free, so headless tools/ can import them too),
+             and are re-exported here. Nothing duplicates here.
 
 Exports:
-    C               — color palette dict
+    C               — color palette dict (re-exported from palette.py)
+    rgb(hex)        — "#RRGGBB" -> (r, g, b) (re-exported from palette.py)
     FONTS           — live tkfont.Font registry (populated by _init_fonts)
     _init_fonts(root)
                     — must be called once after tk.Tk() exists, before widgets
+    _init_widget_defaults(root)
+                    — same timing: the colours Tk would otherwise take from
+                      Windows (selection, text cursor) become the theme's
     rescale_fonts(width, height, base_w, base_h)
                     — call on <Configure> to keep fonts proportional;
                       pass each app's own baseline geometry
@@ -22,10 +28,11 @@ Exports:
                     — build + show an in-theme right-click popup menu
 
 Upstream:    felhaven.py and sphynx_panel.py own a tk.Tk() root and call
-             _init_fonts; felhaven also drives rescale_fonts on <Configure>.
+             _init_fonts + _init_widget_defaults; felhaven also drives
+             rescale_fonts on <Configure>.
              Every GUI panel imports C / FONTS / Card / TabHost /
              PhosphorScroll / the menu helpers.
-Downstream:  none (imports only tkinter)
+Downstream:  palette.py (the colour values), tkinter
 
 V0.02:       Audited 2026-07-26 — corrected the Upstream/rescale docstrings off
              the retired standalone-Scribe window; extracted TabHost and
@@ -38,70 +45,11 @@ import tkinter.font as tkfont
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Color palette
+#  The values live in palette.py, the one file allowed to contain a colour.
+#  Re-exported here so every panel keeps importing colours from theme.
 # ─────────────────────────────────────────────────────────────────────────────
 
-C = {
-    "bg":        "#0A0E0A",   # black — faintest green cast (set to #000000 for pure black)
-    "card":      "#0C120C",   # panel fill — one hair above bg
-    "border":    "#2E7D32",   # phosphor border (rendered at thickness 2 now)
-    "text1":     "#7CFC7C",   # bright phosphor — primary / active text
-    "text2":     "#4FB04F",   # mid phosphor — labels
-    "text3":     "#2F7A2F",   # dim phosphor — subtitles / inactive
-    "amber":     "#D6A11F",   # THE uniform nav dot
-    "green":     "#7CFC7C",   # active nav dot (== text1, so the active item "lights up")
-    # ── decorative accents, folded into the phosphor ramp so the theme reads monochrome ──
-    "teal":      "#4FB04F",
-    "blue":      "#4FB04F",
-    "purple":    "#4FB04F",
-    "coral":     "#D6A11F",
-    "gray":      "#2F7A2F",
-    # ── genuinely semantic — kept distinct ──
-    "red":       "#E24B4A",   # alarm / expired timer ONLY
-    # The SAME alarm channel, hovered — not a second meaning. Reserved for the
-    # hover state of a red control (the Rite Log's "N failed" span). Amber would
-    # be wrong here: it is the informational/road channel, and flipping an alarm
-    # to it on hover reports a failure as a notice.
-    "red_bright": "#FF7A79",
-    # The SAME informational channel as `amber`, hovered — not a second
-    # meaning, exactly as `red_bright` is to `red`. Needed because the Hestia
-    # vox controls invert §7 (active = amber, inactive = dim), so amber can no
-    # longer double as the hover colour: hover has to brighten *within* the
-    # control's current state instead of announcing one.
-    "amber_bright": "#F5C24A",
-    # ── badges & bars ──
-    "badge_bg":  "#0F2A0F",
-    "badge_fg":  "#9DFF9D",
-    "season_bg": "#0C240C",
-    "season_fg": "#7CFC7C",
-    "bar_bg":    "#0E160E",
-    # ── Artemis chart — the one place hue carries meaning ──────────────────
-    # A map's layers have to be told apart at a glance, so these deliberately
-    # do NOT fold into the phosphor ramp above: cyan water and amber roads are
-    # near-complementary, both separate cleanly from green terrain, and the
-    # set survives common red-green colour deficiencies. Nothing reaches text
-    # brightness, so the phosphor text still sits on top of the map.
-    #
-    # These are the WORLD's colours. The chart's INSTRUMENT — range rings,
-    # bearing ticks, the porthole rim and its range label, the cardinals, the
-    # centre fix — draws in text1 instead, so brightness says what kind of
-    # thing you are looking at. That is why these keys stay muted rather than
-    # being brightened to match.
-    # tools/demeter.py carries the three terrain colours again as RGB tuples
-    # (it renders the raster headless and must not import Tk);
-    # tests/test_artemis_palette.py holds the two in lockstep.
-    "map_terrain_lo":  "#0B2E18",   # valley — barely above background
-    "map_terrain_mid": "#1A5C31",
-    "map_terrain_hi":  "#2C8A4A",   # peak — ~30% of text luminance
-    "map_water":       "#2E8B99",   # named runs, creeks, rivers
-    "map_water_minor": "#1F5F69",   # unnamed drainage, ditches, canals
-    "map_water_area":  "#17454D",   # lakes/ponds fill, no outline
-    "map_road_hi":     "#E0A94A",   # primary — brightest non-text element
-    "map_road_mid":    "#B9862F",   # secondary
-    "map_road_lo":     "#8A6524",   # local streets
-    "map_road_track":  "#6B4F1E",   # vehicular trail / private, dashed
-    "map_ring":        "#264A33",   # dim chrome — the scale bar's metric line
-    "map_compass":     "#3E7A55",   # the compass rose and the scale bar
-}
+from palette import C, rgb  # noqa: F401 — re-exports
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -159,6 +107,45 @@ def rescale_fonts(width: int, height: int, base_w: int, base_h: int) -> float:
     for name, base in _FONT_BASE.items():
         FONTS[name].configure(size=max(1, int(round(base * scale))))
     return scale
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Widget defaults
+#  Tk's option database is its table of app-wide defaults. A widget that never
+#  sets one of these options gets it from here instead of from Windows; one
+#  that sets it explicitly still wins, so a panel can opt out. CONVENTIONS §12
+#  (2026-09-27).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_WIDGET_DEFAULTS = {
+    "*selectBackground":         C["select_bg"],   # was Windows blue
+    "*selectForeground":         C["select_fg"],   # was white
+    # A Text's selection once focus moves elsewhere. Tk's default draws
+    # nothing, so a selection vanished; now it looks the same either way.
+    "*inactiveSelectBackground": C["select_bg"],
+    "*insertBackground":         C["text1"],       # was black: invisible here
+}
+
+
+def _init_widget_defaults(root):
+    """
+    Make the theme Tk's default for the colours no widget sets. Call once
+    after tk.Tk() exists and before any widget is built, like _init_fonts —
+    a widget reads the option database when it is created, never afterwards.
+    """
+    for pattern, colour in _WIDGET_DEFAULTS.items():
+        root.option_add(pattern, colour)
+    # A Text draws its selection as the "sel" tag. Tk creates that tag first,
+    # so every tag a panel adds outranks it: selected tagged text (all of
+    # Home's chat) kept its own colour, and text3 vanished into the band.
+    # Raising "sel" each time the selection changes puts it back on top, over
+    # tags created later too. Class-level, so a panel's own bind() on its
+    # Text cannot replace it.
+    root.bind_class("Text", "<<Selection>>", _raise_selection, add="+")
+
+
+def _raise_selection(event):
+    event.widget.tag_raise("sel")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

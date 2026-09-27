@@ -215,6 +215,54 @@ Sphynx gate, which `Felhaven.bat` normally fronts.
   - *Headless/CI override:* set the `AURA_LOCATION` env var (city, ZIP, or
     `lat,lon`) to override the weather location without touching the settings file.
 
+- **Auto-DJ's taste** — `metis_toolbox/config/euterpe_config.json` holds the
+  dials Auto-DJ picks by. `no_repeat_window` is how far back "don't play this
+  again" reaches, in songs; `taste_anchor` is how many of your OWN picks steer
+  the choice. They are config rather than constants on purpose — a narrow window
+  lets a small model settle into a loop the length of that window, and widening
+  it trades that for more misses, so the right values are found by listening
+  rather than by reasoning.
+
+  The rest of the file answers "is this even a song?". `min_song_seconds` and
+  `max_song_seconds` bound the length, keeping out both a 26-second room-echo
+  demo and an hour-long lore video. `not_music` is a list of phrases that are
+  matched anywhere in a title, case-insensitively — it exists because duration
+  alone does not separate a song from a 282-second gear manual, and one evening
+  of Auto-DJ produced a user manual, a hardware review, a documentary and a
+  reaction video.
+
+  **`not_music` is a denylist, so expect to edit it.** One day it will refuse a
+  real track whose title happens to contain "explained" or "reaction"; delete
+  that line and it plays. An empty list `[]` turns the check off entirely.
+
+  Edits take effect on the next pick; no restart.
+
+  **The dials are in that file; the list itself is in the app.** Vox Array →
+  **TUNES** shows `euterpe_ledger.json` as editable JSON. It holds the songs
+  *you* chose — **Auto-DJ reads it and never adds to it**, so the list stays
+  yours and only grows when you play something or type it in. That tab is where
+  you delete a song you never want back or paste one in to steer the next
+  evening. SAVE checks the JSON before it writes and keeps one
+  `euterpe_ledger.json.bak` beside the log.
+
+  **One row per song.** Playing something already on the list moves it to the
+  bottom instead of adding a second copy, so the list stays as long as the
+  number of songs you actually like. If you type a song in twice, SAVE refuses
+  and tells you which two rows collide — it will not quietly delete one of them
+  for you.
+
+  A consequence worth knowing: the DJ's own picks are remembered only while
+  Felhaven is running, just long enough to stop it repeating itself. There is no
+  record of what it played last night. If it finds you something good, add it to
+  TUNES — which is the same act as telling it you liked the song.
+
+  **Once the taste is how you want it, press TAKE FROM SAVED.** That copies the
+  ledger to `euterpe_ledger.json.base` — a restore point nothing else ever
+  touches, unlike the `.bak`, which is overwritten by your next save. When a few
+  evenings of Auto-DJ have dragged the taste somewhere you did not ask for,
+  RESTORE loads the base copy back into the box for you to look at; it writes
+  nothing until you press SAVE. Both files are gitignored, like the log itself.
+
 ## 9. Optional — run the tests
 
 Hermetic (no network, no audio, no models needed):

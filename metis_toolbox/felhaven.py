@@ -36,7 +36,7 @@ import voices
 from kairos import Kairos
 from metis_logging import setup_logging
 from tools import morpheus
-from theme import C, FONTS, _init_fonts, rescale_fonts
+from theme import C, FONTS, _init_fonts, _init_widget_defaults, rescale_fonts
 
 from panels.home_panel       import HomePanel
 from panels.horai_panel      import HoraiPanel
@@ -52,6 +52,11 @@ from panels.sidebar          import Sidebar
 
 # ── Baseline geometry for Felhaven window ────────────────────────────────────
 BASE_W, BASE_H = 960, 620
+# The smallest window every view still fits in. 760, not 700: Moderati's
+# seventh tab (DAEDALUS) made its tab bar too wide for a 700 px window, and
+# pack dropped the tab entirely. The sidebar is fixed-width, so every px here
+# is content width. tests/test_moderati_panel_smoke.py holds the bar to it.
+MIN_W, MIN_H = 760, 500
 
 
 class _ClockCluster(tk.Frame):
@@ -112,9 +117,10 @@ class FelhavenApp:
         self.root.title("FELHAVEN — Command Center")
         self.root.configure(bg=C["bg"])
         self.root.geometry(f"{BASE_W}x{BASE_H}")
-        self.root.minsize(700, 500)
+        self.root.minsize(MIN_W, MIN_H)
 
         _init_fonts(self.root)
+        _init_widget_defaults(self.root)
 
         self.data = scribe.load_data()
         self._save_timer      = None
@@ -164,6 +170,11 @@ class FelhavenApp:
         # HomePanel only needs this to refresh its Ammit status badge (its own
         # chat state stays event-driven, not Kairos-timed) — see home_panel.py.
         self.kairos.register_panel("horai",      self._views["felhaven"])
+        # Auto-DJ's spoken line, on Awen's own tick. The RIDER is registered,
+        # not the view: HomePanel.update() is already taken by the Ammit badge
+        # above, and Kairos passes update() no worker name to tell them apart
+        # (the moderati.hephaestus precedent, two lines down).
+        self.kairos.register_panel("awen",       self._views["felhaven"].dj_rider)
         self.kairos.register_panel("hephaestus", self._views["moderati"].hephaestus)
         self.kairos.register_panel("aether",     self._views["moderati"].hephaestus.aether)
         self.kairos.register_panel("emanon",     self._views["moderati"].emanon)

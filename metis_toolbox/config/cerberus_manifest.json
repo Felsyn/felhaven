@@ -6,6 +6,7 @@
     {"file": "morpheus_playlists.json", "desc": "Morpheus playlists — label/url rows for the audio engine."},
     {"file": "hypatia_lore.json", "desc": "Hypatia constellation lore — hand-curated mythology text per constellation."},
     {"file": "calliope_config.json", "desc": "Calliope narrator — voice, speed, language, and TTS model paths."},
+    {"file": "euterpe_config.json", "desc": "Euterpe tuning — Auto-DJ's no-repeat window, taste anchor, and longest thing that counts as a song."},
     {"file": "sphynx_data.json", "desc": "Sphynx gate PIN hash — the Number of Bane that guards the app itself."},
     {"file": "cerberus_manifest.json", "desc": "This file — the Custody list of config files and their descriptions."}
   ]

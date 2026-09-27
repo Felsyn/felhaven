@@ -24,6 +24,15 @@ timer_state.json
 felhaven_data.json
 felhaven_settings.json
 plutus_ledger.json
+# Euterpe — the song ledger (what music has played). Generated and
+# personal, same bucket as plutus_ledger.json; config/euterpe_config.json
+# is the committed tuning template and STAYS tracked.
+#
+# Globbed, not the bare name: the TUNES editor writes euterpe_ledger.json.bak
+# beside it on every hand edit, and a repair leaves a dated copy of the same
+# shape. One pattern covers the log and everything that is a copy of it, so
+# `git add -A` can never stage somebody's listening history.
+euterpe_ledger.json*
 argus_timeline.json
 morpheus_playlists.json
 morpheus_watch_later/

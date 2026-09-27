@@ -11,15 +11,18 @@ the module's own docstring, where it cannot drift from the code.
 | [Argus](argus.md) | Report what this computer is communicating with on the network. |
 | [Artemis](artemis.md) | Own the local-chart cache: projection, area manifest, county reference, and the shared vector format. |
 | [Aura](aura.md) | Report current weather: temperature, sky, wind, and forecast. |
+| [Awen](awen.md) | When a song ends and Auto-DJ is on, choose the next one, play it, and hand back a spoken introduction. |
 | [Cadmus](cadmus.md) | Decode ESRI shapefile bytes (.shp/.dbf) into geometry and attribute records. |
 | [Callimachus](callimachus.md) | Ask the web a question and return trimmed text. |
 | [Calliope](calliope.md) | Turn a string of text into speech and play it. |
 | [Cerberus](cerberus.md) | Guard the toolbox's secrets behind one PIN — the sole encryption authority. |
+| [Daedalus](daedalus.md) | Map Felhaven's own modules, their docstrings and their imports, from the source. |
 | [Demeter](demeter.md) | Fetch, resample and cache local elevation, and render the terrain raster. |
 | [Echo](echo.md) | Turn text into an audio file on disk. |
 | [Emanon](emanon.md) | Watch the stack's logs and report what broke — read-only, never act. |
 | [Eratosthenes](eratosthenes.md) | Resolve a typed location query to a latitude and longitude. |
 | [Eudoxus](eudoxus.md) | Convert between units of length, volume, weight, temperature, and time. |
+| [Euterpe](euterpe.md) | Remember what music has played, and answer two questions about it: "have we heard this recently?" and "what does the listener actually like?". |
 | [Harmonia](harmonia.md) | Own the one audio output device. |
 | [Hecate](hecate.md) | Fetch and cache TIGER/Line roads for an area as tiered Features. |
 | [Helios](helios.md) | Report sunrise, sunset, golden-hour windows, and day length. |

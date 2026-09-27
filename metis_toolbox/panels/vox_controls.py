@@ -3,15 +3,16 @@ panels/vox_controls.py — the Vox control row
 ============================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         Draw Pythia's three vox controls as words, not glyphs — Vox
-             Response, Vox End, Reset Session — stacked in a bordered box, each
-             with a state dot, and report a click. Owns the lit/dim styling and
-             nothing else: no chat state, no worker, no narration state of its
-             own.
+Job:         Draw Pythia's four vox controls as words, not glyphs — Vox
+             Response, Vox End, Auto-DJ, Reset Session — stacked in a bordered
+             box, each with a state dot, and report a click. Owns the lit/dim
+             styling and nothing else: no chat state, no worker, no narration
+             state of its own.
 
 Layout:      ┌──────────────────┐
              │ ● Vox Response   │
              │ ● Vox End        │
+             │ ● Auto-DJ        │
              │ ● Reset Session  │
              └──────────────────┘
              One box around the group, not one per row. The border is constant;
@@ -35,21 +36,30 @@ Colours:     This row INVERTS the §7 active/inactive convention, deliberately.
              the label beside it instead. Same colour, computed once, painted
              on both surfaces.
 
-State:       Vox Response mirrors calliope's auto-speak flag, which stays the
-             single source of truth — this row is the flag's only runtime
-             mutator, and it re-reads the real flag after flipping rather than
-             keeping a guessed copy. Vox End's lit/dim comes from HestiaBar via
-             set_armed(); Reset Session is momentary and only flashes.
+State:       Vox Response mirrors calliope's auto-speak flag and Auto-DJ mirrors
+             awen's, and BOTH of those modules stay the single source of truth —
+             this row is each flag's only runtime mutator, and it re-reads the
+             real flag after flipping rather than keeping a guessed copy. Vox
+             End's lit/dim comes from HestiaBar via set_armed(); Reset Session
+             is momentary and only flashes.
 
-Contract:    VoxControls(parent, on_end, on_reset)
+             Auto-DJ's own toggle can answer with a line to say ("play me
+             something first so I know the vibe"), which this row hands
+             STRAIGHT UP through on_notice rather than speaking. A widget that
+             owns the lit/dim styling and nothing else does not get to own a
+             voice — HomePanel decides when anything is heard, exactly as it
+             does for a chat answer.
+
+Contract:    VoxControls(parent, on_end, on_reset, on_notice)
                  set_armed(armed: bool)   — lit/dim cue for Vox End
                  flash_reset()            — one amber beat on Reset Session
-                 refresh()                — re-read calliope's auto-speak flag
+                 refresh()                — re-read both real flags
 
 Upstream:    panels/hestia_panel.py (constructs + drives this)
-Downstream:  calliope.py (auto-speak flag), theme.py (colors/fonts)
+Downstream:  calliope.py (auto-speak flag), awen.py (the Auto-DJ flag),
+             theme.py (colors/fonts)
 
-Requires:    tkinter (stdlib); calliope.
+Requires:    tkinter (stdlib); calliope, awen.
 
 Precedent:   Replaces the retired panels/narrator_panel.py speaker lamp. The
              lamp's discipline is carried over verbatim — read the flag, never
@@ -62,6 +72,7 @@ from typing import Callable, Optional
 
 import tkinter as tk
 
+import awen
 import calliope
 from theme import C, FONTS
 
@@ -158,7 +169,7 @@ class VoxToggle(tk.Frame):
 
 
 class VoxControls(tk.Frame):
-    """The bordered box holding Vox Response · Vox End · Reset Session.
+    """The bordered box holding Vox Response · Vox End · Auto-DJ · Reset Session.
 
     Vox End is ALWAYS clickable, whatever set_armed() last said. Narration can
     keep playing for seconds after the answer text finishes — synth and
@@ -170,7 +181,8 @@ class VoxControls(tk.Frame):
 
     def __init__(self, parent: tk.Widget, *,
                  on_end: Callable[[], None],
-                 on_reset: Callable[[], None]) -> None:
+                 on_reset: Callable[[], None],
+                 on_notice: Callable[[str], None]) -> None:
         super().__init__(parent, bg=C["bg"],
                          highlightbackground=C["border"], highlightthickness=2)
 
@@ -183,9 +195,15 @@ class VoxControls(tk.Frame):
         self._end = VoxToggle(inner, "Vox End", on_end)
         self._end.pack(fill="x", pady=(4, 0))
 
+        # Directly above Reset Session, as asked. It sits with the other two
+        # STATE controls rather than beside the momentary one.
+        self._dj = VoxToggle(inner, "Auto-DJ", self._toggle_dj)
+        self._dj.pack(fill="x", pady=(4, 0))
+
         self._reset = VoxToggle(inner, "Reset Session", on_reset)
         self._reset.pack(fill="x", pady=(4, 0))
 
+        self._on_notice = on_notice
         self.refresh()
 
     # ── HestiaBar-facing ─────────────────────────────────────────────────────
@@ -199,11 +217,28 @@ class VoxControls(tk.Frame):
         self._reset.flash()
 
     def refresh(self) -> None:
-        """Re-read calliope's auto-speak flag — never a local copy of it."""
+        """Re-read both real flags — never a local copy of either.
+
+        Auto-DJ is read here rather than pushed in because it can change without
+        anyone clicking this row: the breaker turns it off by itself after three
+        turns that played nothing. A cached copy would leave the lamp amber over
+        a job that had already given up."""
         self._response.set_active(calliope.auto_speak_enabled())
+        self._dj.set_active(awen.enabled())
 
     # ── Vox Response ─────────────────────────────────────────────────────────
 
     def _toggle_response(self) -> None:
         calliope.toggle_auto_speak()
         self.refresh()
+
+    # ── Auto-DJ ──────────────────────────────────────────────────────────────
+
+    def _toggle_dj(self) -> None:
+        """Flip Auto-DJ, then re-read it. The re-read is not ceremony: switching
+        ON with an empty ledger does not arm anything, so the flag it comes back
+        with is the one to paint."""
+        notice = awen.toggle()
+        self.refresh()
+        if notice:
+            self._on_notice(notice)

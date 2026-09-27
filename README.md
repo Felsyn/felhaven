@@ -44,18 +44,29 @@ gothic-imperial, the code keeps the deity module names.
 
 | View | Shows |
 |---|---|
-| **Felhaven** | Home: Pythia's chat, with per-answer narration and session token/tool tallies |
+| **Felhaven** | Home: Pythia's chat, with per-answer narration, session token/tool tallies, and the Auto-DJ toggle |
 | **Chronometry** | Clock, date, season badges; hosts the Ammit timer |
-| **Moderati** | Six tabs: system vitals, log tail, network awareness, the Cerberus secrets gate, settings, and Pythia's editable system prompt |
+| **Moderati** | Seven tabs: system vitals, log tail, network awareness, the Cerberus secrets gate, settings, Pythia's editable system prompt, and Daedalus — a map of Felhaven's own modules and their docstrings |
 | **Atmospherics** | Current conditions and a 3-day forecast, with sun and moon sub-widgets |
 | **Celestarium** | Zenith star map with clickable constellations, the five classical planets, and observing conditions |
+| **Cartograph** | Offline local map around your fix — terrain, water and roads, with a searchable place lookup |
 | **Dynastic Vault** | Live watchlist prices and a manual holdings ledger (behind the Cerberus PIN) |
 | **Scriptorium** | RSS/Atom news aggregator, one tab per feed |
-| **Vox Array** | Three audio tabs: YouTube playback, text-to-audio-file, and playback of those files |
+| **Vox Array** | Four tabs: YouTube playback, text-to-audio-file, playback of those files, and the song ledger Auto-DJ picks from |
 | **Cogitator** | Three utility tabs: tasks and notes, a calculator, a unit converter |
 
 Two brain tools have no view — **Callimachus** (web search) and **Herodotus**
 (a local Markdown archive) are reached only through Pythia's chat.
+
+**Auto-DJ** has no view of its own either, and is not a tool at all. With the
+toggle on, **Awen** (`awen.py`) picks the next song when one ends, plays it
+through Morpheus and introduces it aloud — the one job in the stack that acts
+without being asked. **Euterpe** (`tools/euterpe.py`) is the list of songs *you*
+chose, which it copies the taste of; that list *is* drawn, as Vox Array's TUNES
+tab, and you edit it by hand. The DJ reads it and never adds to it — its own
+picks are remembered only for as long as the app is running, just far enough to
+stop it repeating itself. Neither module is reachable by the model: a job the
+model could start would be the model scheduling its own unprompted work.
 
 ---
 

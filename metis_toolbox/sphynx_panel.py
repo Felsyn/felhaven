@@ -40,7 +40,7 @@ import sys
 import tkinter as tk
 
 import sphynx
-from theme import C, FONTS, _init_fonts
+from theme import C, FONTS, _init_fonts, _init_widget_defaults
 
 # felhaven.py lives next to this file — anchor to __file__ (CONVENTIONS §11),
 # so this resolves correctly regardless of cwd.
@@ -74,6 +74,7 @@ class SphynxPanel:
         self.root.minsize(480, 360)
 
         _init_fonts(self.root)
+        _init_widget_defaults(self.root)
 
         self._success = False
         self._riddle_line = ""

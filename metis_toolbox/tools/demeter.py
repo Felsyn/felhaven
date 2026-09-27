@@ -60,8 +60,8 @@ Source:      OpenTopography REST API, AAIGrid output:
 
 Upstream:    tools/artemis.py — ingest_area orchestrates ingest();
              panels/artemis_panel.py — calls raster() to draw.
-Downstream:  cerberus.py (the key), tools/artemis.py (geometry, paths,
-             atomic writes).
+Downstream:  cerberus.py (the key), palette.py (the band colours),
+             tools/artemis.py (geometry, paths, atomic writes).
 
 Requires:    stdlib only — array, gzip, logging, os, struct, threading,
              urllib.parse, urllib.request.
@@ -78,13 +78,14 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-# Demeter reaches UP to an app-root sibling (cerberus.py) as well as its
-# tools/ siblings; only a bare `python tools/demeter.py` needs the path
+# Demeter reaches UP to app-root siblings (cerberus.py, palette.py) as well as
+# its tools/ siblings; only a bare `python tools/demeter.py` needs the path
 # insert, and it must precede `import cerberus` (the midas placement).
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import cerberus
+from palette import C, rgb
 from tools import artemis
 
 log = logging.getLogger("METIS.demeter")
@@ -113,13 +114,13 @@ _HEADER = struct.Struct("<6sHIIddfhhh8s14x")
 ERR_VAULT_LOCKED = "vault_locked"
 ERR_NO_KEY = "no_key"
 
-# Band colours. These MUST match theme.C's map_terrain_* keys — the raster is
-# built headless here (importing theme would drag Tk into a tools/ module),
-# so tests/test_artemis_palette.py holds the two in lockstep.
-RGB_VALLEY = (0x0B, 0x2E, 0x18)
-RGB_MID = (0x1A, 0x5C, 0x31)
-RGB_PEAK = (0x2C, 0x8A, 0x4A)
-RGB_NODATA = (0x0A, 0x0E, 0x0A)     # == theme.C["bg"]; missing looks missing
+# Band colours, calculated from the palette rather than copied out of it:
+# palette.py is Tk-free and annotated, so a tools/ module can import it
+# (theme.py is neither). One value, one place — see CONVENTIONS §12, 2026-09-26.
+RGB_VALLEY = rgb(C["map_terrain_lo"])
+RGB_MID = rgb(C["map_terrain_mid"])
+RGB_PEAK = rgb(C["map_terrain_hi"])
+RGB_NODATA = rgb(C["bg"])     # the panel background; missing looks missing
 
 
 # ── Key ───────────────────────────────────────────────────────────────────────

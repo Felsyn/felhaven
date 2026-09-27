@@ -64,6 +64,7 @@ it exactly; the surface is the contract Kairos and Pythia rely on.
 | **Polled status + UI-driven mutations** *(hybrid)* | yes (never raises) | optional |
 | **Local-only ledger / persistence** | no | no (plain functions) |
 | **Device / infrastructure authority** | no | no |
+| **Polled actor** | yes (never raises) | no — it is a job, not a tool |
 
 Membership is not listed here on purpose — it drifts, and it already has. The
 ground truth is `pythia._TOOL_MODULES` plus `grep TOOL_DEFINITION tools/`, and
@@ -80,6 +81,16 @@ Rules that fall out of the table:
   engine is a normal state, not a fault) — **if your `fetch()` doesn't raise, say
   why in the docstring.** Per-field degradation is a third option: fall back
   inside the returned dict, and raise only on wholesale failure.
+- **A "polled actor" ACTS on its own tick.** Every other flavor either answers a
+  question or draws a panel; this one decides to do something — `awen.py` plays
+  audio and spends the model with no user action behind it. Three rules come
+  with the row, and they are the whole reason it is worth naming:
+  its `fetch()` **never raises** (waiting is a normal state, and Kairos's retry
+  ladder is meaningless for a job waiting on a song to end); it has **no
+  `TOOL_DEFINITION`**, because a job the model could start is a model
+  scheduling its own unprompted work; and it **does not speak or draw** — it
+  returns a payload and the GUI decides when it is heard, which is what keeps a
+  worker thread away from Tk. Most of such a module is about when NOT to fire.
 - **Out-of-LLM-scope is a real, intentional category.** A module that mutates a
   real-money ledger, or whose job is a panel verdict rather than an answer,
   deliberately omits `TOOL_DEFINITION` so a tool call can never reach it.
@@ -314,6 +325,18 @@ to track whether the timer is still live.
 - **Colors and fonts come from `theme.C` and `theme.FONTS` only.** Never hardcode
   a hex value or a font tuple — if you need a new color, add it to the palette.
   This is what keeps the dashboard coherent and lets `rescale_fonts` work.
+  The colour values themselves live in `palette.py`, the one file allowed to
+  contain one; `theme` re-exports `C` and `rgb()`, so a panel imports from
+  `theme` and a headless `tools/` module imports `palette` directly.
+  `tests/test_palette_guard.py` fails red on a hex string, a colour name in a
+  colour option, or an RGB triple anywhere else. A new key that shares a
+  value with an existing one is either the same colour on purpose (list it in
+  `palette._SAME_AS`) or by coincidence (declare it in the guard) — §12.
+- **Selection and text-cursor colours are already in theme.**
+  `theme._init_widget_defaults(root)` puts them in Tk's option database, and
+  every file that owns a `tk.Tk()` calls it beside `_init_fonts` (`test_theme`
+  fails if one does not). A new `Entry` or `Text` needs no `select*` or
+  `insertbackground` option; pass one only to differ from the theme — §12.
 - **Tab bar pattern**: `tk.Label` tabs with a 1 px underline `tk.Frame`; active =
   `C["text1"]` text + the panel's accent on the underline, inactive =
   `C["text3"]` + `C["border"]`. Copy it verbatim from an existing tabbed panel.
@@ -423,6 +446,18 @@ marker. Keeping a tool off the LLM surface means keeping it out of
   with the "right" types can hide a real-world type bug (the `wttr.in`
   string-typed percentages lesson). Assert against recomputed values so the test
   can't silently drift from the fixture.
+
+  **A hand-built fixture can also encode a state that never happens.**
+  `test_morpheus_load_failure.py` modelled a track's natural end as mpv's
+  *stopped* shape (`playlist-count 0`) for a month. Real mpv leaves
+  `playlist-count 1` — identical to a failed load. The tests passed the whole
+  time, because a real natural end has its load confirmed long before EOF, so
+  the wrong fixture was never what kept them green; it just quietly documented
+  that two states were separable when they are not. Note the direction of the
+  error, because it is the dangerous one: **a hand-built fixture tends to
+  flatter the code**, since the same head invents both. If a fixture asserts
+  that two states differ, that claim is a measurement, and it should name the
+  date it was measured. *(2026-09-16.)*
 - **Test the degraded paths**, not just the happy one: `None` from Kairos, a
   missing binary/key, an empty config, a single failed feed.
 - **Guard invariants in lockstep, never with a hardcoded count.** A count rots
@@ -471,6 +506,102 @@ and when, one line per change, so a decision worth keeping must be written here.
 
 - **`emanon.fetch()` / `morpheus.fetch()` never raise** (vs. §2's raise-on-failure
   norm). A watcher that crashes is useless; "nothing playing" is not a fault.
+- **`pythia.ask(tool_overrides=...)` swaps a tool's HANDLER for one turn,
+  keeping its schema.** A tool's job and a particular caller's PRECONDITIONS are
+  different things. `play_music` searches and plays in one call, which is right
+  for "play me this song" and leaves a caller that must check something between
+  those two steps with nowhere to put the check — by the time the tool returns,
+  a song heard an hour ago is already playing. Those checks are also not
+  Morpheus's: they are about Awen's history and Awen's idea of a song, and
+  moving them into Morpheus would give it a second job (§0). The override is
+  per-turn and never mutates `_DISPATCH`, so a chat turn running at the same
+  moment still gets the real handler. *(2026-09-16.)*
+- **Auto-DJ is OFF at every launch and is not persisted.** It is the one piece
+  of Awen's state that could reasonably have gone in `felhaven_settings.json`
+  (§9) and deliberately did not: a job that starts playing music by itself
+  because of something you did last week is a surprise, not a convenience. The
+  cost is one click after a restart. *(2026-09-16.)*
+- **DJ turns are stateless and never enter HomePanel's chat history**, in either
+  direction. Out, because gemma4:e2b imitates its own transcript — the reason
+  that history keeps real tool exchanges at all — and HomePanel's window is
+  three turns, so a few songs of patter would evict the operator's actual
+  conversation AND teach chat Pythia to talk like a radio host. In, because a
+  DJ turn that could see the chat would start answering it. Each turn is built
+  fresh from Awen's own prompt plus a message derived from the ledger.
+  *(2026-09-16.)*
+- **A DJ turn that called no tool says NOTHING**, rather than speaking the
+  model's text. Measured 2026-09-16: when gemma4:e2b drops out of tool-calling
+  mode it TYPES the call as content — `play_music{query:<|"|>Led Zeppelin
+  Stairway to Heaven<|"|>}` — and the same prompt three sentences shorter does
+  that 11 times in 12. Speaking it would announce a song that is not playing,
+  in a confident voice. The inverse case (a song played, no intro written) gets
+  a line built in code from the resolved title, which cannot be wrong.
+  *(2026-09-16.)*
+- **A tool allowlist is enforced at DISPATCH, not by omitting schemas.**
+  `pythia.ask(allow_tools=[...])` narrows both the schema list the model sees
+  and the set `_dispatch` will actually run, and the second is the one that
+  matters. Leaving a tool out of `tools` is a HINT: `_dispatch` runs any name
+  present in `_DISPATCH`, so a model that emits an omitted name anyway would
+  have it executed. That is tolerable for chat, where a human is reading the
+  transcript and typed the question, and not for an unattended caller feeding
+  the model text it did not write — a YouTube title is attacker-controlled
+  input in the same sense a web page is. A refused call returns a
+  `tool_not_available` slug so the model can recover inside the same turn, and
+  is recorded as a failed rite, because a refusal is a real event rather than
+  something to drop silently. *(2026-09-16.)*
+- **`pythia.is_busy()` is module state, in a module whose docstring says it has
+  none** ("no tkinter, no threads, no persistence... a pure request/response
+  function"). The counter is the same allowance `_WARMING` already has and for
+  the same reason: nothing else could answer the question. HomePanel knows about
+  its own turn through `self._thread`, which is a Tk object on the main thread
+  and unreachable from a Kairos worker deciding whether now is a good moment to
+  take the model. It is a counter rather than a flag because two turns can
+  genuinely overlap, and a flag would clear on the first finish and report idle
+  while the other was still generating. *(2026-09-16.)*
+- **`euterpe.record()` never raises** (vs. §9's persistence norm, where
+  `plutus._save_events` raises so the caller can surface it). The difference is
+  who is watching. Plutus writes from a Save button with a human in front of it;
+  Euterpe writes from a Kairos worker, on a job nobody asked for and nobody is
+  looking at, so there is no one to surface it TO — and a disk hiccup must not
+  take down the tick or stop the music. The swallow is only defensible because
+  of the `log.error` that comes with it, the same bargain `HomePanel._poll`
+  made: the failure names itself in `felhaven.log`, where Emanon surfaces it.
+  Never add one without the other. *(2026-09-16.)*
+- **Euterpe is out of LLM scope, and not for the usual reason.** §2's example of
+  the category is a module that mutates real money. This one is a GUARD: the
+  no-repeat rule exists to stop a small model replaying a song it likes, so
+  giving that model a write handle would let it record its way around the check,
+  and a read handle would only make it pay a tool round trip for something Awen
+  already puts in the turn's own message. Out of scope because it polices the
+  model, not because it is dangerous. *(2026-09-16.)*
+- **Whether a track ENDED or FAILED is decided in Python, never read off mpv.**
+  Measured 2026-09-16 against mpv v0.41, on a local file and a YouTube URL
+  alike: a natural end, a track ended by `next_track()`, and a load that never
+  resolved all leave `idle-active True`, `path None`, `playlist-pos -1`,
+  `playlist-count 1` — the same four values. The only idle state any property
+  separates is a deliberate `stop()`, by `playlist-count 0`.
+
+  So there is no property to branch on, and any future code that thinks it has
+  found one is reading a coincidence. `_judge_pending_load` decides it instead,
+  from whether a load was ever *confirmed*: media that existed and then stopped
+  existing ended; media that never existed failed. This was always the
+  docstring's claim — what changed is that it is now measured rather than
+  inferred, and that its own test fixtures had been contradicting it (see §10).
+  *(2026-09-16.)*
+- **`next_track()` sends `playlist-next force`, `prev_track()` keeps `weak`.**
+  The asymmetry is deliberate and should not be tidied away. `weak` does nothing
+  on the LAST playlist entry, and every single track `play_music` loads is
+  exactly that — so ⏭ and `control_music(action="next")` were silent no-ops for
+  every track Morpheus plays, while `control_music` still returned the
+  post-action status as though the skip had happened, putting the lie into the
+  model's context too. `force` ends it, landing in the same shape a natural end
+  leaves, which is what lets a caller treat "skipped" and "ended" as one event.
+
+  Backwards has no equivalent destination: running forward off the end of a
+  playlist means "this track is over", while running back off the front would
+  mean ending playback, which is not what ⏮ says it does. The two differ only on
+  the last entry, so walking a real playlist is unchanged either way.
+  *(2026-09-16.)*
 - **`HomePanel._poll` swallows and logs, and re-arms in a `finally`** (vs. the
   general rule that panels let errors surface). This chain is not just this
   panel's: `_poll` drives `_on_delta`, which is what feeds sentences to
@@ -1276,3 +1407,339 @@ and when, one line per change, so a decision worth keeping must be written here.
   also translated from WMO into wttr.in's WWO space on the way out, because
   that is the space `aura_panel._icon()` maps; leaking a raw WMO code would
   silently draw the wrong emoji rather than fail. *(2026-09-15.)*
+- **Euterpe grew a whole-file write (`replace_all`) without growing a
+  `clear()`.** Its docstring says there is no clear/erase/undo, on the
+  `herodotus.py` precedent, and that stays true — the two are different things
+  and the distinction is the whole entry. What the rule forbids is a
+  *programmatic* erase: a hook that Reset Session, a panel button or the model
+  could call to wipe history as a side effect of doing something else, which
+  would turn a no-repeat list into a list that can be wiped mid-session.
+  `replace_all()` is the operator's own hand — it is reached from exactly one
+  place, the TUNES tab's SAVE, on a file they could always have opened in
+  Notepad. On 2026-09-16 they had to: a bug logged eight of the DJ's own picks
+  as the listener's taste, one of them a gear manual, and the only fix was a
+  script and a hand-made backup. The taste anchor reads `source: "user"` rows
+  and nothing else, so a mis-attributed row is not noise in the history, it *is*
+  the taste. Euterpe is still absent from `pythia._TOOL_MODULES`, so the MODEL
+  still has no write handle, which was always what the rule protected.
+  *(2026-09-17.)*
+- **The TUNES tab is raw JSON rather than a row list, and SAVE keeps one
+  `.bak`.** A list of rows with a delete cross would be safer to click and
+  could not express the third thing the tab is for — pasting a song in to seed
+  the taste. The schema is eight flat fields over a file bounded to 200 plays,
+  and an editor that shows the file itself cannot drift from it. The net that
+  choice needs lives in `euterpe`, not the panel: `replace_all()` validates
+  before it writes and refuses with a slug naming the row, and `_backup()`
+  copies the old file to `euterpe_ledger.json.bak` first — a save whose backup
+  fails is refused rather than taken blind, because the backup *is* the undo the
+  module otherwise doesn't have. `.gitignore` matches `euterpe_ledger.json*` so
+  the copy is as unpublishable as the log. *(2026-09-17.)*
+- **The TUNES editor refuses to save over a write it didn't make.** Awen
+  records plays on a 2 s Kairos tick, and `record()` is load → mutate → save, so
+  a tab left open while a song ends is holding text that would delete that play
+  on the next SAVE. The panel keeps the `euterpe.stamp()` (an mtime) it loaded
+  at and compares it back before writing. It is compared for **equality only** —
+  "different from what I loaded" is the whole question, and it is the one
+  question a clock change cannot answer wrongly. The stamp is taken *before* the
+  text on every load, so the failure mode is a false alarm costing a RELOAD
+  rather than a silently clobbered song. *(2026-09-17.)*
+- **Euterpe keeps TWO backups with different jobs, and the second is the one
+  that matters.** `euterpe_ledger.json.bak` is written automatically before
+  every hand edit and **rolls** — it protects the save you just made and is gone
+  after the next one. `euterpe_ledger.json.base` is taken deliberately, by the
+  TUNES tab's *TAKE FROM SAVED*, and nothing in the module ever replaces it. A
+  rolling backup cannot answer "put it back the way it was when I had it right",
+  which is the question actually being asked: the ledger gets a little worse
+  every evening the DJ mis-attributes something, so the state worth returning to
+  is days old by the time you notice, not one save ago. Two files rather than
+  one dressed-up file, because an automatic write and a deliberate one must not
+  share a name. `take_base()` reads the ledger **from disk**, never from the
+  editor's text — a base copy is a state that was validated and saved, not one
+  that was typed — and the panel refuses the button while the box is dirty
+  rather than quietly capturing the older state. *(2026-09-17.)*
+- **RESTORE is preview-only, and deliberately does NOT re-take the staleness
+  stamp.** Preview-only is the `machine_spirit_panel.py` "Revert to Default"
+  precedent (§7): this is the escape hatch from a bad state, so it must not be a
+  state you then need an escape hatch from — it fills the editor and writes
+  nothing until SAVE. The stamp is the less obvious half. Every other load
+  re-takes it, and this one must not, because restoring is the most destructive
+  thing the tab can commit: it drops every play since the base was taken. If
+  Auto-DJ landed a song while the operator was deciding, SAVE should stop and
+  say so rather than wave through a click that was aimed at a different file.
+  *(2026-09-17.)*
+- **The base copy is named `euterpe_ledger.json.base`, not
+  `euterpe_ledger.base.json`.** `.gitignore` matches `euterpe_ledger.json*`,
+  which covers only names that START with the log's full name. The natural
+  reading — putting `.base` before the extension — produces a file git would
+  happily track, and the first `git add -A` would publish somebody's listening
+  history. `tests/test_euterpe.py` asserts the chosen name is ignored, so the
+  next file in this family gets the same check rather than the same guess.
+  *(2026-09-17.)*
+- **Awen reads Euterpe's ledger and no longer writes to it.** Until 2026-09-17
+  every DJ pick was filed as a `dj` row, purely so `was_recently_played()` would
+  refuse it next turn. Once the ledger got an editor (Vox Array → TUNES) that
+  stopped being defensible: it is a list somebody curates, and a job that writes
+  to the list it reads from is a feedback loop wearing a different hat. The
+  strongest version of the argument is that the loop already closed once — a
+  labelling bug filed the DJ's own picks as the listener's, a gear-manual video
+  became "what Matthew likes", and the DJ went looking for more gear manuals.
+  Fixing the label fixed that bug; removing the write removes the SHAPE of it.
+  The listener's own plays are still recorded here, because `awen.py` is the
+  only thing watching mpv — and still with the flag off, or the first switch-on
+  would find no taste at all. *(2026-09-17.)*
+- **The DJ's no-repeat memory is `awen._session_plays`: in the process, for one
+  run, never on disk.** It is the whole reason `dj` rows existed, so it had to
+  go somewhere — and this is the one consequence that is easy to miss, because
+  the guard at the top of `_guarded_play_music` is the ONLY thing stopping a
+  re-pick and the prompt does not cover for it (measured over ten real turns,
+  the model proposed a song already on the list it had just been handed six
+  times). Not a second state file: the window is 20 songs, about an evening, and
+  Auto-DJ is already off at every launch and not persisted (see above), so
+  session-scoped DJ state is the position this codebase already took. **The cost
+  is stated rather than hidden:** a restart may let it replay something from
+  earlier the same day, and there is no longer any record of what it played last
+  night beyond a DEBUG line. A song worth keeping gets typed into TUNES, which
+  is the same act as choosing it. *(2026-09-17.)*
+- **Session rows are shaped like ledger rows, and carry `source: "dj"`.** So
+  `awen._known_plays()` can hand euterpe's existing views one concatenated list
+  and every one of them behaves: `was_recently_played()` is a membership test,
+  `recent_titles()` takes the tail and de-duplicates, and `taste_anchor()` skips
+  them by the `source == "user"` rule it already had. That is the point — no
+  second matching implementation that could drift from the first, in the
+  `is_a_song()` spirit. The **one** thing concatenation cannot answer is "which
+  song just finished", because the two lists interleave in time and neither
+  holds both halves; that reads `awen._last_played_key`, set on every observed
+  play whoever started it. A test pins exactly that case — a listener song
+  played after a DJ one — because the tail of the combined list gets it wrong
+  and looks right. *(2026-09-17.)*
+- **Euterpe's ledger stopped being append-only, on the same day it stopped
+  being the DJ's.** A log of everything that played wants every play in it. A
+  list somebody keeps has no use for a second copy of a song: `taste_anchor()`
+  and `recent_titles()` both de-duplicate before they answer, so a duplicate
+  changes neither — all it reliably does is take a line in the editor and a slot
+  against `_MAX_ENTRIES`, and that second one is not cosmetic. The cap trims
+  from the FRONT, so playing a favourite twice would quietly drop the oldest
+  song the listener actually likes. A test pins exactly that.
+  **The two write paths hold the rule differently, deliberately:** `record()`
+  MOVES — the old row is dropped and the new one appended, because playing a
+  song again is a current signal and keeping the first timestamp would discard
+  it to preserve a history nobody reads. `replace_all()` REFUSES, naming both
+  rows — it is the function that promises not to rewrite what was typed, and
+  silently dropping a line the operator can see on screen is how a file stops
+  matching its editor. Identity is the normalized key alone, never also the
+  video id: collapsing one song's many uploads is the entire reason
+  `normalize()` exists, so a second test on the id could only split a row the
+  key had already joined. *(2026-09-17.)*
+- **Song identity ignores the order across the dash, and the KEY did not
+  change — the comparison did.** `normalize()` cannot tell which half of
+  "A - B" is the artist, and YouTube ships the same song both ways round.
+  Measured 2026-09-17 from a real mpv log: the DJ played `Linkin Park - In The
+  End (Official Music Video)` and then `In The End [Official HD Music Video] -
+  Linkin Park`. Two keys, one song, and equality on the keys said they were
+  different, so the guard let the repeat through. `same_song()` sorts the halves
+  before comparing and is asked by all three callers — the guard, `record()`'s
+  move-on-replay, and `replace_all()`'s duplicate check — because if they could
+  disagree, a song the guard refused could still be filed twice.
+  **Why the comparison and not the key:** the key is also what TUNES shows and
+  what the model reads in its do-not-repeat list, and a sorted key reads
+  backwards half the time ("in the end - linkin park"). Changing it would also
+  have invalidated every stored key for no gain. Two different songs colliding
+  would need one's artist to be the other's track and vice versa. *(2026-09-17.)*
+- **Whose song it is, is decided by the loaded URL, and doubt resolves towards
+  the DJ.** `awen._note_playing` compared `normalize(search_result_title)` with
+  `normalize(mpv_media_title)` — two strings with different authors — and
+  resolved every disagreement towards `source: "user"`. Measured 2026-09-20 on
+  the live ledger: one upload arrived NFC from yt-dlp and NFD from mpv, so
+  `Altın Gün` was spelled with a precomposed `ü` on one side and a combining
+  diaeresis on the other. One video, one id, and `same_song()` said no, because
+  `casefold()` folds case and not Unicode form. So `morpheus.status()` now
+  publishes mpv's `path` and identity is `video_id()` on both sides, falling
+  back to the title only when one side has no id.
+  **Why `path` and not `_last_url`:** `_last_url` is INTENT — it still names a
+  URL after that load failed, and it is a whole track stale after a playlist
+  walk. `path` is what mpv holds, and the question being asked is "which URL
+  produced the audio I can hear".
+  **Why a THIRD answer:** a song that cannot be attributed is filed `dj`, in
+  memory, for this run. A wrong `dj` costs one missed taste signal; a wrong
+  `user` is a permanent row in a curated file that `taste_anchor()` reads as
+  what the listener likes, and that loop has now closed twice. Its held
+  introduction is NOT spoken, for the `_names_the_song()` reason, and it does
+  not reset the breaker — a song we cannot attribute is not evidence that ours
+  played. It logs at WARNING, the third exception to Awen's no-INFO rule, and
+  it is Emanon-safe because it is rare by construction; if it stops being rare,
+  that is a fault worth the verdict. **The cost, stated:** a listener's song
+  that lands inside an unproven window is invisible to the anchor and unpickable
+  for 20 songs. The recourse is the documented one — a line typed into TUNES.
+  *(2026-09-20.)*
+- **`normalize()` folds Unicode form before anything else touches the string.**
+  `casefold()` folds CASE and nothing else, so one song spelled two ways keyed
+  twice — which broke attribution, let the DJ replay a song it had just played,
+  and would have written the same song to the ledger twice. Three bugs, one
+  missing line. NFC because it is what JSON from the web carries and what a text
+  box produces. Stored keys are NOT re-derived (`replace_all()` does not re-key
+  what was typed), so an old row in the other form keeps the key it has and
+  simply stops matching itself — one stale no-repeat entry, and no correctness
+  lost. *(2026-09-20.)*
+- **The model's copy of the snapshot is the snapshot minus what it has no
+  business holding** (`morpheus._model_status`). `control_music` hands its
+  result straight into the model's context, and `path` is a resolved URL:
+  measured 2026-09-20, the stream URL behind one song was 1110 characters of
+  signed, expiring, IP-bound query string. A DENYLIST rather than an allowlist,
+  because an allowlist makes every future field invisible until somebody
+  remembers to add it — the failure that is silent — where a denylist makes the
+  next sensitive field visible until somebody removes it, which gets noticed.
+  *(2026-09-20.)*
+- **`euterpe.pretty()` is `normalize()` with the case left on, and they share
+  `_clean()`.** A display name that stripped junk differently from the key would
+  show one song while filing another, so the regexes live in one function and
+  the two entry points differ by a single `fold` flag. Every comparison inside
+  `_clean` is case-insensitive either way, so both forms make the same decisions
+  and differ only in the characters they return. *(2026-09-17.)*
+- **The DJ's spoken intro must NAME the song that is playing, and is checked
+  rather than trusted.** Measured 2026-09-17: handed the resolved title in the
+  tool's own result, gemma4:e2b introduced a different Linkin Park song; earlier
+  runs produced "Let It All Bleed by The Beatles" for `The Beatles - Let It Be`
+  and announced a Rhodes Brothers cover as the Arctic Monkeys. A name that has
+  to be right is not a thing to ask a small model for when the string is already
+  in hand. So `_names_the_song()` requires every part of `pretty()`'s name to
+  appear in the intro, case-insensitively — artist AND track, so naming the
+  right artist and the wrong song does not pass — and anything else is replaced
+  by a line built in code. It joins the same family as the blank, typed-tool-call
+  and `is_degraded` checks that already sat there: four ways the model's text
+  can be unusable, one built line. **The known cost is stated rather than
+  hidden:** an intro that writes "ADIDAS" for `a.d.i.d.a.s` is correct and still
+  gets replaced. A correct line swapped for another correct line is the cheap
+  half of that trade; telling a listener they are hearing something they are not
+  is the expensive half. *(2026-09-17.)*
+- **A tool's output can go AROUND the model — `pythia.ask(on_verbatim=...)` —
+  and a round made only of such calls ends the turn.** Daedalus exists to show a
+  module's docstring word for word, and anything the model reads, it retells,
+  whatever the prompt says. So a handler may return its text under `"verbatim"`
+  (`{"label", "title", "text", "ack"}`); `ask()` hands that to `on_verbatim`
+  (HomePanel prints it as its own `daedalus ›` block) and the model gets only
+  `{"module", "path", "shown_to_user": true}`. The text reaches the model on NO
+  path: a caller without a display (Awen, `__main__`) gets a `no_display` slug,
+  and a display that raises gets `display_failed`. **Why the turn ends there:**
+  a tool result with nothing in it is the shape `pythia.py` measured gemma4
+  going blank on, and the blank-retry nudge would then have it "say plainly what
+  information is missing" — about a docstring already on screen. So the turn
+  closes on the payload's `ack` line ("Here is the docstring for aura."), built
+  in code, the `_names_the_song()` rule: a line that has to be right is not asked
+  of a small model. A mixed round (Daedalus plus the weather) goes back to the
+  model as before. History stores the call and the ack, never the text; Vox
+  Response speaks the ack, never the docstring (long, and full of box-drawing
+  characters). The first tool whose output bypasses generation. *(2026-09-25.)*
+- **`get_module_docstring`'s enum is built from the code tree at import, and
+  what it costs was measured, not assumed.** An enum regenerated on restart
+  means no hand-kept list — but an enum alone does not route: `aura` means
+  nothing to the model. So the `module` parameter's description carries one
+  `key — Job: gloss (sidebar name)` line per module, all 75. It is on the
+  PARAMETER because a tool description is capped at 600 characters
+  (`test_tool_schema_contract`). Measured 2026-09-25 on gemma4:e2b with the live
+  Machine Spirit prompt: the prefix grew 2,946 → 4,889 tokens (+66%), a true
+  cold prefill ~7.3 s → ~12.7 s, a warmed first question unchanged at ~60 ms
+  (the prefix stays cached), and headroom inside `num_ctx` 8192 fell from ~5.2k
+  to ~3.3k tokens. Routing was 22/22 over two runs; keys plus sidebar names only
+  (+645 tokens) was 20/22 — "auto DJ" cannot find `awen` without its gloss — and
+  core+tools with 40-character glosses (+999) was 9/11. Matthew chose the full
+  glosses. `_GLOSS_CHARS = 0` is the keys-only switch and `_ENUM_GROUPS` the
+  scope, if the headroom is ever wanted back. *(2026-09-25.)*
+- **DAEDALUS opens a module with `notepad.exe`, never `os.startfile`.** The
+  default action for a `.py` on Windows is often to RUN it with the Python
+  launcher — the one thing a button labelled "open" must never do. Cerberus's
+  open-folder helper uses `startfile` on a FOLDER, where that is safe; it is not
+  a precedent for a file. The path comes only from `daedalus.source_path()` and
+  is checked again to sit inside `metis_toolbox/`. Off Windows the button is
+  disabled with a note rather than falling back to `xdg-open`/`open`, for the
+  same reason. Opening files is UI-only: no tool can launch a process, which is
+  why `daedalus.py` names it out of LLM scope. *(2026-09-25.)*
+- **Daedalus's edges are imports only, so Kairos's workers are not edges.**
+  Kairos loads its workers from strings through `importlib`, which no import
+  statement records: `emanon` has no edges at all (EmanonPanel never imports
+  it), and `kairos` does not connect to the tools it polls. The map shows what
+  the source says, not what runs; a "scheduled" edge read from `Kairos.WORKERS`
+  would be a second edge kind, and has not been built. *(2026-09-25.)*
+- **Felhaven's minimum window is 760 px wide, raised from 700 for one tab.**
+  A TabHost tab that does not fit is not clipped: pack DROPS it. Seven Moderati
+  tabs need a 494 px bar, and a 700 px window leaves 428, so DAEDALUS simply was
+  not there — while six tabs had fit with 1 px to spare. Raising the minimum
+  gives every view the same 60 px (the sidebar is fixed-width) and shrinks
+  nothing, where shortening labels or tab spacing would have taken room from
+  every tab bar to fit one. `felhaven.MIN_W` is the number, and
+  `test_moderati_panel_smoke` holds the bar to it, so an eighth tab fails red
+  instead of vanishing. *(2026-09-25.)*
+- **The chat has a fourth hue: `C["verbatim"]`, cyan, for text no one in it
+  said.** The transcript spoke green (Pythia), amber (the DJ) and red (a
+  failure); a Daedalus docstring is a QUOTATION, and in `teal` it read as a
+  dimmer Pythia. Cyan is the one hue none of those voices use. Its value is
+  `map_water`'s, but it is a separate base key rather than a borrowed map key,
+  because the Artemis colours are the world's and retuning the rivers must
+  never recolour the chat. A dull amber (`#A07C3A`, 4.9:1 on `card`) was the
+  other candidate; Matthew chose the cyan (4.8:1). The case against the amber:
+  a shade of a hue is the SAME channel here (`amber_bright`'s own comment), so
+  it could read as a quieter DJ line. *(2026-09-26.)*
+- **Colour values have one home, `palette.py`, and the Artemis palette no
+  longer lives in two files.** This replaces the reasoning of the 2026-08-09
+  entry above, whose stated reason — `tools/demeter.py` "must not import
+  Tk" — turned out not to be the constraint that mattered. CI runs on
+  `windows-latest`, where tkinter imports fine without a display. What
+  actually blocked `from theme import C` in demeter was measured: `mypy
+  --strict` follows the import into `theme.py` and reports 32 errors there,
+  and mypy on `tools/` is blocking. A module that imports nothing and is
+  fully annotated removes that cost and the layering one (a headless raster
+  renderer pulling in the widget classes) at once. `theme` re-exports `C`
+  and `rgb()`, so not one panel import changed. The values themselves did
+  not change either: before and after, every key, every pythia_face ramp
+  step and every demeter band compared equal. The one new key, `burnout`
+  (`#FFFFFF`), is pythia_face's former hardcoded white. It is named for its
+  job, not its hue — see the next entry for why. *(2026-09-26.)*
+- **Two palette keys with one value are either IDENTITY or COINCIDENCE, and
+  the code now says which.** Identity — the same colour on purpose — is
+  listed in `palette._SAME_AS` and calculated from its target, so retuning
+  the target retunes it: `green` and `season_fg` follow `text1`; the
+  decorative accents follow the ramp they were folded into (`teal`, `blue`
+  and `purple` follow `text2`, `gray` follows `text3`, `coral` follows
+  `amber`). Coincidence — a match that must stay free to drift apart — stays
+  two literals and is declared, with its reason, in
+  `test_palette_guard._COINCIDENCES`: today only `verbatim` / `map_water`.
+  An undeclared shared value fails red, because a reader cannot tell the two
+  cases apart, and a retune would have to guess. No key was deleted. Every
+  one has call sites, and calculating one key from another already gives one
+  value in one place, so deleting keys would have meant editing call sites
+  for no gain. **Known debt, deliberately left:** the accents are named for
+  hues they no longer are (`C["blue"]` is green). A name based on a hue goes
+  stale when the hue changes. Renaming them to roles touches ~48 call sites
+  and changes nothing on screen, so it is its own change. *(2026-09-26.)*
+- **A colour literal in a test is EVIDENCE if a palette change would not
+  require editing it, and a SECOND SOURCE if it would.** A test asserting a
+  widget is `"#7CFC7C"` is a second copy of the palette, so the guard's hex
+  rule covers `tests/` too, and a test compares against `C[...]`. The RGB
+  triples in `test_artemis_ppm_spike` and `test_artemis_panel_smoke` are
+  pixel DATA for Tk's decoder and the resampler. They must not follow the
+  palette, so the guard's triple rule stops at app code. Two guard choices
+  worth keeping: Tk itself decides what a colour NAME is (`winfo_rgb`), so
+  `pack(fill="x")` passes and `fg="white"` fails with no hand-kept list of
+  names; and a triple on the right of `in` is a set of alternatives
+  (`m in (3, 4, 5)`), never a colour. Every rule was confirmed to fail red
+  before it was trusted. *(2026-09-26.)*
+- **Selection and cursor colours are app-wide Tk defaults, not options on
+  each widget.** None of the 29 `tk.Entry`/`tk.Text` widgets set
+  `selectbackground`, so every selection drew in Windows' `SystemHighlight`
+  (`#0078D7`, measured). Nobody had written that colour anywhere, so the
+  palette guard could not see it. `theme._init_widget_defaults` puts
+  `select_bg`/`select_fg` and a `text1` cursor in Tk's option database.
+  Every widget that sets nothing gets the theme, including widgets not
+  written yet, and an explicit option still wins. Chosen over editing 29
+  constructors, which would fix 29 instances and leave the 30th blue. The
+  cost is that a panel no longer shows where its selection colour comes
+  from, hence the §7 line. Two Tk facts, measured by reading screen pixels
+  back. A Text draws its selection as the `sel` tag, and Tk creates that tag
+  first, so every tag a panel adds outranks it: selected text in Home's chat
+  kept its tag colour, and a `text3` span would have vanished into a green
+  band of almost the same value. A class-level `<<Selection>>` binding
+  re-raises `sel`. Separately, `inactiveselectbackground` defaults to `''`,
+  so a Text's selection disappeared when focus left; it now matches the
+  focused one. The colours are the hovered-menu pair (`border`/`text1`),
+  declared identity in `_SAME_AS`. Inverse video made every selection the
+  brightest block on screen, and the badge pair was 1.2:1 against the field,
+  too faint to see what was selected. *(2026-09-27.)*

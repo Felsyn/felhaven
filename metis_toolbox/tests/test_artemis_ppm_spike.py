@@ -59,8 +59,12 @@ class TestPpmSpike(unittest.TestCase):
         cls.root.destroy()
 
     def test_raw_p6_roundtrip(self):
-        # Four distinct spec-palette-ish pixels so a channel swap or stride
-        # bug shows up as a wrong sample, not a coincidental pass.
+        # Four distinct pixels so a channel swap or stride bug shows up as a
+        # wrong sample, not a coincidental pass. They are DATA for Tk's
+        # decoder, not the app's colours: they happen to be the 2026-08-09
+        # map palette, and must NOT follow it if the palette is retuned
+        # (CONVENTIONS §12, 2026-09-26 — a test literal is evidence when a
+        # palette change would not require editing it).
         pixels = [(11, 46, 24), (26, 92, 49), (44, 138, 74), (224, 169, 74)]
         photo = tk.PhotoImage(data=_ppm(2, 2, pixels))
         self.assertEqual((photo.width(), photo.height()), (2, 2))

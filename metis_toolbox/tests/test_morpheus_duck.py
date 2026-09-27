@@ -39,18 +39,25 @@ class _DuckCase(unittest.TestCase):
     def setUp(self):
         self._saved = (morpheus._proc, morpheus._ducked, morpheus._pending_load,
                        morpheus._load_error, morpheus._last_url,
-                       morpheus._user_volume)
+                       morpheus._user_volume, morpheus._fade,
+                       morpheus._fade_gain, morpheus._volume_written)
         morpheus._proc = _LiveProc()
         morpheus._ducked = False
         morpheus._pending_load = None
         morpheus._load_error = None
         morpheus._last_url = None
         morpheus._user_volume = morpheus._FULL_VOLUME
+        # The third factor in the volume model, reset for the same reason as the
+        # duck latch: a leaked gain would silently scale a later test's writes.
+        morpheus._fade = None
+        morpheus._fade_gain = 1.0
+        morpheus._volume_written = -1.0
 
     def tearDown(self):
         (morpheus._proc, morpheus._ducked, morpheus._pending_load,
          morpheus._load_error, morpheus._last_url,
-         morpheus._user_volume) = self._saved
+         morpheus._user_volume, morpheus._fade,
+         morpheus._fade_gain, morpheus._volume_written) = self._saved
 
     def _duck(self):
         """duck() with the pipe mocked. Returns (ipc_mock, get_props_mock).
@@ -297,6 +304,300 @@ class TestSetVolume(_DuckCase):
         props.assert_not_called()
 
 
+class _TaperCase(_DuckCase):
+    """The taper composes with the duck, which is why it is tested beside it
+    rather than in a file of its own: the two share one writer, and the bug
+    worth catching is one of them writing past the other."""
+
+    def setUp(self):
+        super().setUp()
+        self._clock = 1000.0
+        patcher = mock.patch("tools.morpheus.time.monotonic",
+                             side_effect=lambda: self._clock)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _tick(self, at=None):
+        """One tick_fade() at `at` seconds after the taper started."""
+        if at is not None:
+            self._clock = 1000.0 + at
+        with mock.patch("tools.morpheus._ipc") as ipc:
+            morpheus.tick_fade()
+        return ipc
+
+    def _levels(self, ipc):
+        return [call.args[0][2] for call in ipc.call_args_list]
+
+
+class TestTheTaperIsABoundedDip(_TaperCase):
+    """The floor is never 0 and the dip expires on its own — via the backstop,
+    _TAPER_HOLD_MAX, when nothing ever calls release_taper(). Everything safe
+    about this feature follows from those two facts: a mispredicted handover is
+    one dip-and-swell rather than a silence, nothing ever owes a restore, and
+    so there is no cancel_taper() anybody can forget to call.
+
+    These tests never call release_taper(), on purpose — they pin the BACKSTOP,
+    which is what a load that never confirms falls back on. The early-release
+    path is TestReleaseTaperEndsTheHoldEarly, below."""
+
+    def test_it_returns_to_FULL_and_clears_itself(self):
+        morpheus.taper()
+        ipc = self._tick(morpheus._TAPER_DOWN + morpheus._TAPER_HOLD_MAX
+                         + morpheus._TAPER_UP + 0.1)
+        self.assertIsNone(morpheus._fade)
+        self.assertEqual(morpheus._fade_gain, 1.0)
+        self.assertEqual(self._levels(ipc)[-1], morpheus._user_volume)
+
+    def test_a_SKIPPED_tick_still_ends_at_full(self):
+        """Edge-derived, not accumulated: the gain is recomputed from one
+        monotonic stamp every tick, so a chain that stalls simply makes the ramp
+        coarser. A step counter would end up short."""
+        morpheus.taper()
+        self._tick(0.0)
+        ipc = self._tick(morpheus._TAPER_DOWN + morpheus._TAPER_HOLD_MAX
+                         + morpheus._TAPER_UP + 5.0)   # the chain stalled hard
+        self.assertEqual(self._levels(ipc)[-1], morpheus._user_volume)
+        self.assertIsNone(morpheus._fade)
+
+    def test_the_gain_NEVER_reaches_silence(self):
+        """A floor of 0 would turn a mispredicted handover into a silence, and
+        would make is_audible()'s `_user_volume > 0` a lie.
+
+        Asserted against an ABSOLUTE threshold, not against _TAPER_FLOOR. The
+        obvious version — assertGreaterEqual(gain, _TAPER_FLOOR) — is vacuous
+        the moment somebody sets that constant to 0, which is precisely the
+        change it is supposed to catch. Verified by making that mutation: the
+        self-referential form stayed green.
+        """
+        self.assertGreater(morpheus._TAPER_FLOOR, 0.0,
+                           "the dip must never reach silence")
+        morpheus.taper()
+        span = (morpheus._TAPER_DOWN + morpheus._TAPER_HOLD_MAX
+                + morpheus._TAPER_UP)
+        for step in range(0, int(span * 10) + 1):
+            with self.subTest(at=step / 10):
+                gain = morpheus._gain_at(morpheus._fade, 1000.0 + step / 10)
+                self.assertGreaterEqual(gain, 0.05)
+
+    def test_it_actually_dips(self):
+        morpheus.taper()
+        ipc = self._tick(morpheus._TAPER_DOWN + 0.5)     # into the hold
+        self.assertAlmostEqual(self._levels(ipc)[-1],
+                               morpheus._user_volume * morpheus._TAPER_FLOOR,
+                               places=4)
+
+    def test_a_second_taper_does_not_extend_the_hold(self):
+        """A trigger that keeps firing — a snapshot that keeps saying "nearly
+        over" — must not hold the music down for ever."""
+        morpheus.taper()
+        first = morpheus._fade
+        self._clock += 1.0
+        morpheus.taper()
+        self.assertIs(morpheus._fade, first)
+
+
+class TestReleaseTaperEndsTheHoldEarly(_TaperCase):
+    """release_taper() is the REAL release since 2026-09-19; taper()'s own
+    _TAPER_HOLD_MAX is only the backstop for a load that never confirms. Awen
+    calls this the instant anything becomes audible — see awen._note_playing.
+    """
+
+    def test_release_pulls_the_up_ramp_forward(self):
+        """Released 1s into the hold, the ramp must be BACK UP well before
+        _TAPER_HOLD_MAX would have ended it on its own — that gap is the whole
+        point of having a release at all."""
+        morpheus.taper()
+        self._tick(morpheus._TAPER_DOWN + 1.0)          # settle into the hold
+        morpheus.release_taper()
+        # Long before the backstop would fire, comfortably after a release-
+        # driven ramp would have finished.
+        ipc = self._tick(morpheus._TAPER_DOWN + 1.0 + morpheus._TAPER_UP + 0.1)
+        self.assertEqual(self._levels(ipc)[-1], morpheus._user_volume)
+        self.assertIsNone(morpheus._fade)
+
+    def test_the_up_ramp_after_release_still_takes_TAPER_UP_seconds(self):
+        """Not instant, and not the backstop's schedule either — release just
+        moves WHEN the up-ramp starts; its own length is untouched."""
+        morpheus.taper()
+        self._tick(morpheus._TAPER_DOWN + 1.0)
+        morpheus.release_taper()
+        midway = self._tick(morpheus._TAPER_DOWN + 1.0
+                            + morpheus._TAPER_UP / 2)
+        level = self._levels(midway)[-1]
+        floor = morpheus._user_volume * morpheus._TAPER_FLOOR
+        self.assertGreater(level, floor)
+        self.assertLess(level, morpheus._user_volume)
+
+    def test_release_does_not_jump_the_gain_at_the_moment_it_fires(self):
+        """Continuity: release must land exactly where the hold already was —
+        the floor — and rise from there, never above or below it."""
+        morpheus.taper()
+        self._tick(morpheus._TAPER_DOWN + 1.0)
+        morpheus.release_taper()
+        gain = morpheus._gain_at(morpheus._fade, 1000.0 + morpheus._TAPER_DOWN
+                                 + 1.0)
+        self.assertAlmostEqual(gain, morpheus._TAPER_FLOOR, places=6)
+
+    def test_release_with_no_taper_running_is_a_quiet_noop(self):
+        morpheus.release_taper()
+        self.assertIsNone(morpheus._fade)
+
+    def test_release_after_the_backstop_already_fired_is_a_noop(self):
+        """Late is safe: nothing left to pull forward once the backstop has
+        already released it."""
+        morpheus.taper()
+        self._tick(morpheus._TAPER_DOWN + morpheus._TAPER_HOLD_MAX
+                  + morpheus._TAPER_UP + 0.1)
+        self.assertIsNone(morpheus._fade)
+        morpheus.release_taper()
+        self.assertIsNone(morpheus._fade)
+
+    def test_a_second_release_changes_nothing(self):
+        morpheus.taper()
+        self._tick(morpheus._TAPER_DOWN + 1.0)
+        morpheus.release_taper()
+        first = morpheus._fade
+        morpheus.release_taper()
+        self.assertEqual(morpheus._fade, first)
+
+    def test_release_mid_down_ramp_lets_the_fall_finish_before_rising(self):
+        """A release before the floor is even reached must not reverse
+        direction mid-fall: the down-ramp still owns the gain until it
+        completes, and only then does the (now immediate) up-ramp begin."""
+        morpheus.taper()
+        self._tick(morpheus._TAPER_DOWN / 2)            # still descending
+        morpheus.release_taper()
+        at_the_floor = morpheus._gain_at(
+            morpheus._fade, 1000.0 + morpheus._TAPER_DOWN)
+        self.assertAlmostEqual(at_the_floor, morpheus._TAPER_FLOOR, places=6)
+        rising = morpheus._gain_at(
+            morpheus._fade, 1000.0 + morpheus._TAPER_DOWN + morpheus._TAPER_UP / 2)
+        self.assertGreater(rising, morpheus._TAPER_FLOOR)
+        self.assertLess(rising, 1.0)
+
+    def test_a_released_taper_still_never_reaches_silence(self):
+        """The floor invariant does not depend on which path ended the hold."""
+        self.assertGreater(morpheus._TAPER_FLOOR, 0.0,
+                           "the dip must never reach silence")
+        morpheus.taper()
+        self._tick(morpheus._TAPER_DOWN + 1.0)
+        morpheus.release_taper()
+        span = morpheus._TAPER_DOWN + 1.0 + morpheus._TAPER_UP
+        for step in range(0, int(span * 10) + 1):
+            with self.subTest(at=step / 10):
+                gain = morpheus._gain_at(morpheus._fade, 1000.0 + step / 10)
+                self.assertGreaterEqual(gain, 0.05)
+
+
+class TestTheTaperAndTheDuckShareOneWriter(_TaperCase):
+    """§12: `_user_volume` is authoritative because nothing else can move mpv's
+    volume, and "what breaks it is a SECOND writer appearing anywhere". The
+    taper is not one — it moves a factor and calls the same writer."""
+
+    def test_unduck_mid_taper_does_NOT_jump_to_full(self):
+        """THE tripwire. unduck() used to write _user_volume flat; mid-dip that
+        slams the music to full straight over a fade that is still running."""
+        morpheus._fade_gain = 0.3
+        morpheus._ducked = True
+        ipc = self._unduck()
+        ipc.assert_called_once_with(
+            ["set_property", "volume", morpheus._user_volume * 0.3])
+
+    def test_duck_mid_taper_multiplies_rather_than_replaces(self):
+        morpheus._fade_gain = 0.5
+        ipc, _ = self._duck()
+        ipc.assert_called_once_with(
+            ["set_property", "volume",
+             morpheus._user_volume * morpheus._DUCK_RATIO * 0.5])
+
+    def test_set_volume_mid_taper_is_scaled_not_slammed(self):
+        morpheus._fade_gain = 0.5
+        with mock.patch("tools.morpheus._ipc") as ipc:
+            morpheus.set_volume(80.0)
+        ipc.assert_called_once_with(["set_property", "volume", 40.0])
+
+    def test_status_still_reports_the_USERS_level_not_the_dipped_one(self):
+        """control_music(action="volume") does arithmetic on this. A model
+        reading 15 mid-dip would do the wrong sum."""
+        morpheus._fade_gain = morpheus._TAPER_FLOOR
+        morpheus._user_volume = 80.0
+        with mock.patch("tools.morpheus._get_props",
+                        return_value={"media-title": "x", "pause": False,
+                                      "time-pos": 1.0, "duration": 200.0,
+                                      "playlist-pos": 0, "playlist-count": 1,
+                                      "idle-active": False,
+                                      "path": "https://youtu.be/abc"}):
+            self.assertEqual(morpheus.status()["volume"], 80.0)
+
+
+class TestTheTaperIsFreeWhenIdle(_TaperCase):
+    """It rides HomePanel's 60 ms chain at 16 Hz. Anything that reaches the pipe
+    unconditionally would be a constant drip of named-pipe opens for nothing."""
+
+    def test_no_taper_means_no_pipe_traffic(self):
+        ipc = self._tick()
+        ipc.assert_not_called()
+
+    def test_the_HOLD_costs_no_writes(self):
+        """The step quantiser: a held gain, however long the backstop runs, is
+        one write, not a hundred. Not released here on purpose — this is the
+        backstop's own hold, which is the one that can run long."""
+        morpheus.taper()
+        self._tick(morpheus._TAPER_DOWN + 0.1)
+        writes = 0
+        at = morpheus._TAPER_DOWN + 0.2
+        while at < morpheus._TAPER_DOWN + morpheus._TAPER_HOLD_MAX:
+            writes += len(self._levels(self._tick(at)))
+            at += 0.06
+        self.assertEqual(writes, 0)
+
+    def test_a_whole_dip_costs_a_BOUNDED_number_of_writes(self):
+        """MEASURED 2026-09-18 against a live mpv on the main thread:
+        _apply_volume() is 0.10 ms at the median and 50.7 ms at p95 — the named
+        pipe stalls occasionally, and this chain is the Tk main thread. At 60 ms
+        the two ramps cost 85 writes; the interval limiter brings that to 30.
+        The hold (backstop or released) itself never adds to that — the step
+        quantiser keeps a held gain at zero writes regardless of how long it
+        runs, which is the property test_the_HOLD_costs_no_writes pins.
+
+        The number is asserted as a CEILING rather than an equality, so tuning
+        the ramp lengths does not break it and quietly uncapping it does."""
+        morpheus.taper()
+        span = (morpheus._TAPER_DOWN + morpheus._TAPER_HOLD_MAX
+                + morpheus._TAPER_UP)
+        writes = 0
+        at = 0.0
+        while at < span + 0.5:
+            writes += len(self._levels(self._tick(at)))
+            at += 0.06                          # HomePanel's _POLL_MS
+        self.assertLessEqual(writes, 40)
+        self.assertGreater(writes, 10, "a ramp this coarse would be audible")
+
+    def test_a_dead_mpv_is_never_written_to(self):
+        morpheus._proc = None
+        morpheus.taper()
+        ipc = self._tick(0.5)
+        ipc.assert_not_called()
+
+
+class TestTheTaperDoesNotSurviveTheProcess(_TaperCase):
+    """A fresh mpv boots at 100 with no idea a taper was running."""
+
+    def test_shutdown_clears_it(self):
+        """Reset beside the duck latch and BEFORE the early return, so the
+        no-mpv path clears it too — a taper outliving the process it was dipping
+        would scale the next one's volume for no reason."""
+        morpheus.taper()
+        morpheus._fade_gain = 0.4
+        morpheus._volume_written = 40.0
+        morpheus._proc = None
+        with mock.patch("tools.morpheus._discard_mpv_log"):
+            morpheus.shutdown()
+        self.assertIsNone(morpheus._fade)
+        self.assertEqual(morpheus._fade_gain, 1.0)
+        self.assertEqual(morpheus._volume_written, -1.0)
+
+
 class TestRespawnReappliesTheVolume(unittest.TestCase):
     """A fresh mpv boots at 100, and play() recycles mpv when its log grows too
     big — so without this a respawn returns a user who chose 40 to full blast.
@@ -304,6 +605,12 @@ class TestRespawnReappliesTheVolume(unittest.TestCase):
     Note this patches _ipc EXPLICITLY. The sibling spawn tests patch
     `tools.morpheus.open` only, so a write added inside _ensure_mpv would land
     on that mock and pass silently rather than be asserted on.
+
+    Popen's double returns poll() -> None, i.e. a LIVE process. A bare
+    MagicMock's poll() returns another Mock, which every liveness check in this
+    module reads as "the process has exited". That went unnoticed while the
+    volume write here bypassed those checks; routing it through _apply_volume()
+    put it behind one, and the double had to start telling the truth.
     """
 
     def setUp(self):
@@ -317,7 +624,8 @@ class TestRespawnReappliesTheVolume(unittest.TestCase):
         with mock.patch("tools.morpheus.available",
                         return_value={"mpv": "mpv.exe", "ytdlp": "yt-dlp.exe"}), \
                 mock.patch("tools.morpheus.os.makedirs"), \
-                mock.patch("tools.morpheus.subprocess.Popen"), \
+                mock.patch("tools.morpheus.subprocess.Popen",
+                           return_value=mock.Mock(poll=lambda: None)), \
                 mock.patch("tools.morpheus.open", mock.mock_open(), create=True), \
                 mock.patch("tools.morpheus._ipc") as ipc:
             ok = morpheus._ensure_mpv()

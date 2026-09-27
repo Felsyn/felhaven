@@ -18,7 +18,8 @@ Design:      Framed at the neckline: face and neck only, nothing below. There
              widget, by design. The signal IS the face, so the states are told
              apart by amplitude, speed, jitter and spatial frequency alone.
 
-Colours:     theme.C only. Applied as chassis vs signal —
+Colours:     theme.C only (text1, amber, bg, and burnout for the hottest step
+             of each glow ramp). Applied as chassis vs signal —
                  chassis (rim, head contours, neck) is ALWAYS C["text1"]: it is
                      the physical form, and does not have moods
                  signal (face waveform, halo, throat cabling) carries the state
@@ -52,27 +53,20 @@ import math
 import random
 import tkinter as tk
 
-from theme import C
+from theme import C, rgb
 
 # --------------------------------------------------------------------------
-# palette — derived from theme.C, never hardcoded (§7)
+# palette — derived from theme.C, never hardcoded (§7). The ramps blend in
+# RGB, so every colour in this module enters through theme's rgb().
 # --------------------------------------------------------------------------
-
-
-def _rgb(hex_colour: str) -> "tuple[int, int, int]":
-    """'#7cfc7c' -> (124, 252, 124). The ramps blend in RGB, and theme.C is
-    the only place a hex value is allowed to live, so every colour in this
-    module enters through here."""
-    return (int(hex_colour[1:3], 16), int(hex_colour[3:5], 16),
-            int(hex_colour[5:7], 16))
-
 
 # The frame this widget is packed into. The fake-alpha ramps blend toward it,
 # so it MUST match its parent's background or the face sits in a visible box.
 BG = C["bg"]
 
-GREEN = _rgb(C["text1"])
-AMBER = _rgb(C["amber"])
+GREEN = rgb(C["text1"])
+AMBER = rgb(C["amber"])
+BURNOUT = rgb(C["burnout"])   # what the hottest step of every ramp reaches for
 
 RAMP_STEPS = 24
 
@@ -85,22 +79,23 @@ def _hex(c: "tuple[int, int, int]") -> str:
     return "#%02x%02x%02x" % c
 
 
-def _build_ramp(rgb, bg_hex=BG, steps=RAMP_STEPS):
+def _build_ramp(colour, bg_hex=BG, steps=RAMP_STEPS):
     """Fake alpha: blend from background up to the colour, then to a hot core.
 
     tkinter has no per-item transparency, so every 'glow' in here is really a
     colour blended toward the canvas background. Works because the background
     is a known flat colour.
     """
-    bg = tuple(int(bg_hex[i:i + 2], 16) for i in (1, 3, 5))
+    bg = rgb(bg_hex)
     ramp = []
     for i in range(steps):
         t = i / (steps - 1)
         if t <= 0.82:
-            ramp.append(_hex(_mix(bg, rgb, t / 0.82)))
+            ramp.append(_hex(_mix(bg, colour, t / 0.82)))
         else:
-            # top of the ramp burns out toward white, like an overdriven phosphor
-            ramp.append(_hex(_mix(rgb, (255, 255, 255), (t - 0.82) / 0.18 * 0.55)))
+            # top of the ramp burns out toward C["burnout"], like an
+            # overdriven phosphor
+            ramp.append(_hex(_mix(colour, BURNOUT, (t - 0.82) / 0.18 * 0.55)))
     return ramp
 
 

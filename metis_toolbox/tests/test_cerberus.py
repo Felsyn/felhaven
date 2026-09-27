@@ -18,6 +18,7 @@ import hashlib
 import importlib
 import json
 import os
+import subprocess
 import shutil
 import sys
 import tempfile
@@ -449,6 +450,95 @@ class TestSetPin(_Base):
         cerberus.set_pin("3690")
         leftovers = [f for f in os.listdir(self._dir) if f.endswith(".tmp")]
         self.assertEqual(leftovers, [])
+
+
+class TestTheShippedManifestMatchesConfigDir(unittest.TestCase):
+    """Hold the REAL Custody manifest to the REAL config/ directory.
+
+    Every other manifest test in this file writes its own synthetic manifest
+    into a temp dir (_Base.setUp redirects cerberus._MANIFEST_PATH), which is
+    right for testing the loader and wrong for testing the CONTENT. The result
+    was that nothing in the project ever read the shipped manifest, so it was
+    free to drift — and it did: config/euterpe_config.json shipped on
+    2026-09-16 and was not registered, the first miss after seven-for-seven.
+
+    This is the §10 lockstep case exactly: two live sources compared, never a
+    hardcoded count. It deliberately does NOT inherit _Base — it must see the
+    real file.
+
+    Asserted against GIT, not the filesystem (§10: "Ask what a fresh clone
+    has"). That matters in both directions here: config/ holds gitignored
+    personal files a fresh clone will not have, and it can hold local junk a
+    fresh clone will not have either.
+    """
+
+    _APP = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _git(self, *args):
+        return subprocess.run(["git", *args], cwd=self._APP,
+                              capture_output=True, text=True)
+
+    def _manifest(self):
+        path = os.path.join(self._APP, "config", "cerberus_manifest.json")
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def _listed(self):
+        return {e["file"] for e in self._manifest().get("entries", [])
+                if isinstance(e, dict) and e.get("file")}
+
+    def _tracked_configs(self):
+        out = self._git("ls-files", "config/")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return {os.path.basename(p) for p in out.stdout.split()
+                if p.endswith(".json")}
+
+    def test_config_dir_points_at_the_real_folder(self):
+        self.assertEqual(self._manifest().get("config_dir"), "config")
+
+    def test_every_tracked_config_is_in_custody(self):
+        """The forward direction, and the one that was broken. A shipped config
+        nobody registered is invisible behind the PIN — reachable only through
+        the Open Folder button, which is why it went unnoticed."""
+        missing = self._tracked_configs() - self._listed()
+        self.assertEqual(missing, set(),
+                         f"these shipped configs are not in Custody: "
+                         f"{sorted(missing)}")
+
+    def test_every_entry_names_a_file_git_tracks_or_ignores(self):
+        """The reverse direction, and it has to be phrased this way rather than
+        "every entry is tracked": morpheus_playlists.json and sphynx_data.json
+        are legitimately gitignored — config SHAPE with personal CONTENT (§4) —
+        and must stay listed. What this actually catches is a filename that is
+        neither, i.e. a typo, which today would render as "(missing)" in the
+        panel forever and fail no test."""
+        for fname in sorted(self._listed()):
+            with self.subTest(file=fname):
+                rel = f"config/{fname}"
+                tracked = self._git("ls-files", "--error-unmatch",
+                                    rel).returncode == 0
+                ignored = self._git("check-ignore", rel).returncode == 0
+                self.assertTrue(
+                    tracked or ignored,
+                    f"{rel} is neither tracked nor gitignored — most likely a "
+                    f"typo in the manifest, which the panel would show as "
+                    f"'(missing)' and no other test would catch")
+
+    def test_no_entry_is_listed_twice(self):
+        """manifest_configs() keys rows by filename, so a duplicate silently
+        collapses to the last one rather than erroring."""
+        files = [e.get("file") for e in self._manifest().get("entries", [])
+                 if isinstance(e, dict)]
+        self.assertEqual(len(files), len(set(files)),
+                         f"duplicate entries: {files}")
+
+    def test_every_entry_has_a_description(self):
+        """(no description) is the loader's fallback, not an acceptable ship
+        state — the description is the only thing telling an operator what they
+        are about to open."""
+        for entry in self._manifest().get("entries", []):
+            with self.subTest(file=entry.get("file")):
+                self.assertTrue((entry.get("desc") or "").strip())
 
 
 if __name__ == "__main__":

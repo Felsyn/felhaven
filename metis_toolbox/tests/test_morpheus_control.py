@@ -73,13 +73,22 @@ class _ControlCase(unittest.TestCase):
 
 class TestActionsIssueTheRightCommand(_ControlCase):
     def test_stop_next_previous_reach_mpv(self):
-        for action, expected in (("next", ["playlist-next", "weak"]),
+        for action, expected in (("next", ["playlist-next", "force"]),
                                  ("previous", ["playlist-prev", "weak"])):
             with self.subTest(action=action):
                 self.ipc.reset_mock()
                 with self._playing():
                     morpheus.control_music(action=action)
                 self.assertIn(expected, self._commands())
+
+    def test_next_never_falls_back_to_weak(self):
+        """The asymmetry is the whole fix — see TestSkipActuallySkips. Pinned
+        separately so a "tidy the two calls into one helper" refactor that
+        re-unifies them fails here and names why."""
+        self.ipc.reset_mock()
+        with self._playing():
+            morpheus.control_music(action="next")
+        self.assertNotIn(["playlist-next", "weak"], self._commands())
 
     def test_stop_checkpoints_before_stopping(self):
         # stop() bookmarks the position first, so resume survives a mid-session
@@ -293,6 +302,101 @@ class TestRegistration(unittest.TestCase):
                             action, **_ACTION_ARGS.get(action, {})))
             finally:
                 morpheus._last_url = saved
+
+
+class TestSkipActuallySkips(_ControlCase):
+    """`playlist-next weak` does NOTHING on the last playlist entry, and every
+    single track play_music loads is exactly that. So ⏭ and
+    control_music(action="next") were silent no-ops for every track this module
+    plays — and control_music returned the post-action status as though the skip
+    had happened, which put the lie into the model's context too.
+
+    Measured against mpv v0.41 (2026-09-16), one entry loaded:
+        playlist-next weak   -> time-pos kept advancing, 2.96 -> 4.46
+        playlist-next force  -> idle-active True, path None, playlist-count 1
+    That second shape is the one a natural end leaves, which is what lets a
+    caller treat a skip and an ended track as the same event.
+
+    They differ ONLY on the last entry, so walking a real playlist is unchanged.
+    """
+
+    def test_next_track_uses_force(self):
+        morpheus.next_track()
+        self.assertIn(["playlist-next", "force"], self._commands())
+
+    def test_next_track_never_uses_weak(self):
+        morpheus.next_track()
+        self.assertNotIn(["playlist-next", "weak"], self._commands())
+
+    def test_previous_deliberately_stays_weak(self):
+        """Not an oversight, and not a pair to "fix" into symmetry. Running
+        forward off the END of a playlist means "this track is over", which is a
+        real destination. Running back off the FRONT would mean ending playback,
+        which is not what ⏮ says it does."""
+        morpheus.prev_track()
+        self.assertIn(["playlist-prev", "weak"], self._commands())
+        self.assertNotIn(["playlist-prev", "force"], self._commands())
+
+
+class TestPlayFromStart(_ControlCase):
+    """play(from_start=True) opens a URL at 0 instead of wherever its
+    watch-later file left off.
+
+    Resume is right for the long lore videos this module plays and WRONG for a
+    caller picking songs unattended: a track skipped halfway and chosen again
+    later would start halfway. Measured 2026-09-16 — stopped at 3.97 s, a plain
+    replay reopened at 4.03 s, `start=0` reopened at 0.23 s.
+
+    It is a per-file option on one loadfile, so the watch-later mechanism itself
+    is untouched and every other caller keeps resuming — which is the property
+    these tests actually pin.
+    """
+
+    def setUp(self):
+        super().setUp()
+        mock.patch("tools.morpheus._ensure_mpv", return_value=True).start()
+        mock.patch("tools.morpheus._recycle_if_log_is_huge").start()
+        self._saved_pending = morpheus._pending_load
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        morpheus._pending_load = self._saved_pending
+
+    def _loadfile(self):
+        return next(c for c in self._commands() if c and c[0] == "loadfile")
+
+    def test_default_play_is_unchanged(self):
+        """The resume path every existing caller is on. If this drifts, long
+        narration videos silently stop picking up where they left off."""
+        morpheus.play("https://youtu.be/abc")
+        self.assertEqual(self._loadfile(), ["loadfile", "https://youtu.be/abc",
+                                            "replace"])
+
+    def test_from_start_passes_the_start_option(self):
+        morpheus.play("https://youtu.be/abc", from_start=True)
+        self.assertEqual(self._loadfile(),
+                         ["loadfile", "https://youtu.be/abc", "replace", -1,
+                          {"start": "0"}])
+
+    def test_from_start_is_keyword_only(self):
+        """Positional would read as the playlist flag at a glance, and mpv's
+        own loadfile signature puts a flag in exactly that slot."""
+        with self.assertRaises(TypeError):
+            morpheus.play("https://youtu.be/abc", True)   # type: ignore[misc]
+
+    def test_from_start_still_arms_load_tracking(self):
+        """A DJ pick that fails must be caught like any other (see "Load
+        failures") — the option must not route around the detector."""
+        morpheus._pending_load = None
+        morpheus.play("https://youtu.be/abc", from_start=True)
+        self.assertIsNotNone(morpheus._pending_load)
+
+    def test_from_start_still_checkpoints_the_outgoing_track(self):
+        morpheus.play("https://youtu.be/abc", from_start=True)
+        cmds = self._commands()
+        self.assertIn(["write-watch-later-config"], cmds)
+        self.assertLess(cmds.index(["write-watch-later-config"]),
+                        cmds.index(self._loadfile()))
 
 
 if __name__ == "__main__":

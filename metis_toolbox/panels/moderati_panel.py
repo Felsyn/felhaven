@@ -1,13 +1,14 @@
 """
-panels/moderati_panel.py — Moderati host (vitals, logs, network, secrets, settings, spirit)
-===========================================================================================
+panels/moderati_panel.py — Moderati host (vitals, logs, network, secrets, settings, spirit, map)
+=================================================================================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
 Job:         Host the Moderati tabs and switch between them. Build the tab bar;
              pack the active tab body; nothing else. No data, no update() — the
              polled tab bodies (Hephaestus/Aether, Emanon, Argus) keep their own
              update() and register with Kairos individually; the request-driven
-             ones (Cerberus, Settings, Machine Spirit) don't (see felhaven.py).
+             ones (Cerberus, Settings, Machine Spirit, Daedalus) don't (see
+             felhaven.py).
 
 Tabs:        HEPHAESTUS     — system vitals (CPU/RAM/DISK + Aether connectivity)
              EMANON         — rolling log watch
@@ -15,6 +16,10 @@ Tabs:        HEPHAESTUS     — system vitals (CPU/RAM/DISK + Aether connectivit
              CERBERUS       — secrets guardian (vault, config custody, access log)
              SETTINGS       — location / unit / clock (Themis)
              MACHINE SPIRIT — Pythia's editable system prompt
+             DAEDALUS       — Felhaven's map of itself: the import graph and
+                              each module's docstring (tools/daedalus.py).
+                              Accent C["gray"]: the one accent key no other
+                              tab uses whose colour differs from theirs.
 
 Why a host with no update(): Kairos maps worker-name -> [subscribers]; the polled
 tab bodies register under their existing worker names ("hephaestus", "aether",
@@ -35,6 +40,7 @@ from panels.argus_panel      import ArgusPanel
 from panels.cerberus_panel   import CerberusPanel
 from panels.themis_panel     import ThemisPanel
 from panels.machine_spirit_panel import MachineSpiritPanel
+from panels.daedalus_panel   import DaedalusPanel
 
 
 class ModeratiPanel(TabHost):
@@ -53,6 +59,7 @@ class ModeratiPanel(TabHost):
         self.cerberus   = CerberusPanel(self.body)
         self.themis     = ThemisPanel(self.body)
         self.machine_spirit = MachineSpiritPanel(self.body)
+        self.daedalus   = DaedalusPanel(self.body)
 
         # (key, label, body, accent) — each deity keeps the card color it had
         # as a standalone panel. TabHost builds the bar and activates the first.
@@ -63,4 +70,5 @@ class ModeratiPanel(TabHost):
             ("cerberus",       "CERBERUS",       self.cerberus,       C["purple"]),
             ("themis",         "SETTINGS",       self.themis,         C["amber"]),
             ("machine_spirit", "MACHINE SPIRIT", self.machine_spirit, C["green"]),
+            ("daedalus",       "DAEDALUS",       self.daedalus,       C["gray"]),
         ], default="hephaestus")

@@ -59,6 +59,11 @@ class Kairos:
         ("horai",         1, "tools.horai.fetch"),
         ("emanon",        2, "tools.emanon.fetch"),
         ("morpheus",      2, "tools.morpheus.fetch"),
+        # Not under tools/ — awen.py sits at the app root because it imports
+        # pythia, which imports tools/. The dotted path resolves the same way.
+        # Matches morpheus's cadence on purpose: it reads morpheus's CACHED
+        # snapshot, so polling faster would only re-read the same tick twice.
+        ("awen",          2, "awen.fetch"),
         ("orpheus",       2, "tools.orpheus.fetch"),
         ("hypatia",      60, "tools.hypatia.fetch"),
         ("artemis",     600, "tools.artemis.fetch"),

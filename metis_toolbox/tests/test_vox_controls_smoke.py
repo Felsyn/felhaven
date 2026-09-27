@@ -1,7 +1,8 @@
 """
 test_vox_controls_smoke.py — headless Tk smoke test for the Vox control row.
 
-Replaces test_narrator_panel_smoke.py: the speaker lamp became three words, so
+Replaces test_narrator_panel_smoke.py: the speaker lamp became three words (four
+since Auto-DJ joined them on 2026-09-16), so
 the assertions moved from canvas item types to label colours, but the property
 being pinned is the same one — the row reads Calliope's real auto-speak flag and
 never a cached copy of it.
@@ -22,11 +23,13 @@ that is exactly the kind of local exception that rots when nothing holds it.
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import tkinter as tk
 
+import awen
 import calliope
 import theme
 from panels.vox_controls import VoxControls, VoxToggle
@@ -58,32 +61,113 @@ class _VoxCase(unittest.TestCase):
 
     def setUp(self):
         calliope.set_auto_speak(False)
+        self._saved_dj = awen._enabled
+        awen._enabled = False
         self.ended = []
         self.reset = []
+        self.notices = []
 
     def tearDown(self):
         calliope.set_auto_speak(False)
+        # Awen's flag is a module global and this row is its only UI mutator, so
+        # a leaked True would leave a later file's tests with a live Auto-DJ.
+        awen._enabled = self._saved_dj
 
     def _row(self) -> VoxControls:
         row = VoxControls(self.root,
                           on_end=lambda: self.ended.append(1),
-                          on_reset=lambda: self.reset.append(1))
+                          on_reset=lambda: self.reset.append(1),
+                          on_notice=self.notices.append)
         self.root.update_idletasks()
         return row
 
 
 class TestTheRowIsWords(_VoxCase):
 
-    def test_the_three_controls_are_labelled_in_words(self):
+    def test_the_four_controls_are_labelled_in_words(self):
         row = self._row()
         self.assertEqual(row._response._label.cget("text"), "Vox Response")
         self.assertEqual(row._end._label.cget("text"), "Vox End")
+        self.assertEqual(row._dj._label.cget("text"), "Auto-DJ")
         self.assertEqual(row._reset._label.cget("text"), "Reset Session")
+
+    def test_auto_dj_sits_directly_above_reset_session(self):
+        """Where it was asked for, and it is not arbitrary: it belongs with the
+        other two STATE controls rather than beside the momentary one.
+
+        Reads PACK order, not winfo_children(). An unpacked widget is still a
+        child, so the first version of this passed with the toggle built and
+        invisible — found by a red-check that stayed green."""
+        row = self._row()
+        inner = row.winfo_children()[0]
+        order = [w._label.cget("text") for w in inner.pack_slaves()]
+        self.assertEqual(order, ["Vox Response", "Vox End", "Auto-DJ",
+                                 "Reset Session"])
+
+    def test_every_control_is_actually_packed(self):
+        row = self._row()
+        inner = row.winfo_children()[0]
+        for control in (row._response, row._end, row._dj, row._reset):
+            with self.subTest(label=control._label.cget("text")):
+                self.assertIn(control, inner.pack_slaves())
 
     def test_every_control_is_dim_at_rest(self):
         row = self._row()
-        for control in (row._response, row._end, row._reset):
+        for control in (row._response, row._end, row._dj, row._reset):
             self.assertEqual(control._label.cget("fg"), theme.C["text3"])
+
+
+class TestAutoDj(_VoxCase):
+    """The fourth control. Same discipline as Vox Response — read awen's real
+    flag, never a cached copy — with one extra reason: Auto-DJ can turn ITSELF
+    off (its breaker gives up after three turns that played nothing), so a
+    cached lamp would sit amber over a job that had already stopped."""
+
+    def test_starts_dim_when_auto_dj_is_off(self):
+        self.assertEqual(self._row()._dj._label.cget("fg"), theme.C["text3"])
+
+    def test_starts_lit_when_auto_dj_is_already_on(self):
+        awen._enabled = True
+        self.assertEqual(self._row()._dj._label.cget("fg"), theme.C["amber"])
+
+    def test_clicking_flips_awens_real_flag(self):
+        row = self._row()
+        row._toggle_dj()
+        self.assertTrue(awen.enabled())
+        row._toggle_dj()
+        self.assertFalse(awen.enabled())
+
+    def test_refresh_reads_the_real_flag_not_a_cached_copy(self):
+        """The breaker path: nobody clicked, and the lamp still has to follow."""
+        awen._enabled = True
+        row = self._row()
+        self.assertEqual(row._dj._label.cget("fg"), theme.C["amber"])
+        awen._enabled = False                  # as the breaker would
+        row.refresh()
+        self.assertEqual(row._dj._label.cget("fg"), theme.C["text3"])
+
+    def test_a_notice_is_handed_up_rather_than_spoken(self):
+        """Switching on with an empty ledger answers with a line. This row owns
+        styling and nothing else, so it must pass that up, not say it."""
+        row = self._row()
+        with mock.patch("awen.toggle", return_value="say this"):
+            row._toggle_dj()
+        self.assertEqual(self.notices, ["say this"])
+
+    def test_no_notice_means_nothing_is_handed_up(self):
+        row = self._row()
+        with mock.patch("awen.toggle", return_value=None):
+            row._toggle_dj()
+        self.assertEqual(self.notices, [])
+
+    def test_the_lamp_follows_a_toggle_that_refused_to_arm(self):
+        """set_enabled() can return a line AND still leave the flag on, so the
+        lamp is painted from the flag that comes back, not from the click."""
+        row = self._row()
+        with mock.patch("awen.toggle", side_effect=lambda: (
+                setattr(awen, "_enabled", True), "no history")[1]):
+            row._toggle_dj()
+        self.assertEqual(row._dj._label.cget("fg"), theme.C["amber"])
 
 
 class TestVoxResponse(_VoxCase):

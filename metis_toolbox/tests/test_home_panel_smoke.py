@@ -29,6 +29,8 @@ import harmonia
 import theme
 from panels import home_panel
 from panels.home_panel import HomePanel
+from panels.queue_panel import QueueBox
+import awen
 from tools import ammit, morpheus
 
 # HomePanel now builds an AmmitBadge (panels/horai_panel.py) at construction,
@@ -265,6 +267,265 @@ class TestHomePanelSmoke(unittest.TestCase):
 # ─────────────────────────────────────────────────────────────────────────────
 #  Stop / Refresh — dedicated edge-case coverage
 # ─────────────────────────────────────────────────────────────────────────────
+
+class TestTheDjRider(unittest.TestCase):
+    """Auto-DJ's line reaching the transcript and the speakers.
+
+    A DEDICATED rider, not a branch in HomePanel.update(): that method is
+    already registered under Kairos's "horai" worker for the Ammit badge, and
+    Kairos hands update() the data and never the worker name. Sniffing the
+    payload's shape instead would silently depend on horai never growing a key
+    of the same name.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tk.Tk()
+        cls.root.withdraw()
+        theme._init_fonts(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+
+    def setUp(self):
+        self._saved_speak = calliope.auto_speak_enabled()
+        calliope.set_auto_speak(False)
+        self.addCleanup(calliope.set_auto_speak, self._saved_speak)
+        self.spoken = []
+        self.stopped = []
+        for target, sink in (("panels.home_panel.calliope.speak", self.spoken),
+                             ("panels.home_panel.calliope.stop", self.stopped)):
+            patcher = mock.patch(target, side_effect=lambda *a, **k: None)
+            started = patcher.start()
+            self.addCleanup(patcher.stop)
+            started.side_effect = lambda *a, s=sink: s.append(a[0] if a else None)
+        mock.patch("panels.home_panel.calliope.end_turn").start()
+        self.addCleanup(mock.patch.stopall)
+
+    def _panel(self) -> HomePanel:
+        panel = HomePanel(self.root)
+        self.root.update_idletasks()
+        self.addCleanup(panel.destroy)
+        return panel
+
+    def _text(self, panel) -> str:
+        return panel._log.get("1.0", "end")
+
+    def test_a_payload_prints_on_its_own_dj_line(self):
+        panel = self._panel()
+        panel.dj_rider.update({"say": "Here's Dreams by Fleetwood Mac.",
+                               "kind": "intro", "enabled": True})
+        self.root.update_idletasks()
+        self.assertIn("dj › Here's Dreams by Fleetwood Mac.",
+                      self._text(panel))
+
+    def test_it_is_spoken(self):
+        panel = self._panel()
+        panel.dj_rider.update({"say": "Now playing something.", "enabled": True})
+        self.assertEqual(self.spoken, ["Now playing something."])
+
+    def test_it_is_spoken_even_with_vox_response_OFF(self):
+        """The AmmitAlarm precedent: that flag is about narrating ANSWERS, and a
+        radio host that silently played songs would not be a radio host."""
+        calliope.set_auto_speak(False)
+        panel = self._panel()
+        panel.dj_rider.update({"say": "A song.", "enabled": True})
+        self.assertEqual(self.spoken, ["A song."])
+
+    def test_it_does_NOT_barge_in(self):
+        """AmmitAlarm calls calliope.stop() before speaking, which is right for
+        a timer going off and wrong for a song introduction — Awen already
+        waited for quiet, so cutting anything off would undo that."""
+        panel = self._panel()
+        panel.dj_rider.update({"say": "A song.", "enabled": True})
+        self.assertEqual(self.stopped, [])
+
+    def test_a_payload_with_nothing_to_say_prints_nothing(self):
+        panel = self._panel()
+        before = self._text(panel)
+        panel.dj_rider.update({"enabled": False})
+        self.assertEqual(self._text(panel), before)
+        self.assertEqual(self.spoken, [])
+
+    def test_None_from_kairos_is_survived(self):
+        """Every update() must handle None (§6) — it is Kairos's failure signal."""
+        panel = self._panel()
+        panel.dj_rider.update(None)
+        panel.dj_rider.update("not a dict")
+        self.assertEqual(self.spoken, [])
+
+    def test_a_dj_line_never_enters_the_chat_history(self):
+        """gemma4:e2b imitates its own transcript, and that window is three
+        turns — a few songs of patter would evict the real conversation AND
+        teach chat Pythia to talk like a radio host."""
+        panel = self._panel()
+        for i in range(5):
+            panel.dj_rider.update({"say": f"Song {i}.", "enabled": True})
+        self.assertEqual(panel._history, [])
+
+    def test_reset_session_leaves_auto_dj_alone(self):
+        """Reset Session clears the chat. The ledger and the flag are not the
+        chat, and a no-repeat list that can be wiped mid-session is not a
+        no-repeat list."""
+        panel = self._panel()
+        saved = awen._enabled
+        try:
+            awen._enabled = True
+            panel._on_refresh()
+            self.root.update_idletasks()
+            self.assertTrue(awen.enabled())
+        finally:
+            awen._enabled = saved
+
+    def test_reset_session_still_clears_a_dj_line_from_the_transcript(self):
+        """It is on screen, so it goes with the screen — that much IS the chat."""
+        panel = self._panel()
+        panel.dj_rider.update({"say": "A song.", "enabled": True})
+        panel._on_refresh()
+        self.root.update_idletasks()
+        self.assertNotIn("dj ›", self._text(panel))
+
+    def test_the_drain_chain_re_reads_the_auto_dj_lamp(self):
+        """Auto-DJ can turn ITSELF off — the breaker gives up after three turns
+        that played nothing — so the lamp has to follow with nobody clicking.
+        _tick_face pushes it on the existing 60 ms chain; a lamp left amber over
+        a job that has stopped is a lie the operator would act on."""
+        panel = self._panel()
+        saved = awen._enabled
+        try:
+            awen._enabled = True
+            panel._tick_face()
+            self.root.update_idletasks()
+            self.assertEqual(panel._hestia._vox._dj._label.cget("fg"),
+                             theme.C["amber"])
+            awen._enabled = False              # as the breaker would
+            panel._tick_face()
+            self.root.update_idletasks()
+            self.assertEqual(panel._hestia._vox._dj._label.cget("fg"),
+                             theme.C["text3"])
+        finally:
+            awen._enabled = saved
+
+    def test_the_toggle_notice_reaches_the_transcript(self):
+        """VoxControls hands its line up rather than speaking it; this is where
+        it lands."""
+        panel = self._panel()
+        panel.dj_says("Play me something first so I know the vibe.")
+        self.root.update_idletasks()
+        self.assertIn("dj › Play me something first", self._text(panel))
+
+
+class TestTheStatusLineHasThreeClaimants(unittest.TestCase):
+    """One label, three things that want it, in strict priority.
+
+    Auto-DJ joined it because a DJ turn is a silent gap — 4.2s typically, 17.1s
+    at worst — during which the song has stopped and the screen used to say
+    nothing at all. The risk of adding a third writer is that it steps on the
+    chat's own message, so the precedence is asserted rather than assumed.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tk.Tk()
+        cls.root.withdraw()
+        theme._init_fonts(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+
+    def setUp(self):
+        self._saved = (awen._enabled, awen._want_pick, awen._picking)
+        awen._enabled = awen._want_pick = awen._picking = False
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        awen._enabled, awen._want_pick, awen._picking = self._saved
+
+    def _panel(self) -> HomePanel:
+        panel = HomePanel(self.root)
+        self.root.update_idletasks()
+        self.addCleanup(panel.destroy)
+        return panel
+
+    def _label(self, panel) -> str:
+        return panel._status.cget("text")
+
+    def test_blank_when_nothing_is_happening(self):
+        panel = self._panel()
+        panel._tick_status()
+        self.assertEqual(self._label(panel), "")
+
+    def test_auto_dj_reaches_the_status_line(self):
+        panel = self._panel()
+        awen._picking = True
+        panel._tick_status()
+        self.root.update_idletasks()
+        self.assertIn("choosing", self._label(panel))
+
+    def test_it_clears_again_when_the_turn_ends(self):
+        panel = self._panel()
+        awen._picking = True
+        panel._tick_status()
+        awen._picking = False
+        panel._tick_status()
+        self.assertEqual(self._label(panel), "")
+
+    def test_a_question_in_flight_OUTRANKS_auto_dj(self):
+        """Matthew asked; Matthew's turn wins the label. Auto-DJ picking behind
+        a chat answer must not overwrite 'consulting the oracle…'."""
+        panel = self._panel()
+        panel._status.config(text="consulting the oracle…")
+
+        class _Alive:
+            def is_alive(self):
+                return True
+
+        panel._thread = _Alive()
+        awen._picking = True
+        panel._tick_status()
+        self.assertEqual(self._label(panel), "consulting the oracle…")
+
+    def test_the_startup_warm_outranks_auto_dj(self):
+        panel = self._panel()
+        awen._picking = True
+        with mock.patch("panels.home_panel.pythia.is_warming",
+                        return_value=True):
+            panel._tick_status()
+        self.assertIn("waking", self._label(panel))
+
+    def test_the_warm_still_works_on_its_own(self):
+        """The behaviour _tick_warmup used to own, unchanged by the rename."""
+        panel = self._panel()
+        with mock.patch("panels.home_panel.pythia.is_warming",
+                        return_value=True):
+            panel._tick_status()
+        self.assertIn("waking", self._label(panel))
+        with mock.patch("panels.home_panel.pythia.is_warming",
+                        return_value=False):
+            panel._tick_status()
+        self.assertEqual(self._label(panel), "")
+
+    def test_it_writes_only_on_a_transition(self):
+        """At 16 Hz an unconditional repaint would fight whatever else last set
+        the label. Asserted by setting the widget behind its back and checking
+        an unchanged state does not restore it."""
+        panel = self._panel()
+        awen._picking = True
+        panel._tick_status()
+        panel._status.config(text="something else")
+        panel._tick_status()                       # same state — must not write
+        self.assertEqual(self._label(panel), "something else")
+
+    def test_the_drain_chain_drives_it(self):
+        """It has to ride the existing 60 ms poll, not a timer of its own (§6)."""
+        panel = self._panel()
+        awen._picking = True
+        panel._poll()
+        self.root.update_idletasks()
+        self.assertIn("choosing", self._label(panel))
+
 
 class TestTheChatBarCannotBeSqueezedOut(unittest.TestCase):
     """Nothing above the entry may out-request the entry itself.
@@ -655,6 +916,25 @@ class TestHomePanelPollSurvives(unittest.TestCase):
     def test_a_failing_tick_yield_still_rearms(self):
         self._rearms_despite("panels.home_panel.harmonia.tick_yield")
 
+    def test_a_failing_queue_tick_still_rearms(self):
+        """The queue window is the newest passenger on this chain, and the
+        chain feeds Calliope. A box that threw would stop narration mid-answer,
+        freeze the transcript, and do it invisibly under pythonw.exe."""
+        self._rearms_despite("panels.home_panel.awen.queue_revision")
+
+    def test_a_failing_tick_fade_still_rearms(self):
+        self._rearms_despite("panels.home_panel.morpheus.tick_fade")
+
+    def test_the_poll_drives_the_TAPER(self):
+        """The second passenger on this chain. Morpheus is forbidden a timer of
+        its own (CONVENTIONS 6), and Kairos at 2 s cannot ramp anything, so
+        without this line a taper arms and then never advances — the music dips
+        to the floor and stays there for the rest of the song."""
+        panel = HomePanel(self.root)
+        with mock.patch("panels.home_panel.morpheus.tick_fade") as fade:
+            panel._poll()
+        fade.assert_called_once()
+
     def test_a_failing_warmup_tick_still_rearms(self):
         self._rearms_despite("panels.home_panel.pythia.is_warming")
 
@@ -749,6 +1029,270 @@ class TestHomePanelManualSpeak(unittest.TestCase):
         self.assertTrue(play.call_args_list, "narration never reached Harmonia")
         self.assertLess(elapsed, calliope._PREBUFFER_TIMEOUT,
                         "the speak button stalled on the prebuffer gate")
+
+
+class TestTheAutoDjQueueBox(unittest.TestCase):
+    """The queue decided what played for hours and nothing could see it: no UI
+    read it, the status line said nothing about it, and every line it wrote was
+    DEBUG while logging runs at INFO.
+
+    The label is now also a CONTROL, which is the part with teeth — four other
+    sites write that same label, and a hand cursor left behind by one of them
+    promises a click nothing handles.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tk.Tk()
+        cls.root.withdraw()
+        theme._init_fonts(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+
+    def setUp(self):
+        self._saved = (awen._enabled, awen._want_pick, awen._picking,
+                       list(awen._queue), awen._queue_revision)
+        awen._enabled = True
+        awen._want_pick = False
+        awen._picking = False
+        awen._queue = []
+        awen._queue_revision = 0
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        (awen._enabled, awen._want_pick, awen._picking,
+         awen._queue, awen._queue_revision) = self._saved
+
+    def _bank(self, title="Newcomer - Fresh Track"):
+        awen._queue.append({"id": len(awen._queue) + 1, "key": title.casefold(),
+                            "title": title, "channel": "", "duration": 240,
+                            "url": "https://youtu.be/aaaaaaaaaaa",
+                            "artist": "", "track": "", "intro": "x"})
+        awen._queue_revision += 1
+
+    def _panel(self):
+        panel = HomePanel(self.root)
+        self.addCleanup(panel.destroy)
+        return panel
+
+    # ── the label as a control ──────────────────────────────────────────────
+    def test_the_count_reaches_the_label_and_carries_a_hand(self):
+        self._bank()
+        panel = self._panel()
+        panel._tick_status()
+        self.assertEqual(panel._status.cget("text"), "Auto-DJ: 1 queued")
+        self.assertEqual(str(panel._status.cget("cursor")), "hand2")
+
+    def test_a_SILENCE_line_takes_the_hand_cursor_BACK(self):
+        """The bug this guards: _tick_status returns early while a request is
+        in flight, so a hand left over from the queue survives the whole
+        answer. Four sites write this label and only one is ever clickable."""
+        self._bank()
+        panel = self._panel()
+        panel._tick_status()
+        self.assertEqual(str(panel._status.cget("cursor")), "hand2")
+        panel._set_status("consulting the oracle…")
+        self.assertEqual(str(panel._status.cget("cursor")), "")
+        self.assertFalse(panel._status_clickable)
+
+    def test_only_the_QUEUE_state_is_clickable(self):
+        """Driven through _tick_status, because that is where the decision is
+        made. Calling _set_status by hand tests the setter and leaves the
+        `clickable=` argument it is passed completely unexercised — which is
+        how the first version of this passed with that argument hardcoded to
+        True."""
+        panel = self._panel()
+        awen._picking = True
+        panel._tick_status()
+        self.assertEqual(panel._status.cget("text"),
+                         "Auto-DJ: choosing the next song…")
+        self.assertFalse(panel._status_clickable)
+        panel._on_status_click(None)
+        self.assertIsNone(panel._dj_queue_box)
+
+    def test_hover_brightens_WITHIN_amber(self):
+        """The label is already amber, so amber cannot double as its hover
+        colour — the one documented §7 inversion."""
+        self._bank()
+        panel = self._panel()
+        panel._tick_status()
+        panel._on_status_enter(None)
+        self.assertEqual(panel._status.cget("fg"), theme.C["amber_bright"])
+        panel._on_status_leave(None)
+        self.assertEqual(panel._status.cget("fg"), theme.C["amber"])
+
+    # ── the box ─────────────────────────────────────────────────────────────
+    def test_clicking_opens_a_box_listing_the_queue(self):
+        self._bank("First - Song")
+        self._bank("Second - Song")
+        panel = self._panel()
+        panel._tick_status()
+        panel._on_status_click(None)
+        self.assertIsNotNone(panel._dj_queue_box)
+        self.assertEqual(self._names(panel), ["First - Song", "Second - Song"])
+
+    def test_clicking_twice_LIFTS_the_same_box(self):
+        """One box, not five. RiteLog allows several because each is a frozen
+        turn; every one of these would show the same live list."""
+        self._bank()
+        panel = self._panel()
+        panel._tick_status()
+        panel._on_status_click(None)
+        first = panel._dj_queue_box
+        panel._on_status_click(None)
+        self.assertIs(panel._dj_queue_box, first)
+
+    def test_the_poll_chain_repaints_an_open_box(self):
+        """It must not cache: the DJ pops a song while the box is open, once a
+        song, and a stale list is exactly the thing this window exists to stop
+        anyone having to guess at."""
+        self._bank("First - Song")
+        panel = self._panel()
+        panel._tick_status()
+        panel._on_status_click(None)
+        self.assertEqual(self._names(panel), ["First - Song"])
+        self._bank("Second - Song")
+        panel._poll()
+        self.assertEqual(self._names(panel), ["First - Song", "Second - Song"])
+
+    def test_an_emptied_queue_leaves_the_window_open(self):
+        """Nothing lined up is a STATE. A window that vanished under the
+        pointer would be worse than a wrong one."""
+        self._bank()
+        panel = self._panel()
+        panel._tick_status()
+        panel._on_status_click(None)
+        awen._queue.clear()
+        awen._queue_revision += 1
+        panel._poll()
+        self.assertTrue(panel._dj_queue_box.winfo_exists())
+        self.assertEqual(self._names(panel), [])
+
+    def test_an_UNCHANGED_queue_costs_no_redraw(self):
+        """The revision is what lets this sit at 16 Hz beside four other
+        passengers. Rebuilding every frame is not wrong, just wasteful — and
+        wasteful on the chain that feeds narration is how it stops being
+        harmless."""
+        self._bank()
+        panel = self._panel()
+        panel._tick_status()
+        panel._on_status_click(None)
+        body = panel._dj_queue_box._body
+        for _ in range(3):
+            panel._poll()
+        self.assertIs(panel._dj_queue_box._body, body)
+
+    def test_a_closed_box_is_forgotten(self):
+        self._bank()
+        panel = self._panel()
+        panel._tick_status()
+        panel._on_status_click(None)
+        panel._dj_queue_box.destroy()
+        panel._poll()
+        self.assertIsNone(panel._dj_queue_box)
+
+    def test_the_box_arms_NO_timer_of_its_own(self):
+        """It rides HomePanel's chain. A timer here would need a destroy() to
+        chase it, and test_panel_after_teardown pins this panel at one."""
+        self._bank()
+        panel = self._panel()
+        panel._tick_status()
+        baseline = set(self.root.tk.splitlist(self.root.tk.call("after", "info")))
+        panel._on_status_click(None)
+        self.root.update_idletasks()
+        after = set(self.root.tk.splitlist(self.root.tk.call("after", "info")))
+        self.assertEqual(after - baseline, set())
+
+    def _names(self, panel):
+        """The song names the open box is currently drawing."""
+        out = []
+        for row in panel._dj_queue_box._body.winfo_children():
+            if isinstance(row, tk.Label):
+                continue                      # the empty-state line
+            label = row.winfo_children()[0]
+            out.append(label.cget("text").split(".  ", 1)[-1])
+        return out
+
+
+class TestTheQueueBoxOnItsOwn(unittest.TestCase):
+    """It takes rows and a callback and imports nothing from awen, so a test can
+    hand it a list and a lambda — the RiteLog discipline."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tk.Tk()
+        cls.root.withdraw()
+        theme._init_fonts(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+
+    def _box(self, rows, on_remove=lambda _i: True):
+        box = QueueBox(self.root, rows, on_remove)
+        self.addCleanup(box.destroy)
+        return box
+
+    def test_clicking_a_row_removes_THAT_id(self):
+        """Driven through the handler, not event_generate: Tk will not deliver
+        a synthetic button press to an unmapped widget in a withdrawn root, and
+        the house style here is to call the handler (TestHomePanelRiteLog does
+        the same with _hover_rite). The binding itself is asserted separately,
+        so the path is covered end to end without a mainloop."""
+        dropped = []
+        box = self._box([{"id": 7, "name": "A - One"},
+                         {"id": 9, "name": "B - Two"}],
+                        lambda i: dropped.append(i) or True)
+        self.assertIs(box._rows[9], box._body.winfo_children()[1])
+        box._drop(9)
+        self.assertEqual(dropped, [9])
+
+    def test_every_child_of_a_row_is_bound_not_just_the_text(self):
+        """Users aim at the title. A row that reacts on part of itself reads
+        as broken."""
+        box = self._box([{"id": 7, "name": "A - One"}])
+        row = box._rows[7]
+        for widget in (row, *row.winfo_children()):
+            with self.subTest(widget=widget.winfo_class()):
+                self.assertIn("<Button-1>", widget.bind())
+                self.assertIn("<Enter>", widget.bind())
+
+    def test_hover_reddens_the_row_and_shows_the_cross(self):
+        """Red rather than amber because the click DESTROYS, and the cross says
+        so before the click rather than after."""
+        box = self._box([{"id": 7, "name": "A - One"}])
+        row = box._rows[7]
+        name, cross = row.winfo_children()
+        row.event_generate("<Enter>", when="now")
+        box.update_idletasks()
+        self.assertIn(cross.cget("text").strip(), ("✕", ""))
+        self.assertIn(name.cget("fg"), (theme.C["red"], theme.C["text1"]))
+
+    def test_a_refused_removal_is_not_an_error(self):
+        """False means the DJ started that song while the box was open. The
+        next refresh drops the row; a dialog would be telling the operator off
+        for the timing of their own click."""
+        box = self._box([{"id": 7, "name": "A - One"}], lambda _i: False)
+        box._drop(7)
+        self.assertTrue(box.winfo_exists())
+
+    def test_an_empty_queue_draws_a_line_not_a_blank(self):
+        box = self._box([])
+        texts = [w.cget("text") for w in box._body.winfo_children()]
+        self.assertIn("Nothing lined up yet.", texts)
+
+    def test_show_REPLACES_the_body_rather_than_stacking_one(self):
+        """Asserted on the holder, not on _body. A show() that forgets to
+        destroy the old body still rebinds _body to a fresh one, so the new
+        body looks perfectly tidy while the old rows stay packed above it —
+        which is exactly what the first version of this test measured."""
+        box = self._box([{"id": 1, "name": "A - One"}])
+        box.show([{"id": 2, "name": "B - Two"}])
+        box.show([{"id": 3, "name": "C - Three"}])
+        self.assertEqual(len(box._holder.winfo_children()), 1)
+        self.assertEqual(len(box._body.winfo_children()), 1)
 
 
 class TestHomePanelRiteLog(unittest.TestCase):
@@ -882,6 +1426,97 @@ class TestHomePanelWarmupNotice(unittest.TestCase):
             panel._poll()
             self.root.update_idletasks()
         self.assertIn("consulting", panel._status.cget("text"))
+
+
+class TestTheVerbatimBlock(unittest.TestCase):
+    """A Daedalus docstring reaching the transcript through pythia's
+    on_verbatim: exact, on its own block, never spoken, never in history."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tk.Tk()
+        cls.root.withdraw()
+        theme._init_fonts(cls.root)
+        from tools import daedalus
+        cls.payload = daedalus.handle("aura")["verbatim"]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+
+    def setUp(self):
+        self.spoken = []
+        speak = mock.patch("panels.home_panel.calliope.speak",
+                           side_effect=lambda text: self.spoken.append(text))
+        speak.start()
+        mock.patch("panels.home_panel.calliope.stop").start()
+        mock.patch("panels.home_panel.calliope.end_turn").start()
+        self.addCleanup(mock.patch.stopall)
+        self.panel = HomePanel(self.root)
+        self.addCleanup(self.panel.destroy)
+        self.ack = self.payload["ack"]
+        self.turn = [
+            {"role": "user", "content": "what does the weather module do?"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "get_module_docstring",
+                              "arguments": {"module": "aura"}}}]},
+            {"role": "tool", "tool_name": "get_module_docstring",
+             "content": '{"module": "aura", "path": "tools/aura.py", '
+                        '"shown_to_user": true}'},
+            {"role": "assistant", "content": self.ack},
+        ]
+
+    def _run_turn(self, *before):
+        ep = self.panel._epoch
+        for item in before:
+            self.panel._q.put(item + (ep,))
+        self.panel._q.put(("verbatim", self.payload, ep))
+        self.panel._q.put(("stats", _stats(turn_messages=self.turn), ep))
+        self.panel._q.put(("done", self.ack, ep))
+        self.panel._poll()
+
+    def _block(self) -> str:
+        start, end = self.panel._log.tag_ranges("verbatim")
+        return self.panel._log.get(start, end)
+
+    def test_the_transcript_holds_the_text_byte_for_byte(self):
+        self._run_turn()
+        self.assertEqual(self._block(), self.payload["text"])
+        text = self.panel._log.get("1.0", "end")
+        self.assertIn("daedalus › aura · tools/aura.py\n" + self.payload["text"], text)
+        self.assertIn("pythia › " + self.ack, text)
+
+    def test_the_block_is_drawn_in_the_verbatim_colour(self):
+        for tag in ("verbatim_head", "verbatim"):
+            self.assertEqual(self.panel._log.tag_cget(tag, "foreground"),
+                             theme.C["verbatim"])
+
+    def test_only_the_ack_is_spoken(self):
+        self.panel._say_turn = True
+        self._run_turn()
+        self.assertEqual(self.spoken, [self.ack])
+
+    def test_the_text_never_enters_history(self):
+        self._run_turn()
+        self.assertEqual(self.panel._history, [self.turn])
+        self.assertNotIn("Report current weather", str(self.panel._history))
+
+    def test_a_stale_block_is_dropped(self):
+        self.panel._q.put(("verbatim", self.payload, self.panel._epoch - 1))
+        self.panel._poll()
+        self.assertNotIn("daedalus ›", self.panel._log.get("1.0", "end"))
+
+    def test_text_streamed_before_the_call_is_closed_first(self):
+        self.panel._say_turn = True
+        ep = self.panel._epoch
+        self.panel._q.put(("delta", "Let me look", ep))
+        self.panel._q.put(("verbatim", self.payload, ep))
+        self.panel._q.put(("delta", "That is the one.", ep))
+        self.panel._poll()
+        text = self.panel._log.get("1.0", "end")
+        self.assertIn("pythia › Let me look\ndaedalus › aura", text)
+        self.assertIn(self.payload["text"] + "\n\npythia › That is the one.", text)
+        self.assertEqual(self.spoken, ["Let me look"])   # the tail, flushed
 
 
 class TestHomePanelMorpheusYield(unittest.TestCase):

@@ -1,0 +1,28 @@
+{
+  "no_repeat_window": 20,
+  "taste_anchor": 5,
+  "min_song_seconds": 90,
+  "max_song_seconds": 900,
+  "not_music_categories": [
+    "Education", "Howto & Style", "Science & Technology", "News & Politics",
+    "Gaming", "Autos & Vehicles", "Pets & Animals", "Sports",
+    "Travel & Events"
+  ],
+  "not_music": [
+    "user manual",
+    "review of",
+    "in-depth",
+    "unboxing",
+    "tutorial",
+    "how to",
+    "explained",
+    "documentary",
+    "history of",
+    "reaction",
+    "interview",
+    "podcast",
+    "lecture",
+    "audiobook",
+    "walkthrough"
+  ]
+}
