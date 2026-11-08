@@ -1,21 +1,18 @@
 """
 test_midas_panel_smoke.py — headless Tk smoke test for the Cerberus-gated
-MidasPanel (Phase 3: Dynastic Vault behind the guardian's PIN).
+MidasPanel (the Dynastic Vault behind the guardian's PIN).
 
 Same headless approach as the other panel smoke tests: a withdrawn tk.Tk()
-root driven with update_idletasks(). cerberus's paths are redirected at a temp
-dir so the real PIN never enters the test. midas._load_watchlist is stubbed so
-the panel has a stable set of tickers regardless of the host config.
+root driven with update_idletasks(). Cerberus runs inside a CerberusSandbox
+(tests/_cerberus_sandbox.py), so the real PIN file, vault and ledger never
+enter the test and the fixture PIN is obviously fake. midas._load_watchlist is
+stubbed so the panel has a stable set of tickers regardless of the host config.
 
     python -X utf8 -m unittest tests.test_midas_panel_smoke
 """
 
-import hashlib
-import json
 import os
-import shutil
 import sys
-import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,11 +21,8 @@ import tkinter as tk
 
 import theme
 import cerberus
+from tests._cerberus_sandbox import FAKE_PIN, WRONG_PIN, CerberusSandbox
 from tools import midas
-
-_PIN  = "1408"
-_SALT = b"sixteen_byte_slt"
-_HASH = hashlib.sha256(_SALT + _PIN.encode("utf-8")).hexdigest()
 
 
 class _Base(unittest.TestCase):
@@ -44,23 +38,10 @@ class _Base(unittest.TestCase):
         cls.root.destroy()
 
     def setUp(self):
-        self._dir = tempfile.mkdtemp()
-        # The gate now calls cerberus.unlock() (not just verify()), which also
-        # touches the Vault and Ledger — every path constant must be
-        # redirected, not just _DATA_PATH, or these tests would read/write the
-        # real cerberus_vault.json / cerberus_ledger.json.
-        self._orig = {k: getattr(cerberus, k) for k in
-                      ("_DATA_PATH", "_VAULT_PATH", "_MANIFEST_PATH",
-                       "_LEDGER_PATH", "_KDF_ITERS")}
-        cerberus._DATA_PATH     = os.path.join(self._dir, "cerberus_data.json")
-        cerberus._VAULT_PATH    = os.path.join(self._dir, "cerberus_vault.json")
-        cerberus._MANIFEST_PATH = os.path.join(self._dir, "cerberus_manifest.json")
-        cerberus._LEDGER_PATH   = os.path.join(self._dir, "cerberus_ledger.json")
-        cerberus._KDF_ITERS = 1000
-        cerberus._ATTEMPTS_REMAINING = 3
-        cerberus.lock()
-        with open(cerberus._DATA_PATH, "w", encoding="utf-8") as f:
-            json.dump({"verify_salt": _SALT.hex(), "pin_hash": _HASH}, f)
+        # The gate calls cerberus.unlock(), which writes the Ledger: every path
+        # must point at the sandbox before the panel exists.
+        self._box = CerberusSandbox()
+        self._dir = self._box.start()
 
         self._orig_wl = midas._load_watchlist
         midas._load_watchlist = lambda: ["AAPL", "MSFT"]
@@ -73,13 +54,9 @@ class _Base(unittest.TestCase):
     def tearDown(self):
         midas._load_watchlist = self._orig_wl
         self.panel.destroy()
-        for k, v in self._orig.items():
-            setattr(cerberus, k, v)
-        cerberus._ATTEMPTS_REMAINING = 3
-        cerberus.lock()
-        shutil.rmtree(self._dir, ignore_errors=True)
+        self._box.stop()
 
-    def _unlock(self, pin=_PIN):
+    def _unlock(self, pin=FAKE_PIN):
         self.panel._gate_entry.insert(0, pin)
         self.panel._on_gate_submit()
         self.root.update_idletasks()
@@ -92,7 +69,7 @@ class TestMidasGate(_Base):
         self.assertFalse(self.panel._content_built)
 
     def test_wrong_pin_stays_sealed(self):
-        self._unlock("0000")
+        self._unlock(WRONG_PIN)
         self.assertFalse(self.panel._unlocked)
         self.assertIn("wrong", self.panel._gate_status.cget("text").lower())
 
@@ -129,12 +106,14 @@ class TestMidasGate(_Base):
         self.assertEqual(self.panel._active, "ledger")
 
     def test_missing_pin_file_disables_gate(self):
-        cerberus._DATA_PATH = os.path.join(self._dir, "gone.json")
+        os.remove(cerberus._DATA_PATH)
         from panels.midas_panel import MidasPanel
         panel = MidasPanel(self.root)
         panel.pack()
         self.root.update_idletasks()
         self.assertEqual(str(panel._gate_entry.cget("state")), "disabled")
+        self.assertIn("CERBERUS tab", panel._gate_status.cget("text"))
+        self.assertNotIn("cerberus.py", panel._gate_status.cget("text"))
         panel.destroy()
 
     def test_gate_uses_cerberus_session_not_just_verify(self):
@@ -198,6 +177,34 @@ class TestMidasGate(_Base):
         price, pct = self.panel._row_widgets["AAPL"]
         self.assertEqual(str(price.cget("fg")), theme.C["text3"])   # stale = dimmed
         self.assertEqual(str(pct.cget("fg")), theme.C["text3"])
+
+
+class TestSessionRider(_Base):
+    """Kairos's 2 s `cerberus` worker reseals the Dynastic Vault through the
+    rider, with the reason, without waiting for the 60 s midas tick."""
+
+    def test_the_rider_reseals_with_the_reason(self):
+        self._unlock()
+        cerberus.lock(cerberus.LOCK_WINDOWS)
+        self.panel.session_rider.update({"unlocked": False, "reason": "windows_lock",
+                                         "alarms": []})
+        self.root.update_idletasks()
+        self.assertFalse(self.panel._unlocked)
+        self.assertIn("Windows", self.panel._gate_status.cget("text"))
+        self.assertIn("PIN again", self.panel._gate_status.cget("text"))
+
+    def test_the_rider_survives_none_and_never_opens_the_gate(self):
+        self.panel.session_rider.update(None)
+        cerberus.unlock(FAKE_PIN)                   # unlocked from another tab
+        self.panel.session_rider.update({"unlocked": True, "reason": None,
+                                         "alarms": []})
+        self.assertFalse(self.panel._unlocked)
+
+    def test_the_midas_tick_check_names_the_reason_too(self):
+        self._unlock()
+        cerberus.lock(cerberus.LOCK_IDLE)
+        self.panel.update(None)
+        self.assertIn("hour", self.panel._gate_status.cget("text"))
 
 
 if __name__ == "__main__":

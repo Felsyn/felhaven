@@ -1,7 +1,7 @@
 # Helios
 
-Report sunrise, sunset, golden-hour windows, and day length. Interprets Aura's
-astronomy dict; makes no network call of its own.
+Report sunrise, sunset, golden-hour windows, and day length. Computes them from
+the Settings location and this computer's clock, so they work offline.
 
 - **UI:** Atmospherics card → NOW tab (the Helios sub-widget)
 - **Brain tool:** `get_sun_times`

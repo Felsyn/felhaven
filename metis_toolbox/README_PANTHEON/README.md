@@ -6,7 +6,8 @@ the module's own docstring, where it cannot drift from the code.
 
 | Module | Job |
 |---|---|
-| [Aether](aether.md) | Report whether WiFi and the Anthropic API are reachable. |
+| [Aegis](aegis.md) | Vouch for the programs in bin/ before Felhaven runs them. |
+| [Aether](aether.md) | Report whether WiFi, the internet and Ollama are reachable. |
 | [Ammit](ammit.md) | Manage a single countdown timer. |
 | [Argus](argus.md) | Report what this computer is communicating with on the network. |
 | [Artemis](artemis.md) | Own the local-chart cache: projection, area manifest, county reference, and the shared vector format. |
@@ -15,7 +16,7 @@ the module's own docstring, where it cannot drift from the code.
 | [Cadmus](cadmus.md) | Decode ESRI shapefile bytes (.shp/.dbf) into geometry and attribute records. |
 | [Callimachus](callimachus.md) | Ask the web a question and return trimmed text. |
 | [Calliope](calliope.md) | Turn a string of text into speech and play it. |
-| [Cerberus](cerberus.md) | Guard the toolbox's secrets behind one PIN — the sole encryption authority. |
+| [Cerberus](cerberus.md) | Keep the toolbox's API keys encrypted to this Windows account, and gate their use behind a PIN child lock. |
 | [Daedalus](daedalus.md) | Map Felhaven's own modules, their docstrings and their imports, from the source. |
 | [Demeter](demeter.md) | Fetch, resample and cache local elevation, and render the terrain raster. |
 | [Echo](echo.md) | Turn text into an audio file on disk. |
@@ -26,10 +27,12 @@ the module's own docstring, where it cannot drift from the code.
 | [Harmonia](harmonia.md) | Own the one audio output device. |
 | [Hecate](hecate.md) | Fetch and cache TIGER/Line roads for an area as tiered Features. |
 | [Helios](helios.md) | Report sunrise, sunset, golden-hour windows, and day length. |
+| [Hermes](hermes.md) | Read from the network, bounded: a byte cap and a deadline for the whole request. |
 | [Hephaestus](hephaestus.md) | Report CPU, RAM, and disk health. |
 | [Herodotus](herodotus.md) | Manage a local archive of Markdown documents. |
 | [Horai](horai.md) | Give the current date, time, season, and time-of-day. |
 | [Hypatia](hypatia.md) | Map where every catalog star and planet sits in the sky right now. |
+| [Hypnos](hypnos.md) | Tell whether the person has stepped away: Windows locked, the PC asleep, or no keyboard or mouse input for a while. |
 | [Kairos](kairos.md) | Own the clock. Fire workers. Dispatch results to panels. |
 | [Kepler](kepler.md) | Compute the positions of the five classical planets. |
 | [Machine Spirit](machine_spirit.md) | Own Pythia's system prompt — the default text plus an optional per-install override. |

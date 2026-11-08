@@ -14,13 +14,22 @@ Contract:    Polled + brain tool. Exposes TOOL_DEFINITION, handle(), and
              per §2 — that is how Kairos delivers None so the panel holds a
              stale reading instead of blanking. Either only fails once BOTH
              sources have failed.
+             handle() answers from the last good fetch while it is younger
+             than CACHE_TTL (the Kairos poll interval) and adds `as_of`. After
+             a failed refresh it serves that reading marked `stale: True`, for
+             up to _STALE_MAX. fetch() always goes to the network, and its dict
+             carries no `as_of`, so the panels' shape is unchanged. See the
+             "Freshness" section.
 
 Upstream:    kairos.py (calls fetch), pythia.py (registration + dispatch),
              themis.py (location, read fresh per fetch)
-Downstream:  panels/aura_panel.py (display surface), tools/helios.py and
-             tools/selene.py (both read the astronomy dict, never fetch it)
+Downstream:  panels/aura_panel.py (display surface), panels/hypatia_panel.py
+             (cloud cover). The `astronomy` block is read only by the model,
+             through get_weather: since 2026-09-28 Helios and Selene compute
+             the sun and moon themselves (V0.03 audit M3).
 
-Requires:    requests (already in the Felhaven stack)
+Requires:    tools/hermes.py (the bounded network read): every fetch has a
+             byte cap and a deadline for the whole request.
 
 Location config:
     The Settings tab (Themis / felhaven_settings.json) is canonical — it holds
@@ -43,14 +52,22 @@ V0.02:       Audited 2026-07-25 — contract verified: handle() never raises
              host answered — see the "Fallback source" section for the two
              places the dialects genuinely differ (its WMO weather codes get
              translated into wttr.in's WWO space, and it carries no moon data).
+
+2026-09-28:  handle() answers from a cache (V0.03 audit T7 / M2). Kairos
+             already polled every 30 min, yet get_weather, get_sun_times and
+             get_moon_phase each fetched again, so one question cost three
+             round trips. See "Freshness" for the threading and the stale rule.
 """
 
+import copy
 import logging
 import os
 import sys
+import threading
+import time
+from dataclasses import dataclass
 from datetime import datetime
 
-import requests
 from typing import Any
 
 # Aura reaches UP to an app-root sibling (themis.py) for the user's location —
@@ -61,6 +78,7 @@ if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import themis
+from tools import hermes
 
 log = logging.getLogger("METIS.aura")
 
@@ -81,12 +99,18 @@ def _location() -> str:
 # ── Internals ─────────────────────────────────────────────────────────────────
 
 _WTTR_URL      = "https://wttr.in/{location}?format=j1"
-_REQUEST_TIMEOUT = 6    # seconds — tight; Metis is voice-first, latency matters
-# The timeout is per REQUEST, and there are now two sources, so a total failure
-# costs up to 12 s rather than 6. That is the failure path only — wttr.in still
-# answers in one round trip (the fallback is never called speculatively) — and
-# 12 s to get an answer beats 6 s to get an error. If that ceiling ever needs
-# to come down, lower this constant rather than dropping the second source.
+_REQUEST_TIMEOUT = 6    # seconds per socket operation — tight; latency matters
+# Each source also has a deadline for its WHOLE request, hermes.deadline_for():
+# 12 s at these caps. With two sources a total failure costs up to 24 s, and
+# that is also the longest the cache lock (see "Freshness") can be held. That is
+# the failure path only — wttr.in still answers in one round trip (the fallback
+# is never called speculatively). If that ceiling ever needs to come down,
+# lower this constant rather than dropping the second source.
+
+# Byte caps (hermes rule: 4x the largest measured body, rounded up to a power of
+# two, never below 64 KiB). Re-measure if a source changes its format.
+_WTTR_MAX_BYTES = 256 * 1024        # measured 2026-10-01: 39,427 B (j1, London)
+_OPEN_METEO_MAX_BYTES = 64 * 1024   # measured 2026-10-01: 1,170 B (these params); the floor
 
 
 def _mph_to_label(mph: int) -> str:
@@ -162,7 +186,7 @@ def _fetch_raw() -> dict[str, Any]:
     Returns parsed dict or raises on failure.
     """
     url = _WTTR_URL.format(location=_location().replace(" ", "+"))
-    resp = requests.get(url, timeout=_REQUEST_TIMEOUT)
+    resp = hermes.get(url, cap=_WTTR_MAX_BYTES, timeout=_REQUEST_TIMEOUT)
     resp.raise_for_status()
     data: dict[str, Any] = resp.json()
     return data
@@ -182,9 +206,9 @@ def _fetch_raw() -> dict[str, Any]:
 #   - weather_code stays a WWO code, wttr.in's code space, because that is what
 #     panels/aura_panel.py's _icon() maps. _WMO_TO_WWO translates.
 #   - Open-Meteo has no moon data. The astronomy dict keeps its sun fields and
-#     leaves moonrise/moonset/phase empty; selene.py already degrades those to
-#     "—" per-field (§2), so SELENE reads blank on the fallback rather than
-#     crashing. Restoring it means computing phase locally, not a new fetch.
+#     leaves moonrise/moonset/phase empty. Nothing on screen reads them any
+#     more (Selene computes the moon, M3), so the gap shows only in
+#     get_weather's own output.
 
 _OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
@@ -253,8 +277,9 @@ def _place_name(query: str) -> str:
 
 
 def _om_clock(iso: str) -> str:
-    """'2026-09-15T07:02' -> '07:02 AM'. helios.py parses wttr.in's clock
-    strings, so the fallback hands it the same shape, not an ISO stamp."""
+    """'2026-09-15T07:02' -> '07:02 AM'. get_weather's astronomy block keeps
+    wttr.in's clock shape on the fallback too, not an ISO stamp, so the model
+    reads one format whichever host answered."""
     try:
         return datetime.strptime(iso, "%Y-%m-%dT%H:%M").strftime("%I:%M %p")
     except (ValueError, TypeError):
@@ -269,7 +294,7 @@ def _fetch_open_meteo() -> dict[str, Any]:
     configured location string rather than a host-resolved city.
     """
     # Annotated, not inferred: the mixed float/str/int values make mypy widen
-    # this to dict[str, object], which requests' params type rejects (--strict
+    # this to dict[str, object], which hermes' params type rejects (--strict
     # on tools/ is a blocking gate).
     params: dict[str, float | str | int] = {
         "latitude": themis.latitude(),
@@ -284,7 +309,8 @@ def _fetch_open_meteo() -> dict[str, Any]:
         "timezone": "auto",
         "forecast_days": 3,
     }
-    resp = requests.get(_OPEN_METEO_URL, params=params, timeout=_REQUEST_TIMEOUT)
+    resp = hermes.get(_OPEN_METEO_URL, params=params, cap=_OPEN_METEO_MAX_BYTES,
+                      timeout=_REQUEST_TIMEOUT)
     resp.raise_for_status()
     data: dict[str, Any] = resp.json()
     return data
@@ -345,7 +371,7 @@ def _from_open_meteo(raw: dict[str, Any]) -> dict[str, Any]:
         "rain_chance_pct": today.get("rain_pct", 0),
         "cloud_cover_pct": _safe_int(cur.get("cloud_cover"), 0),
         # Sun only — see the section note. Empty moon fields are the documented
-        # cost of the fallback, and selene.py renders them as "—".
+        # cost of the fallback; they reach only get_weather's output.
         "astronomy": {
             "sunrise":           _om_clock(day_field("sunrise", 0, "")),
             "sunset":            _om_clock(day_field("sunset", 0, "")),
@@ -375,6 +401,98 @@ def _fetch_weather() -> dict[str, Any]:
             raise primary
         log.info("Aura: served by Open-Meteo (wttr.in unavailable).")
         return data
+
+
+# ── Freshness (V0.03 audit T7) ────────────────────────────────────────────────
+# Kairos polls fetch() every 1800 s for the panels, but handle() used to fetch
+# AGAIN on every call, and Helios and Selene each called it then: "weather,
+# sunset and moon?" was three round trips, and offline each one walked both
+# sources before failing. Now handle() answers from the last good fetch and
+# dates it with `as_of`. pheme.py copies this pattern for the news.
+#
+# Threads: Kairos's worker calls fetch() and Pythia's worker calls handle(), so
+# the cache is shared between those two. It is never shared with the Tk main
+# thread, which only sees fetch()'s return value through the Kairos queue.
+# _lock guards the cache AND is held across the network call, on purpose. The
+# usual rule against holding a lock through slow I/O is about stalling threads
+# that want something else; the only threads waiting here want the result of
+# that very fetch, and waiting beats a second, racing round trip. It is safe
+# only because the fetch is bounded: hermes ends each source's request at its
+# deadline, so the lock is held 24 s at the very worst, never for as long as a
+# slow server likes. Every dict
+# going in or out is a deep copy, so no two threads ever hold one mutable
+# object (§6).
+
+CACHE_TTL = 1800            # s. Kairos's aura interval, so handle() normally reuses the poll
+_RETRY_AFTER = 60           # s. A failed refresh isn't retried sooner: one turn, one attempt
+_STALE_MAX = 2 * CACHE_TTL  # s. The oldest reading still served, marked stale, when a refresh fails
+
+# Everything that shapes a reading: the query wttr.in is asked, and the lat/lon
+# Open-Meteo is asked. Units are deliberately NOT in it: every reading carries
+# both °F and °C, so flipping the Settings toggle must not cost a refetch.
+_Key = tuple[str, float, float]
+
+
+@dataclass(frozen=True)
+class _Reading:
+    key: _Key
+    data: dict[str, Any]    # the cache's own copy; only ever handed out via _answer()
+    at: float               # time.monotonic(): ages it, immune to wall-clock changes
+    as_of: str              # naive local ISO, pythia._now()'s convention: what the model reads
+
+
+@dataclass(frozen=True)
+class _Failure:
+    key: _Key
+    at: float               # time.monotonic()
+    error: dict[str, Any]   # the §2 error dict that attempt produced
+
+
+_lock = threading.Lock()
+_reading: _Reading | None = None
+_failure: _Failure | None = None
+
+
+def _now() -> datetime:
+    """Injectable clock seam for `as_of`, so a test can move the wall clock and
+    prove a stale answer keeps its original date. Naive LOCAL time, the same
+    convention as pythia._now() (tools/ does not import the brain)."""
+    return datetime.now()
+
+
+def _cache_key() -> _Key:
+    """Read fresh per call, like _location(), so a Settings edit is a new key.
+    Captured BEFORE a fetch: an edit that lands mid-fetch then costs one extra
+    fetch, never the old city's weather filed under the new one."""
+    return (_location(), themis.latitude(), themis.longitude())
+
+
+def _remember(key: _Key, data: dict[str, Any]) -> _Reading:
+    """Store a good fetch and clear any failure. Caller holds _lock."""
+    global _reading, _failure
+    _reading = _Reading(key, copy.deepcopy(data), time.monotonic(),
+                        _now().isoformat(timespec="seconds"))
+    _failure = None
+    return _reading
+
+
+def _answer(reading: _Reading, stale: bool = False) -> dict[str, Any]:
+    """A reading as the model gets it: a copy, dated, and flagged when stale.
+    The flag is there because gemma4:e2b is weak at date arithmetic, and can
+    relay `stale` without having to work out how old `as_of` is."""
+    out = copy.deepcopy(reading.data)
+    out["as_of"] = reading.as_of
+    if stale:
+        out["stale"] = True
+    return out
+
+
+def _clear_cache() -> None:
+    """Forget every reading and failure. For tests, so none leaks between them."""
+    global _reading, _failure
+    with _lock:
+        _reading = None
+        _failure = None
 
 
 # ── Contract ──────────────────────────────────────────────────────────────────
@@ -442,8 +560,9 @@ def _build(raw: dict[str, Any]) -> dict[str, Any]:
         # Hypatia's ConditionsWidget reads this — Aura stays the single sky-data
         # fetcher, Hypatia only reads (CONVENTIONS §12).
         "cloud_cover_pct": _safe_int(cur.get("cloudcover"), 0),
-        # Raw passthrough — Aura fetches, it does not interpret. Helios/Selene
-        # parse these strings downstream. wttr.in returns clock strings like
+        # Raw passthrough — Aura fetches, it does not interpret. Only the model
+        # reads these now, through get_weather: Helios and Selene compute the
+        # sun and moon themselves (M3). wttr.in returns clock strings like
         # "05:52 AM" and, on some days, "No moonrise" / "No moonset".
         "astronomy": {
             "sunrise":           astro.get("sunrise", ""),
@@ -458,26 +577,22 @@ def _build(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def handle() -> dict[str, Any]:
-    """
-    Called by the toolbox dispatcher when the LLM invokes get_weather.
-    Returns current conditions for the configured location (Settings/Themis, or
-    the AURA_LOCATION env override). On any failure, returns a degraded dict
-    with an error key — never raises.
-    """
+def _fetch_or_error() -> dict[str, Any]:
+    """One network attempt as handle() reports it: the reading, or the §2 error
+    dict for why there isn't one. Never raises."""
     try:
         return _fetch_weather()
-    except requests.exceptions.SSLError:
+    except hermes.CertError:
         # Its own slug because it is its own problem: a certificate failure is
         # not a flaky link and no amount of retrying clears it. wttr.in served
         # an expired cert for nine hours on 2026-09-15 and every attempt failed
         # identically — worth saying so rather than reporting a generic outage.
         log.error("Aura: TLS certificate verification failed.")
         return {"error": "weather_cert_error", "location": _location()}
-    except requests.Timeout:
+    except hermes.Timeout:
         log.warning("Aura: weather request timed out.")
         return {"error": "weather_timeout", "location": _location()}
-    except requests.ConnectionError:
+    except hermes.Offline:
         log.warning("Aura: no network connection.")
         return {"error": "weather_offline", "location": _location()}
     except Exception as e:
@@ -485,10 +600,50 @@ def handle() -> dict[str, Any]:
         return {"error": "weather_unavailable", "location": _location()}
 
 
+def handle() -> dict[str, Any]:
+    """
+    Called by the toolbox dispatcher when the LLM invokes get_weather. Returns
+    current conditions for the configured location (Settings/Themis, or the
+    AURA_LOCATION env override), dated with `as_of`. Never raises.
+
+    Answers from the last good fetch while it is younger than CACHE_TTL; only a
+    stale or empty cache goes to the network. When that refresh fails, the last
+    reading for the SAME location comes back for up to _STALE_MAX marked
+    `stale: True`, its `as_of` unchanged, since that is when the data was
+    fetched. Past that, or with nothing to fall back on, it is the error dict,
+    and a failure is not retried inside _RETRY_AFTER.
+    """
+    global _failure
+    key = _cache_key()
+    with _lock:
+        now = time.monotonic()
+        last = _reading if _reading is not None and _reading.key == key else None
+        if last is not None and now - last.at < CACHE_TTL:
+            return _answer(last)
+        failed = _failure if _failure is not None and _failure.key == key else None
+        if failed is None or now - failed.at >= _RETRY_AFTER:
+            result = _fetch_or_error()
+            if "error" not in result:
+                return _answer(_remember(key, result))
+            failed = _failure = _Failure(key, time.monotonic(), result)
+        if last is not None and now - last.at < _STALE_MAX:
+            return _answer(last, stale=True)
+        return copy.deepcopy(failed.error)
+
+
 def fetch() -> dict[str, Any]:
     """Kairos entry point — raises; Kairos catches and delivers None.
-    Raises only when both wttr.in and Open-Meteo fail (see _fetch_weather)."""
-    return _fetch_weather()
+    Raises only when both wttr.in and Open-Meteo fail (see _fetch_weather).
+
+    Always goes to the network, even when the cache is fresh: this poll IS the
+    refresh. If it answered from the cache, a failed poll would stop raising
+    and Kairos's retry ladder would never engage. A good result is stored for
+    handle(); a failure leaves the last reading where it was."""
+    key = _cache_key()
+    with _lock:
+        data = _fetch_weather()
+        _remember(key, data)
+    return data
 
 
 # ── Standalone test ───────────────────────────────────────────────────────────

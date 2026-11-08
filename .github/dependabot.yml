@@ -1,0 +1,20 @@
+# Dependabot keeps CI's pinned Actions current (CONVENTIONS §11, §12).
+# Each Action is pinned to a commit SHA with its release tag in a comment;
+# Dependabot's PR updates both together, and tests/test_ci_pins.py checks
+# the result like any other push.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Propose a release only once it is a week old. A hijacked release is
+    # usually noticed and pulled within days, so it would have to survive
+    # that long to reach this repo.
+    cooldown:
+      default-days: 7
+    # One PR for every Action that has a new release, not one PR each.
+    groups:
+      actions:
+        patterns:
+          - "*"

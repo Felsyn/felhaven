@@ -65,7 +65,7 @@ _PALETTE_FILE = "palette.py"
 # Where a Felhaven .py can live — flat, like test_tool_output_contract.
 # test_every_tracked_py_is_scanned fails if a tracked file lives elsewhere, so
 # a new subfolder cannot slip past the scan unnoticed.
-_SCANNED_DIRS = ("", "tools", "panels", "tests")
+_SCANNED_DIRS = ("", "tools", "panels", "tests", "tests/semgrep")
 _APP_DIRS = ("", "tools", "panels")          # rule 3 only
 
 # Tk's hex forms: 1, 2, 3 or 4 hex digits per channel.

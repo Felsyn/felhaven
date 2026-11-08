@@ -13,6 +13,7 @@ assistant, "Metis", was retired — the toolbox is typed-in, optionally spoken-b
 - [`SETUP.md`](SETUP.md) — installing on a fresh machine
 - [`CONVENTIONS.md`](CONVENTIONS.md) — module contracts, patterns, and the decisions log
 - [`CHANGELOG.md`](CHANGELOG.md) — dated history
+- [`BACKLOG.md`](BACKLOG.md) — known, not done yet
 - [`metis_toolbox/README_PANTHEON/`](metis_toolbox/README_PANTHEON/README.md) — one page per module
 
 ---
@@ -94,7 +95,7 @@ aloud as it arrives. Off by default.
 |---|---|
 | Location, units, clock | **SETTINGS** tab (Moderati) — writes `felhaven_settings.json`. One coordinate pair drives weather, the star map, planets, and the season's hemisphere. `AURA_LOCATION` env var overrides the weather location only, for headless use. |
 | Feeds, playlists, watchlist, lore, voice | JSON files in `metis_toolbox/config/` — ordered, and UI order follows file order. Adding a feed or playlist is an edit, never a code change. |
-| Finnhub + Brave API keys | The encrypted **Cerberus vault** only — never `.env`, never an env var, never the repo. Seed with `python cerberus.py set <PIN> <name> <key>`. |
+| Finnhub, Brave, OpenTopography API keys | The **Cerberus vault** only, encrypted to your Windows account — never `.env`, never an env var, never the repo. Set each one in its row of the **CERBERUS** tab, or with `python cerberus.py set <name>` (hidden prompts; never a key on the command line). |
 | Audio binaries | `metis_toolbox/bin/` (mpv, yt-dlp, ffmpeg), preferred over PATH. Gitignored. |
 | Worker intervals | `Kairos.WORKERS` in `kairos.py`. |
 

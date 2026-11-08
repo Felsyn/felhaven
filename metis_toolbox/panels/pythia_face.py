@@ -8,10 +8,14 @@ Job:         Draw Pythia as a wireframe face and animate it to say what she is
              state of its own, holds no audio handle, and calls nothing back.
              HestiaBar pushes a state name in; that is the entire input.
 
-Contract:    PythiaFace(parent, width=140, height=120, fps=20)
+Contract:    PythiaFace(parent, width=140, height=120, fps=20, rng=None)
                  set_state(name)   — idle | playing | thinking | speaking
                  set_level(value)  — 0..1, or None to hand control back
                  start() / stop()  — manual control; normally unnecessary
+                 advance()         — draw one frame, schedule nothing (the
+                                     loop's body; Clio steps it per video frame)
+             `rng` is a random.Random for every random draw; pass a seeded
+             one and the same calls draw the same face.
 
 Design:      Framed at the neckline: face and neck only, nothing below. There
              are no eyes, no mouth, no blink and no text anywhere in the
@@ -40,7 +44,8 @@ Threading:   set_level() is safe from a worker thread (it only assigns a
              float). set_state() is NOT — it touches tk.
 
 Upstream:    panels/hestia_panel.py (mounts it), panels/home_panel.py (drives
-             the state from its existing 60 ms drain chain)
+             the state from its existing 60 ms drain chain), panels/clio_face.py
+             (steps it off-screen to render Clio's videos)
 Downstream:  theme.py (colors)
 
 Requires:    tkinter, math, random (stdlib). No Pillow, no numpy, no images.
@@ -166,7 +171,10 @@ class PythiaFace(tk.Canvas):
         "speaking":    (0.85, 1.35, 0.30, "amber", 3.2),
     }
 
-    def __init__(self, master, width=140, height=120, fps=20, **kw):
+    def __init__(self, master, width=140, height=120, fps=20, rng=None, **kw):
+        # Every random draw (flicker, syllables, cable phase) goes through one
+        # generator, so a seeded one renders the same face twice (Clio).
+        self._rng = rng if rng is not None else random.Random()
         kw.setdefault("bg", BG)
         kw.setdefault("highlightthickness", 0)
         kw.setdefault("bd", 0)
@@ -407,7 +415,7 @@ class PythiaFace(tk.Canvas):
             item = self.create_line(0, 0, 0, 0, fill=_lvl(GREEN_RAMP, 0.3),
                                     width=1, smooth=True)
             self._tendrils.append({"item": item, "sign": sign, "off": xoff,
-                                   "seed": random.random() * 6.28})
+                                   "seed": self._rng.random() * 6.28})
 
     def _build_overlay(self):
         """CRT dressing: scanline mask and the rolling sweep. No text."""
@@ -428,6 +436,16 @@ class PythiaFace(tk.Canvas):
     def _tick(self):
         if not self._running:
             return
+        self.advance()
+        self._job = self.after(self.delay, self._tick)
+
+    def advance(self) -> None:
+        """Draw exactly one frame and schedule nothing.
+
+        The <Map> loop calls it on its own clock. Clio (panels/clio_face.py)
+        calls it on a video's clock instead, one call per frame, so a rendered
+        face moves exactly as the app's does without a timer in the way.
+        """
         self._frame += 1
         _, speed, jitter, hot, freq = self.STATES[self.state]
 
@@ -444,7 +462,7 @@ class PythiaFace(tk.Canvas):
             target = self._target
             if self.state == "speaking":
                 # crude syllable envelope so it looks like speech, not a hum
-                self._syl += 0.16 + random.random() * 0.18
+                self._syl += 0.16 + self._rng.random() * 0.18
                 target *= 0.42 + 0.58 * abs(math.sin(self._syl))
             elif self.state == "playing":
                 target *= 0.75 + 0.25 * math.sin(self._frame * 0.06)
@@ -456,7 +474,7 @@ class PythiaFace(tk.Canvas):
         lv = self.level
 
         self._phase += 0.13 * speed
-        self._flicker = 1.0 - jitter * 0.25 * random.random()
+        self._flicker = 1.0 - jitter * 0.25 * self._rng.random()
 
         # ---- face scanlines ----------------------------------------------
         amp = (2.0 + lv * 12.0) * self.s
@@ -505,8 +523,6 @@ class PythiaFace(tk.Canvas):
         # ---- rolling sweep -----------------------------------------------
         y0 = ((self._frame * 2.2) % (self.h + 120)) - 60
         self.coords(self._sweep, 0, y0, self.w, y0 + 26 * self.s)
-
-        self._job = self.after(self.delay, self._tick)
 
 
 # --------------------------------------------------------------------------

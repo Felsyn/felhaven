@@ -59,8 +59,16 @@ Cache:       <app root>/artemis_cache/<area_id>/ — one directory per cached
              carries terrain_skipped and grid, so adding one does not bump it.
 
 Source:      Census cartographic boundary zip (GENZ2025 cb_2025_us_county_500k)
-             over HTTPS at ingest time only, via urllib. Road/water/elevation
-             sources belong to their layer modules.
+             over HTTPS at ingest time only, via tools/hermes.py.
+             Road/water/elevation sources belong to their layer modules.
+
+Bounds:      Every census download states a byte cap (download(cap=...)),
+             and every zip member is opened with read_member(), which refuses
+             a member whose declared size is over its cap BEFORE inflating
+             it: a small zip can unpack into a huge member. The caps are
+             1.5x the largest file in the 2025 vintage, measured 2026-10-01
+             across every county; a new vintage (a URL change) means
+             measuring again.
 
 Upstream:    kairos.py — the "artemis" worker polls fetch() every 600 s.
              panels/artemis_panel.py — runs ingest_area on its worker thread.
@@ -68,8 +76,9 @@ Downstream:  tools/hecate.py (and later poseidon/demeter) — import this
              module for projection, clipping and the FVEC writer. themis.py
              is read at fetch time for the fix, never at import time.
 
-Requires:    stdlib only — ctypes (Recycle Bin), io, json, logging, math, os,
-             shutil, struct, tempfile, threading, urllib.request, zipfile.
+Requires:    tools/hermes.py (the bounded network read), and ctypes (Recycle
+             Bin), io, json, logging, math, os, shutil, struct, tempfile,
+             threading, zipfile (stdlib).
 """
 
 import ctypes
@@ -83,8 +92,6 @@ import struct
 import sys
 import tempfile
 import threading
-import urllib.error
-import urllib.request
 import zipfile
 from typing import Any, Callable, TypedDict
 
@@ -96,7 +103,7 @@ if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import themis
-from tools import cadmus
+from tools import cadmus, hermes
 
 log = logging.getLogger("METIS.artemis")
 
@@ -129,8 +136,13 @@ CACHE_DIR = os.path.join(_APP_ROOT, "artemis_cache")
 _REFERENCE_URL = (
     "https://www2.census.gov/geo/tiger/GENZ2025/shp/cb_2025_us_county_500k.zip"
 )
-_HTTP_TIMEOUT = 120
+_HTTP_TIMEOUT = 120      # per socket operation; hermes.deadline_for() sets the whole
 _HTTP_RETRIES = 1        # a stalled Census download is usually transient
+# The county index (a fixed 2025 file). Measured 2026-10-01: the zip is
+# 11,758,981 B; its largest member, the .shp, 16,737,584 B (.dbf 1,181,193).
+# Caps are 1.5x, rounded up to a whole MiB.
+_REFERENCE_MAX_BYTES = 17 * 1024 * 1024
+_REFERENCE_MEMBER_MAX_BYTES = 24 * 1024 * 1024
 MANIFEST_SCHEMA = 2   # 2 added water + terrain layers, grid info, skip notes
 _LABEL_MAX = 24       # a name for an area, not a sentence — and it has to fit
                       # an overlay row beside a range and a bearing
@@ -888,7 +900,7 @@ def cached_areas() -> list[dict[str, Any]]:
 
 # ── Ingest downloads ──────────────────────────────────────────────────────────
 
-def download(url: str, what: str, *, allow_missing: bool = False) -> bytes:
+def download(url: str, what: str, *, cap: int, allow_missing: bool = False) -> bytes:
     """Fetch bytes for an ingest step, retrying once before giving up.
 
     ONE implementation for every layer on purpose. When each module carried
@@ -897,22 +909,43 @@ def download(url: str, what: str, *, allow_missing: bool = False) -> bytes:
     second copy is exactly how that class of bug comes back. Callers that can
     legitimately meet an absent file pass allow_missing and handle
     NotPublished; for everyone else a 404 is a failure like any other.
+
+    Read through hermes, so `cap` (the caller's measured limit) and a deadline
+    bound it. A file over its cap is not retried: it would only be refused
+    again, and the cause is worth its own slug.
     """
     last: "Exception | None" = None
     for attempt in range(_HTTP_RETRIES + 1):
         try:
-            with urllib.request.urlopen(url, timeout=_HTTP_TIMEOUT) as resp:
-                return bytes(resp.read())
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404 and allow_missing:
-                raise NotPublished(what) from exc
-            last = exc
+            reply = hermes.get(url, cap=cap, timeout=_HTTP_TIMEOUT)
+            if reply.status_code == 404 and allow_missing:
+                raise NotPublished(what)
+            reply.raise_for_status()
+            return reply.content
+        except NotPublished:
+            raise
+        except hermes.TooLarge as exc:
+            raise IngestError(f"too_large: {what} is over its {cap}-byte cap") from exc
         except Exception as exc:
             last = exc
         if attempt < _HTTP_RETRIES:
             log.warning("Artemis: retrying %s after %s",
                         what, type(last).__name__)
     raise IngestError(f"download_failed: {type(last).__name__} for {what}")
+
+
+def read_member(zf: zipfile.ZipFile, name: str, cap: int) -> bytes:
+    """One member of a downloaded zip, refused BEFORE it is inflated when its
+    declared size is over `cap`. A zip a few KB long can declare, and inflate
+    to, gigabytes; the download's own cap can't see that. ZipExtFile stops at
+    the declared size, so a member that lies about its size comes out cut
+    short and fails its CRC (BadZipFile) rather than growing past the check.
+    Raises KeyError if the member is absent, like zf.read()."""
+    info = zf.getinfo(name)
+    if info.file_size > cap:
+        raise IngestError(
+            f"too_large: {name} declares {info.file_size} bytes, over its {cap}-byte cap")
+    return zf.read(info)
 
 
 # ── County reference layer (spec §8) ──────────────────────────────────────────
@@ -928,22 +961,22 @@ def ensure_reference(cancel: threading.Event, progress: Progress) -> None:
     if os.path.exists(_reference_path()):
         return
     progress("reference: downloading county boundaries (~11 MB)")
-    raw = download(_REFERENCE_URL, "county boundaries")
+    raw = download(_REFERENCE_URL, "county boundaries", cap=_REFERENCE_MAX_BYTES)
     if cancel.is_set():
         raise IngestError("cancelled")
     progress("reference: indexing counties")
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            shp = zf.read("cb_2025_us_county_500k.shp")
-            dbf = zf.read("cb_2025_us_county_500k.dbf")
+            shp = read_member(zf, "cb_2025_us_county_500k.shp", _REFERENCE_MEMBER_MAX_BYTES)
+            dbf = read_member(zf, "cb_2025_us_county_500k.dbf", _REFERENCE_MEMBER_MAX_BYTES)
         pairs = cadmus.read_pair(shp, dbf)
     except (KeyError, ValueError, zipfile.BadZipFile) as exc:
         raise IngestError(f"bad_reference: {type(exc).__name__}") from exc
 
     counties: dict[str, dict[str, Any]] = {}
     for (_, parts), attrs in pairs:
-        xs = [x for part in parts for x, _ in part]
-        ys = [y for part in parts for _, y in part]
+        xs = [x for part in parts for x, _ in cadmus.points(part)]
+        ys = [y for part in parts for _, y in cadmus.points(part)]
         if not xs:
             continue
         counties[attrs["GEOID"]] = {

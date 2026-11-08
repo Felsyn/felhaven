@@ -142,6 +142,7 @@ _FEET_PER_M = 3.280839895
 _ERROR_TEXT = {
     "cancelled": "ingest cancelled",
     "download_failed": "download failed — check the connection and retry",
+    "too_large": "a download was far larger than expected — see the log",
     "bad_county": "a county file came down malformed — retry",
     "bad_reference": "the county index came down malformed — retry",
     "reference_missing": "county index missing — retry",
@@ -163,6 +164,7 @@ _SKIPPED_TEXT = {
     demeter.ERR_VAULT_LOCKED: "no terrain — vault sealed at ingest",
     demeter.ERR_NO_KEY: "no terrain — no OpenTopography key",
     "download_failed": "no terrain — elevation download failed",
+    "too_large": "no terrain — the elevation download was far larger than expected",
     "bad_grid": "no terrain — elevation data was malformed",
     "no_elevation": "no terrain — no elevation coverage here",
 }
@@ -243,6 +245,7 @@ class ArtemisPanel(Card):
         self._confirm_after_id: Optional[str] = None
         self._resize_after_id: Optional[str] = None
         self._confirm_armed = False
+        self._destroyed = False            # set first thing in destroy()
 
         # ── Status row ───────────────────────────────────────────────────────
         row = tk.Frame(self.body, bg=C["card"])
@@ -503,7 +506,17 @@ class ArtemisPanel(Card):
 
     def _on_configure(self, _event: "tk.Event[Any]") -> None:
         """Debounced: a drag-resize fires <Configure> continuously, and each
-        redraw rebuilds the raster at the new size."""
+        redraw rebuilds the raster at the new size.
+
+        Refuses once destroy() has begun. Tk can deliver a <Configure> to the
+        canvas WHILE super().destroy() tears the children down — after
+        destroy() has cancelled this timer, before tkinter deletes the
+        callback's Tcl command — so a re-arm here orphans a timer nothing can
+        cancel. winfo_exists() cannot tell: the panel still exists while its
+        children go. That was 36 `invalid command name` lines in the combined
+        test run, one per smoke test with a cached area loaded."""
+        if self._destroyed:
+            return
         if self._resize_after_id is not None:
             self.after_cancel(self._resize_after_id)
         self._resize_after_id = self.after(_RESIZE_MS, self._on_resize_settled)
@@ -1151,10 +1164,12 @@ class ArtemisPanel(Card):
             self._confirm_armed = True
             # Say up front if terrain will be skipped — ingest still succeeds
             # with roads and water, but the user should not be surprised by a
-            # flat map afterwards.
-            cost = "~10–30 MB DOWNLOAD?"
+            # flat map afterwards. Measured 2026-10-31 on the four cached
+            # areas: roads + water 2.9–14.4 MB (1–6 counties); the elevation
+            # grid 69–76 MB (three live readings, 2026-10-03 to 10-06).
+            cost = "~75–90 MB DOWNLOAD?"
             if not cerberus.is_unlocked():
-                cost = "~10–30 MB, NO TERRAIN (VAULT SEALED)?"
+                cost = "~3–15 MB, NO TERRAIN (VAULT SEALED)?"
             self._cache_btn.config(text=f"CONFIRM {cost}", fg=C["amber"])
             self._confirm_after_id = self.after(_CONFIRM_MS, self._disarm)
             return
@@ -1217,7 +1232,16 @@ class ArtemisPanel(Card):
         self._set_progress("INGESTING — cancelling…")
 
     def _drain(self) -> None:
-        """Bounded, self-terminating queue poll (Echo/Emanon precedent)."""
+        """Bounded, self-terminating queue poll (Echo/Emanon precedent).
+
+        Claims its own slot first, because _drain can be entered without its
+        timer having fired — the smoke tests call it directly. Re-arming, or
+        ending the run, over a still-pending id orphans it where destroy()
+        can never reach it (CONVENTIONS §6, HomePanel._arm_poll). Cancelling
+        an id that already fired is a harmless no-op."""
+        if self._drain_after_id is not None:
+            self.after_cancel(self._drain_after_id)
+            self._drain_after_id = None
         if not self.winfo_exists():
             return
         try:
@@ -1232,8 +1256,7 @@ class ArtemisPanel(Card):
             self._set_progress(f"INGESTING — {payload}")
             self._drain_after_id = self.after(_DRAIN_MS, self._drain)
             return
-        # done / error both end the run.
-        self._drain_after_id = None
+        # done / error both end the run; the slot was already cleared above.
         self._finish_ingest(kind, payload)
 
     def _finish_ingest(self, kind: str, payload: str) -> None:
@@ -1271,7 +1294,9 @@ class ArtemisPanel(Card):
     def destroy(self) -> None:
         """Cancel pending after() callbacks so nothing fires into a dead
         widget on app close (Echo precedent); the daemon thread, if any,
-        dies with the process."""
+        dies with the process. _destroyed goes up BEFORE the cancels, so an
+        event delivered mid-teardown cannot re-arm one (see _on_configure)."""
+        self._destroyed = True
         self._cancel.set()
         for pending in list(self._pending_after):
             self.after_cancel(pending)

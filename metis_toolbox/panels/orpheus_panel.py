@@ -58,6 +58,10 @@ from theme import C, FONTS, PhosphorScroll
 from tools import orpheus
 
 _NO_BIN_MSG = "ffmpeg not found — drop ffmpeg.exe in bin\\ or install to PATH"
+# bin\ffmpeg.exe is there, but aegis refused it (tools/aegis.py).
+_UNVERIFIED_MSG = ("ffmpeg in bin\\ doesn't match its recorded checksum, so "
+                   "Felhaven won't run it. Updated it on purpose? Record it: "
+                   "SETUP.md section 5.")
 
 # Human-readable status text per Orpheus error code — every code play_file()
 # and delete_file() can return (bad_name is shared by both).
@@ -139,6 +143,7 @@ class OrpheusPanel(tk.Frame):
 
         avail = orpheus.available()
         self._enabled = bool(avail["ffmpeg"])
+        self._no_bin_text = _UNVERIFIED_MSG if avail.get("problem") else _NO_BIN_MSG
         # None (not []) so the very first update() always renders — an empty
         # local_audio/ must still show the "no files" hint, not skip as a no-op.
         self._files: "list | None" = None
@@ -151,7 +156,7 @@ class OrpheusPanel(tk.Frame):
             self._scroll = _ScrollFrame(self)
             self._scroll.pack(fill="both", expand=True, pady=(4, 0))
         else:
-            tk.Label(self, text=_NO_BIN_MSG, font=FONTS["small_italic"],
+            tk.Label(self, text=self._no_bin_text, font=FONTS["small_italic"],
                      fg=C["text3"], bg=C["card"], anchor="w",
                      justify="left", wraplength=560).pack(anchor="w", pady=(10, 0))
 

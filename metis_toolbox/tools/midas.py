@@ -14,8 +14,8 @@ Contract:    Polled + brain tool. Exposes TOOL_DEFINITION, handle(), and
              fault, so fetch() returns it quietly (§12). A partial failure is
              embedded per-ticker instead.
 
-Source:      Finnhub REST /quote (US equities, free tier). Plain `requests` —
-             no SDK. Watchlist lives in config/midas_watchlist.json under the
+Source:      Finnhub REST /quote (US equities, free tier), read through
+             tools/hermes.py — no SDK. Watchlist lives in config/midas_watchlist.json under the
              app root (also the source for Plutus's ticker dropdown).
 
 Key:         The Finnhub key lives ONLY in the Cerberus Vault (the sole
@@ -23,8 +23,9 @@ Key:         The Finnhub key lives ONLY in the Cerberus Vault (the sole
              mirrors Callimachus's Brave-key pattern exactly. Read at
              call-time via cerberus.vault_get(), never cached to disk or
              across the module lifetime (the session can lock/unlock
-             repeatedly). No .env/env fallback: seed it once with
-             `python cerberus.py set <PIN> finnhub_api_key <key>`.
+             repeatedly). No .env/env fallback: set it in its row of the
+             CERBERUS tab, or with `python cerberus.py set finnhub_api_key`
+             (hidden prompts).
              Because vault_get() needs an unlocked session, a locked vault
              degrades a fetch to ERR_VAULT_LOCKED (distinct from a vault
              that's unlocked but simply has no key stored, ERR_NO_KEY) —
@@ -34,7 +35,7 @@ Upstream:    kairos.py (calls fetch), pythia.py (registration + dispatch)
 Downstream:  cerberus.py (vault_get for the key), panels/midas_panel.py
              (display surface)
 
-Requires:    requests (already in Felhaven stack)
+Requires:    tools/hermes.py (the bounded network read)
              os, sys, json, time, concurrent.futures (stdlib)
              Plus cerberus (app-root sibling) for the key.
 
@@ -54,8 +55,6 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-import requests
-
 # Midas is a tool module that reaches UP to an app-root sibling (cerberus.py),
 # not just a tools/ sibling. Normal operation (Pythia, tests, felhaven) already
 # runs with the app root on sys.path; only a bare `python tools/midas.py`
@@ -66,6 +65,7 @@ if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import cerberus
+from tools import hermes
 
 log = logging.getLogger("METIS.midas")
 
@@ -95,6 +95,7 @@ _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 _QUOTE_URL = "https://finnhub.io/api/v1/quote"
 _HTTP_TIMEOUT = 6
+_MAX_BYTES = 64 * 1024   # measured 2026-10-01: a quote is 93 B (57 with no data); hermes' floor
 
 
 def _finnhub_key() -> str:
@@ -143,9 +144,10 @@ def _fetch_one(symbol: str) -> dict[str, Any]:
         return {"symbol": symbol, "error": ERR_NO_KEY}
 
     try:
-        resp = requests.get(
+        resp = hermes.get(
             _QUOTE_URL,
             params={"symbol": symbol, "token": key},
+            cap=_MAX_BYTES,
             timeout=_HTTP_TIMEOUT,
         )
         resp.raise_for_status()
@@ -173,12 +175,13 @@ def _fetch_one(symbol: str) -> dict[str, Any]:
         # Includes 429 rate limit (raise_for_status) — transient, falls back to
         # stale cache in query_all() and retries next tick.
         #
-        # NEVER log the raw exception (§2): requests puts the full request URL
-        # in its message, and that URL carries `?...&token=<finnhub key>` — so
-        # `{e}` would write the Vault-protected key straight into logs/*.log
-        # (which Emanon renders on screen). Log the class name and, when the
-        # error carries an HTTP response, its status code — never the message.
-        status = getattr(getattr(e, "response", None), "status_code", None)
+        # NEVER log the raw exception (§2): the request URL carries
+        # `?...&token=<finnhub key>`, and an exception's message is the one
+        # place a URL can ride along into logs/*.log (which Emanon renders on
+        # screen). hermes keeps URLs out of its messages, but the rule doesn't
+        # lean on that: log the class name and, for an HTTP error, its status
+        # code — never the message.
+        status = getattr(e, "status", None)
         detail = type(e).__name__ + (f" {status}" if status else "")
         log.warning(f"Midas: failed to fetch {symbol}: {detail}")
         return {"symbol": symbol, "error": ERR_FETCH_FAILED}
@@ -250,7 +253,9 @@ TOOL_DEFINITION = {
         "description": (
             "Returns current price and daily percentage change for the Felhaven watchlist. "
             "Call this when the user asks about stocks, market prices, "
-            "portfolio performance, or any ticker by name."
+            "or any ticker by name. It lists watched symbols only: it does not "
+            "know what the user owns, so it cannot answer questions about "
+            "their holdings or portfolio."
         ),
         "parameters": {
             "type": "object",

@@ -29,6 +29,7 @@ Two deliberate choices:
 """
 
 import array
+import contextlib
 import os
 import shutil
 import sys
@@ -43,7 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import tkinter as tk
 
 import theme
-from tools import artemis
+from tools import artemis, hermes
 from tools import demeter
 from tools import hecate
 from tools import poseidon
@@ -55,10 +56,16 @@ def _blocked(*args, **kwargs):
     raise AssertionError("a render path performed network I/O")
 
 
+@contextlib.contextmanager
 def _no_network():
-    """Both seams urllib can reach the network through."""
-    return (mock.patch("socket.socket", _blocked),
-            mock.patch("socket.create_connection", _blocked))
+    """Every seam Felhaven can reach the network through: hermes.get, which
+    every runtime reader uses, and below it the socket calls. hermes is
+    blocked directly because a blocked socket under it would surface as a
+    translated Offline error, which a reader might quietly swallow."""
+    with mock.patch("tools.hermes.get", _blocked), \
+            mock.patch("socket.socket", _blocked), \
+            mock.patch("socket.create_connection", _blocked):
+        yield
 
 
 class TestArtemisOffline(unittest.TestCase):
@@ -125,16 +132,16 @@ class TestArtemisOffline(unittest.TestCase):
 
     def test_the_block_is_real(self):
         """If this ever passes silently, every other test here is theatre."""
-        block_socket, block_connect = _no_network()
-        with block_socket, block_connect:
+        with _no_network():
             with self.assertRaises(AssertionError):
                 urllib.request.urlopen("http://example.invalid", timeout=1)
+            with self.assertRaises(AssertionError):
+                hermes.get("https://example.invalid/", cap=1, timeout=1)
 
     # ── Tools-side reads ────────────────────────────────────────────────────
 
     def test_every_layer_load_is_offline(self):
-        block_socket, block_connect = _no_network()
-        with block_socket, block_connect:
+        with _no_network():
             self.assertEqual(len(hecate.load(self.area)), 1)
             self.assertEqual(len(poseidon.load(self.area)), 2)
             info, cells = demeter.load(self.area)
@@ -147,8 +154,7 @@ class TestArtemisOffline(unittest.TestCase):
                 demeter.sample(info, cells, 0.0, 0.0))
 
     def test_index_and_hit_test_are_offline(self):
-        block_socket, block_connect = _no_network()
-        with block_socket, block_connect:
+        with _no_network():
             layers = {artemis.LAYER_ROADS: hecate.load(self.area),
                       artemis.LAYER_WATER: poseidon.load(self.area)}
             index = artemis.ensure_index(self.area, layers)
@@ -160,15 +166,13 @@ class TestArtemisOffline(unittest.TestCase):
         """`rm -rf derived/` is supported, and rebuilding must not reach out."""
         shutil.rmtree(os.path.join(artemis.area_dir(self.area),
                                    demeter._DERIVED_DIR))
-        block_socket, block_connect = _no_network()
-        with block_socket, block_connect:
+        with _no_network():
             self.assertTrue(demeter.raster(self.area).startswith(b"P6"))
             layers = {artemis.LAYER_ROADS: hecate.load(self.area)}
             self.assertTrue(artemis.ensure_index(self.area, layers))
 
     def test_missing_area_raises_rather_than_fetching(self):
-        block_socket, block_connect = _no_network()
-        with block_socket, block_connect:
+        with _no_network():
             for loader in (hecate.load, poseidon.load, demeter.load,
                            demeter.raster):
                 with self.subTest(loader=loader.__name__):
@@ -180,8 +184,7 @@ class TestArtemisOffline(unittest.TestCase):
     def test_panel_renders_a_cached_area_offline(self):
         from panels.artemis_panel import ArtemisPanel
 
-        block_socket, block_connect = _no_network()
-        with block_socket, block_connect:
+        with _no_network():
             panel = ArtemisPanel(self.root)
             try:
                 panel.pack(fill="both", expand=True)
@@ -217,8 +220,7 @@ class TestArtemisOffline(unittest.TestCase):
         none of them may reach for the network."""
         from panels.artemis_panel import ArtemisPanel
 
-        block_socket, block_connect = _no_network()
-        with block_socket, block_connect:
+        with _no_network():
             panel = ArtemisPanel(self.root)
             try:
                 panel.pack(fill="both", expand=True)
@@ -243,8 +245,7 @@ class TestArtemisOffline(unittest.TestCase):
         address geocoder needs one, and it is last in the order."""
         from panels.artemis_panel import ArtemisPanel
 
-        block_socket, block_connect = _no_network()
-        with block_socket, block_connect:
+        with _no_network():
             panel = ArtemisPanel(self.root)
             try:
                 panel.pack(fill="both", expand=True)

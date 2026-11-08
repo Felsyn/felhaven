@@ -13,6 +13,8 @@ Contract:    Hybrid flavor (CONVENTIONS §2, the Morpheus/Metis shape):
                                 the normal §2 norm, no deviation.
                - set_preset() : a UI-driven mutation, called synchronously
                                 from the panel on click (not a Kairos worker).
+                                Never raises: a failed snapshot is None, as
+                                Kairos delivers for a failed fetch().
              handle() + TOOL_DEFINITION expose get_sky_tonight — a distilled
              "what's notable overhead right now" digest (visible planets and the
              brightest visible stars), NOT the full ~1000-star snapshot fetch()
@@ -45,6 +47,10 @@ V0.02:       Audited 2026-07-25 — contract honest (fetch() RAISES on an empty
              and hypatia_panel (the zeno.format_number precedent), retiring two
              duplicate copies. set_preset() inherits _build_snapshot's empty-
              catalog raise — a broken-install edge, flagged not fixed.
+
+2026-10-31:  set_preset() no longer inherits that raise. A failed snapshot is
+             logged and returns None, so a preset click on a broken install
+             reads "stale" instead of raising out of the Tk callback.
 """
 
 import json
@@ -190,17 +196,25 @@ def _lst_deg(lon: float, unix: float) -> float:
 
 # ── Mutation contract ─────────────────────────────────────────────────────────
 
-def set_preset(name: str) -> dict[str, Any]:
+def set_preset(name: str) -> dict[str, Any] | None:
     """
     Switch the active latitude preset and return a fresh snapshot (same shape
     as fetch()) so the panel can redraw immediately instead of waiting for the
     next Kairos tick. Unknown name -> no-op, returns a snapshot at the current
     preset.
+
+    Never raises. A click is not a Kairos worker, so nothing would catch
+    _build_snapshot's empty-catalog raise. A failure is logged and returns
+    None, which the panel shows as stale, as it does a failed fetch().
     """
     global _active_preset
     if name in PRESETS:
         _active_preset = name
-    return _build_snapshot(time.time())
+    try:
+        return _build_snapshot(time.time())
+    except Exception as e:
+        log.warning(f"Hypatia: preset snapshot failed: {e}")
+        return None
 
 
 # ── Contract ──────────────────────────────────────────────────────────────────

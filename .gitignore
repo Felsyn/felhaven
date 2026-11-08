@@ -52,9 +52,11 @@ pheme_sections.json
 # a fresh clone has none and the in-app setup triggers instead of inheriting the
 # author's PINs. cerberus_manifest.json (the config-list template) STAYS
 # committed. The vault holds ciphertext; the ledger holds key/file names + ts.
+# A retired vault (cerberus_vault.v1-<stamp>.old) holds old ciphertext too.
 sphynx_data.json
 cerberus_data.json
 cerberus_vault.json
+cerberus_vault*.old
 cerberus_ledger.json
 
 # Herodotus — the Markdown knowledge archive. Personal state, not source.
@@ -72,6 +74,11 @@ kokoro_models/
 # Echo — generated .opus audio files (text → audio). Runtime output, not source;
 # same bucket as morpheus_watch_later/. No retention cap by design.
 local_audio/
+
+# Clio — episode scripts, captures, voice cache, builds and finished videos.
+# Runtime output and personal drafts, not source; `git add -f` a finished
+# episode script to keep it.
+videos/
 
 # Personal design / idea notes (kept local, not source of record)
 specs/felhaven_design_v01.md

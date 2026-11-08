@@ -1,7 +1,7 @@
 # Herodotus
 
 Manage a local archive of Markdown documents. The toolbox's first mutating brain
-tool; deliberately has no delete.
+tool; deliberately has no delete. Writes and edits wait for the user's OK.
 
 - **UI:** none — Pythia-only
 - **Brain tools:** `list_documents`, `search_documents`, `read_document`,

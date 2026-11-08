@@ -25,6 +25,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -197,8 +198,11 @@ class TestEmanonPanelTeardown(_TeardownCase):
 
 
 class TestArtemisPanelTeardown(_TeardownCase):
-    """Three independent timers: the resize debounce, the CACHE AREA confirm
-    window, and the ingest drain chain."""
+    """Independent timers: the resize and pan debounces, the CACHE AREA
+    confirm window, and the ingest drain chain. Two cases go past a plain
+    arm-then-destroy — an event Tk delivers in the middle of destroy(), and a
+    chain entered without its timer having fired — because each orphaned
+    timers in the combined run that the plain cases never saw."""
 
     def setUp(self):
         self._dir = tempfile.mkdtemp()
@@ -223,6 +227,33 @@ class TestArtemisPanelTeardown(_TeardownCase):
             self.assertIsNotNone(panel._resize_after_id)
 
         self.assertNoTimersSurvive(self._build, arm)
+
+    def test_a_configure_during_destroy_cannot_rearm_the_debounce(self):
+        """destroy() cancels, then super().destroy() tears the children down —
+        and Tk can deliver a <Configure> to the canvas in between. In the
+        combined run it arrived while an overlay label was being destroyed:
+        36 orphaned debounces, one per smoke test with a cached area loaded.
+        The panel still exists at that moment, so winfo_exists() cannot
+        refuse the re-arm; only a flag set at the top of destroy() can.
+
+        Forced here with a <Destroy> hook on that same overlay label, which
+        generates a real <Configure> that Tk delivers on the spot. The natural
+        trigger depends on which events Windows happens to have queued; this
+        does not. `fired` proves the hook ran, so a hook that stops firing
+        fails instead of passing vacuously."""
+        fired = []
+
+        def arm(panel):
+            def late_configure(_event):
+                fired.append(True)
+                panel._canvas.event_generate("<Configure>")
+
+            panel._areas_header.bind("<Destroy>", late_configure, add="+")
+            panel._on_configure(None)        # the ordinary, cancellable arm
+            self.assertIsNotNone(panel._resize_after_id)
+
+        self.assertNoTimersSurvive(self._build, arm)
+        self.assertTrue(fired, "the <Destroy> hook never ran — case not exercised")
 
     def test_pan_debounce_is_cancelled(self):
         def arm(panel):
@@ -275,6 +306,40 @@ class TestArtemisPanelTeardown(_TeardownCase):
                 self.assertNoTimersSurvive(self._build, arm)
         finally:
             release.set()
+
+    def test_direct_drain_calls_leave_exactly_one_pending_drain(self):
+        """The smoke tests call _drain() directly, so it can be entered while
+        its own timer is still pending. Re-arming over that id — or ending
+        the run by just setting it to None — orphans it where destroy() cannot
+        reach; one did exactly that in the combined run. Both branches: a run
+        still in flight keeps ONE drain pending, and a run that has ended
+        leaves none, before destroy() has anything to cancel."""
+        release = threading.Event()
+
+        def fake_ingest(lat, lon, cancel, progress):
+            release.wait(5)
+            raise RuntimeError("the worker fails once released")
+
+        baseline = self._pending()
+        panel = self._build()
+        panel.pack()
+        try:
+            with mock.patch("tools.artemis.ingest_area", side_effect=fake_ingest):
+                panel.update(self._status())
+                panel._start_ingest(39.2806, -80.3440)
+                for _ in range(3):
+                    panel._drain()                 # queue empty: re-arms
+                self.assertEqual(len(self._pending() - baseline), 1)
+                release.set()
+                deadline = time.time() + 5.0
+                while panel._q.empty() and time.time() < deadline:
+                    time.sleep(0.01)
+                panel._drain()                     # the error ends the run
+            self.assertFalse(panel._ingesting)
+            self.assertEqual(self._pending() - baseline, set())
+        finally:
+            release.set()
+            panel.destroy()
 
 
 class TestMorpheusPanelTeardown(_TeardownCase):

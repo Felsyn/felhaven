@@ -9,6 +9,7 @@ No exception raised == pass.
     python -X utf8 -m unittest tests.test_themis_panel_smoke
 """
 
+import ast
 import os
 import sys
 import tempfile
@@ -20,7 +21,26 @@ import tkinter as tk
 
 import theme
 import themis
+from kairos import Kairos
 from panels.themis_panel import ThemisPanel
+
+_APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _workers_reading_themis():
+    """Kairos workers whose module imports themis: each computes from the
+    Settings, so a Save has to refetch it or the edit sits unseen for a whole
+    interval. Derived, not listed, so a new worker can't be forgotten (helios
+    joined 2026-09-28)."""
+    names = set()
+    for name, _interval, dotted in Kairos.WORKERS:
+        module_path = dotted.rpartition(".")[0].replace(".", os.sep) + ".py"
+        with open(os.path.join(_APP_ROOT, module_path), encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        if any(isinstance(node, ast.Import) and any(a.name == "themis" for a in node.names)
+               for node in tree.body):
+            names.add(name)
+    return names
 
 
 class TestThemisPanelSmoke(unittest.TestCase):
@@ -65,7 +85,8 @@ class TestThemisPanelSmoke(unittest.TestCase):
         self.assertEqual(s["temperature_unit"], "C")
         self.assertTrue(s["clock_24h"])
         self.assertEqual(s["weather_location"], "Sydney")
-        self.assertEqual(calls, [("aura", "hypatia", "horai", "artemis")])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(set(calls[0]), _workers_reading_themis())
 
     def test_non_numeric_coord_shows_error_and_no_write(self):
         panel = ThemisPanel(self.root)

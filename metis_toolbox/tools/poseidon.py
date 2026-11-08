@@ -38,7 +38,7 @@ Tiers:       TIGER hydrography carries no stream hierarchy — in a sampled
              so a later restyle can dim marshes without a re-ingest.
 
 Source:      TIGER/Line 2025 per-county zips, public domain, over HTTPS via
-             urllib at ingest time only:
+             artemis.download (tools/hermes.py) at ingest time only:
                .../TIGER2025/LINEARWATER/tl_2025_<GEOID>_linearwater.zip
                .../TIGER2025/AREAWATER/tl_2025_<GEOID>_areawater.zip
              Counties come from artemis.counties_for_bbox. TIGER hydrography
@@ -49,8 +49,8 @@ Upstream:    tools/artemis.py — ingest_area orchestrates ingest();
 Downstream:  tools/cadmus.py (byte decoding), tools/artemis.py (geometry and
              the FVEC writer).
 
-Requires:    stdlib only — io, logging, os, threading, urllib.request,
-             zipfile.
+Requires:    stdlib only — io, logging, os, threading, zipfile; the
+             downloads go through artemis.download.
 """
 
 import io
@@ -74,6 +74,14 @@ _LINEAR_URL = ("https://www2.census.gov/geo/tiger/TIGER2025/LINEARWATER/"
                "tl_2025_{geoid}_linearwater.zip")
 _AREA_URL = ("https://www2.census.gov/geo/tiger/TIGER2025/AREAWATER/"
              "tl_2025_{geoid}_areawater.zip")
+# Caps: 1.5x the largest file in the 2025 vintage, rounded up to a whole MiB.
+# Measured 2026-10-01 across every county. LINEARWATER: largest zip 24,438,340 B
+# (county 04005), its .shp 37,573,460 B. AREAWATER: largest zip 9,821,219 B
+# (county 22075), its .shp 15,759,560 B. A new vintage means measuring again.
+_LINEAR_MAX_BYTES = 35 * 1024 * 1024
+_LINEAR_MEMBER_MAX_BYTES = 54 * 1024 * 1024
+_AREA_MAX_BYTES = 15 * 1024 * 1024
+_AREA_MEMBER_MAX_BYTES = 23 * 1024 * 1024
 _VEC_NAME = artemis.VEC_NAMES[artemis.LAYER_WATER]
 
 # Linear hydrography. See Tiers: above — the bool is "a name can promote it".
@@ -123,18 +131,20 @@ def _county_features(geoid: str, center: tuple[float, float],
     progress(f"{prefix}: county {geoid} streams")
     features = normalize_linear(
         _read_pair(_LINEAR_URL.format(geoid=geoid),
-                   f"tl_2025_{geoid}_linearwater", geoid, required=True),
+                   f"tl_2025_{geoid}_linearwater", geoid, required=True,
+                   cap=_LINEAR_MAX_BYTES, member_cap=_LINEAR_MEMBER_MAX_BYTES),
         center)
     progress(f"{prefix}: county {geoid} lakes")
     features += normalize_area(
         _read_pair(_AREA_URL.format(geoid=geoid),
-                   f"tl_2025_{geoid}_areawater", geoid, required=False),
+                   f"tl_2025_{geoid}_areawater", geoid, required=False,
+                   cap=_AREA_MAX_BYTES, member_cap=_AREA_MEMBER_MAX_BYTES),
         center)
     return features
 
 
-def _read_pair(url: str, stem: str, geoid: str,
-               required: bool) -> list[tuple[cadmus.ShapeRecord, dict[str, str]]]:
+def _read_pair(url: str, stem: str, geoid: str, required: bool, *, cap: int,
+               member_cap: int) -> list[tuple[cadmus.ShapeRecord, dict[str, str]]]:
     """Download one county zip and decode its .shp/.dbf pair.
 
     Only the optional AREAWATER fetch opts into allow_missing, so only it can
@@ -143,14 +153,14 @@ def _read_pair(url: str, stem: str, geoid: str,
     """
     try:
         raw = artemis.download(url, f"county {geoid} {stem.split('_')[-1]}",
-                               allow_missing=not required)
+                               cap=cap, allow_missing=not required)
     except artemis.NotPublished:
         log.info("Poseidon: county %s publishes no %s", geoid, stem)
         return []
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            shp = zf.read(stem + ".shp")
-            dbf = zf.read(stem + ".dbf")
+            shp = artemis.read_member(zf, stem + ".shp", member_cap)
+            dbf = artemis.read_member(zf, stem + ".dbf", member_cap)
         return cadmus.read_pair(shp, dbf)
     except (KeyError, ValueError, zipfile.BadZipFile) as exc:
         raise artemis.IngestError(
@@ -174,7 +184,8 @@ def normalize_linear(pairs: list[tuple[cadmus.ShapeRecord, dict[str, str]]],
         else:
             tier = 2
         for part in parts:
-            local = [artemis.project(y, x, lat0, lon0) for x, y in part]
+            local = [artemis.project(y, x, lat0, lon0)
+                     for x, y in cadmus.points(part)]
             for run in artemis.clip_polyline(local):
                 features.append(artemis.Feature(
                     kind="water_line", name=name, tier=tier, flags=0,
@@ -197,7 +208,8 @@ def normalize_area(pairs: list[tuple[cadmus.ShapeRecord, dict[str, str]]],
             tier = 2                      # unknown class: drawn, not guessed at
         name = attrs.get("FULLNAME", "")
         for part in parts:
-            local = [artemis.project(y, x, lat0, lon0) for x, y in part]
+            local = [artemis.project(y, x, lat0, lon0)
+                     for x, y in cadmus.points(part)]
             ring = artemis.clip_polygon(local)
             if ring:
                 features.append(artemis.Feature(

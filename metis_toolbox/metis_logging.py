@@ -15,6 +15,11 @@ Format:      Fixed ` | `-delimited fields so Emanon can parse with a plain
 
              2026-05-28 14:32:01 | INFO    | METIS.aether | fetch ok (0.4s)
 
+             One record, one entry: a message is written on one line (its
+             line breaks escaped), and a traceback's lines lose the
+             delimiter, so text from a server can't start a line Emanon
+             would read as an entry of its own (CONVENTIONS §12).
+
 Idempotent:  Calling setup_logging() more than once will NOT attach
              duplicate handlers — guarded by a flag on the root logger.
              Without this guard, two callers double every log line.
@@ -58,6 +63,30 @@ _BACKUP_COUNT = 3
 # Sentinel attribute we stamp on the root logger so we only configure once.
 _GUARD_ATTR = "_metis_logging_configured"
 
+# ── One record, one entry ─────────────────────────────────────────────────────
+# Emanon opens the log in text mode and splits it with str.splitlines(), which
+# ends a line at any of these ten characters, not only "\n". A message carrying
+# one (a server's reply quoted in an error, a name read from a downloaded file)
+# would start a second line, and Emanon reads any line with three delimiters as
+# a real entry: level, logger and all. So a message is written on one line, each
+# of these as its escape (\r, \x85, \u2028...), and the lines after a record's
+# first (a traceback, a stack) keep their breaks but lose the delimiter. Only a
+# record's first line can be read as an entry (CONVENTIONS §12, 2026-10-05).
+_LINE_BREAKS = "\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+_ONE_LINE = str.maketrans({c: ascii(c)[1:-1] for c in _LINE_BREAKS})
+_CONTINUATION_DELIM = " ¦ "
+
+
+class _OneEntryFormatter(logging.Formatter):
+    """The shared format, with every record's entry held to its first line."""
+
+    def formatMessage(self, record: logging.LogRecord) -> str:
+        return super().formatMessage(record).translate(_ONE_LINE)
+
+    def format(self, record: logging.LogRecord) -> str:
+        head, sep, rest = super().format(record).partition("\n")
+        return head + sep + rest.replace(_DELIM, _CONTINUATION_DELIM)
+
 
 def setup_logging(program: str, level: int = logging.INFO) -> Path:
     """
@@ -90,7 +119,7 @@ def setup_logging(program: str, level: int = logging.INFO) -> Path:
         # still runs — a logging failure must never take down the dashboard.
         print(f"[metis_logging] could not create {LOG_DIR}: {e}", file=sys.stderr)
 
-    formatter = logging.Formatter(_LOG_FORMAT, datefmt=_DATE_FORMAT)
+    formatter = _OneEntryFormatter(_LOG_FORMAT, datefmt=_DATE_FORMAT)
 
     handlers: list[logging.Handler] = []
 

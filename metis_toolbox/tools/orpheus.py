@@ -83,6 +83,16 @@ probing:     pulling in a second binary for one number is a bad trade.
              files are write-once (Echo never overwrites in place), so a file
              is probed exactly once, not on every 2 s Kairos tick.
 
+ffmpeg       Every path handed to ffmpeg must be absolute, or nothing runs
+paths:       (_probe_duration and _decode refuse it). ffmpeg reads an
+             argument starting with "-" as an option and one with "name:"
+             before its first slash as a protocol (concat:, http:); an
+             absolute path can be neither, since ffmpeg reads a leading drive
+             letter as a plain file. Paths here are local_audio/ (anchored to
+             this file) plus a bare name, so absolute by construction; the
+             check makes the day that changes loud (CONVENTIONS §12,
+             2026-10-03).
+
 Source:      One external binary, zero new pip packages — ffmpeg, already a
              prerequisite for Echo. Resolution follows the Morpheus/Echo
              precedent: <app root>/bin/ffmpeg.exe wins over PATH.
@@ -121,7 +131,6 @@ import ctypes
 import logging
 import os
 import re
-import shutil
 import subprocess
 import sys
 from typing import Any, Optional
@@ -136,12 +145,12 @@ if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import harmonia
+from tools import aegis
 
 log = logging.getLogger("METIS.orpheus")
 
 # ── Paths (anchored to __file__, cwd-independent — morpheus precedent) ─────────
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_BIN_DIR = os.path.join(_APP_ROOT, "bin")
 _LOCAL_AUDIO_DIR = os.path.join(_APP_ROOT, "local_audio")
 
 # Hide the console window ffmpeg would flash on Windows. getattr so importing
@@ -165,19 +174,19 @@ _PROBE_TIMEOUT = 10.0     # s — reading metadata only, never a full decode
 _duration_cache: dict[str, float] = {}   # filename -> seconds; write-once files
 
 
-# ── Binary resolution (morpheus/echo precedent: bin/ wins over PATH) ───────────
+# ── Binary resolution (tools/aegis.py: a verified bin/ copy, else PATH) ───────
 
 def _resolve(name: str) -> Optional[str]:
-    """bin/<name>.exe wins over PATH so the portable copy beats a stale install."""
-    local = os.path.join(_BIN_DIR, f"{name}.exe")
-    if os.path.isfile(local):
-        return local
-    return shutil.which(name)
+    """The program to run, vouched for by tools/aegis.py: bin/<name>.exe if it
+    matches its manifest entry, else a copy on PATH (unverified, warned once).
+    A bin/ copy that doesn't match is refused (None), never swapped for PATH's."""
+    return aegis.resolve(name).path
 
 
 def available() -> dict[str, Optional[str]]:
-    """Report whether ffmpeg is resolvable. {"ffmpeg": path_or_None}."""
-    return {"ffmpeg": _resolve("ffmpeg")}
+    """Report whether ffmpeg is resolvable. {"ffmpeg": path_or_None,
+    "problem": None, or aegis's slug when bin/ffmpeg.exe was refused}."""
+    return {"ffmpeg": _resolve("ffmpeg"), "problem": aegis.resolve("ffmpeg").problem}
 
 
 # ── Recycle Bin (SHFileOperationW — stdlib ctypes, no new dependency) ──────────
@@ -277,8 +286,11 @@ def list_files() -> list[str]:
 def _probe_duration(ffmpeg: str, path: str) -> Optional[float]:
     """Read `path`'s duration (seconds) from ffmpeg's own metadata banner —
     no ffprobe dependency, no decode (see module "Duration probing" section).
-    None on any failure (unreadable file, no Duration line, timeout) —
-    logged, never raised."""
+    None on any failure (unreadable file, no Duration line, timeout, a path
+    that isn't absolute — see "ffmpeg paths") — logged, never raised."""
+    if not os.path.isabs(path):
+        log.warning("Orpheus: refused to hand ffmpeg a path that isn't absolute: %r", path)
+        return None
     try:
         proc = subprocess.run([ffmpeg, "-hide_banner", "-i", path],
                               capture_output=True, timeout=_PROBE_TIMEOUT,
@@ -317,7 +329,11 @@ def _file_rows() -> list[dict[str, Any]]:
 def _decode(ffmpeg: str, path: str) -> Optional[np.ndarray]:
     """Whole-file decode via ffmpeg to interleaved float32 PCM, reshaped to
     (frames, channels) for sounddevice. None on any failure (bad file, ffmpeg
-    crash, timeout) — logged, never raised."""
+    crash, timeout, a path that isn't absolute — see "ffmpeg paths") — logged,
+    never raised."""
+    if not os.path.isabs(path):
+        log.error("Orpheus: refused to hand ffmpeg a path that isn't absolute: %r", path)
+        return None
     cmd = [ffmpeg, "-loglevel", "error", "-i", path, "-f", "f32le",
            "-ar", str(_SAMPLE_RATE), "-ac", str(_CHANNELS), "-"]
     try:

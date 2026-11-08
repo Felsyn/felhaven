@@ -399,5 +399,42 @@ class TestPlayFromStart(_ControlCase):
                         cmds.index(self._loadfile()))
 
 
+class TestPlayOnlyLoadsWebUrls(_ControlCase):
+    """mpv's loadfile also opens a local path and its own edl://, lavfi:// and
+    av:// sources. play() is the program boundary, so it takes http(s) only,
+    whatever its caller checked (the playlists file is hand-editable)."""
+
+    def setUp(self):
+        super().setUp()
+        self.ensure = mock.patch("tools.morpheus._ensure_mpv", return_value=True).start()
+        mock.patch("tools.morpheus._recycle_if_log_is_huge").start()
+        self._saved_pending = morpheus._pending_load
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        morpheus._pending_load = self._saved_pending
+
+    def test_anything_else_never_reaches_mpv(self):
+        for url in (r"C:\Users\x\secret.txt", "file:///C:/x.mp3", "edl://x.mkv",
+                    "lavfi://sine", "av://dshow:video=cam", "-x", "HTTPS://x.com",
+                    " https://x.com", "", None):
+            with self.subTest(url=url):
+                self.ipc.reset_mock()
+                self.ensure.reset_mock()
+                morpheus._last_url = "https://before.example"
+                morpheus.play(url)              # type: ignore[arg-type]
+                self.ensure.assert_not_called()
+                self.ipc.assert_not_called()
+                self.assertEqual(morpheus._last_url, "https://before.example")
+
+    def test_http_and_https_play(self):
+        for url in ("https://www.youtube.com/watch?v=abcdefghijk",
+                    "http://example.com/stream"):
+            with self.subTest(url=url):
+                self.ipc.reset_mock()
+                morpheus.play(url)
+                self.assertIn(["loadfile", url, "replace"], self._commands())
+
+
 if __name__ == "__main__":
     unittest.main()

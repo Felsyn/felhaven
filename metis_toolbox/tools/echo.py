@@ -75,7 +75,6 @@ V0.02:       Audited 2026-07-25 — never-raise contract verified, error slugs
 import logging
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -92,12 +91,12 @@ if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import calliope
+from tools import aegis
 
 log = logging.getLogger("METIS.echo")
 
 # ── Paths (anchored to __file__, cwd-independent — morpheus precedent) ─────────
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_BIN_DIR = os.path.join(_APP_ROOT, "bin")
 _LOCAL_AUDIO_DIR = os.path.join(_APP_ROOT, "local_audio")
 
 # Hide the console window ffmpeg would flash on Windows. getattr so importing on
@@ -168,19 +167,19 @@ def _strip_markdown(text: str) -> str:
     return _WS.sub(" ", text).strip()      # collapse whitespace
 
 
-# ── Binary resolution (morpheus precedent: bin/ wins over PATH) ────────────────
+# ── Binary resolution (tools/aegis.py: a verified bin/ copy, else PATH) ───────
 def _resolve(name: str) -> Optional[str]:
-    """bin/<name>.exe wins over PATH so the portable copy beats a stale install."""
-    local = os.path.join(_BIN_DIR, f"{name}.exe")
-    if os.path.isfile(local):
-        return local
-    return shutil.which(name)
+    """The program to run, vouched for by tools/aegis.py: bin/<name>.exe if it
+    matches its manifest entry, else a copy on PATH (unverified, warned once).
+    A bin/ copy that doesn't match is refused (None), never swapped for PATH's."""
+    return aegis.resolve(name).path
 
 
 def available() -> dict[str, Optional[str]]:
     """Report whether ffmpeg is resolvable. The panel reads this once at build
-    time; None means the convert UI is disabled. {"ffmpeg": path_or_None}."""
-    return {"ffmpeg": _resolve("ffmpeg")}
+    time; None means the convert UI is disabled. {"ffmpeg": path_or_None,
+    "problem": None, or aegis's slug when bin/ffmpeg.exe was refused}."""
+    return {"ffmpeg": _resolve("ffmpeg"), "problem": aegis.resolve("ffmpeg").problem}
 
 
 # ── Chunking + synthesis (reuses Calliope's shared seam) ──────────────────────
@@ -201,7 +200,18 @@ def _encode_opus(ffmpeg: str, wav_path: str, out_path: str) -> dict[str, str]:
     """Encode wav_path -> out_path (.opus) via ffmpeg/libopus. A missing-libopus
     build (or any encode failure) surfaces as a nonzero exit -> {"error":
     "ffmpeg_encode_failed"}, and any partial output is removed so no half-written
-    file survives."""
+    file survives.
+
+    Both paths must be absolute, or nothing runs (same error). ffmpeg reads an
+    argument starting with "-" as an option and one with "name:" before its
+    first slash as a protocol (concat:, http:); an absolute path can be
+    neither, since ffmpeg reads a leading drive letter as a plain file. Both
+    are absolute by construction (local_audio/ is anchored to this file, and
+    mkstemp returns an absolute path), so this only makes the day that changes
+    loud (CONVENTIONS §12, 2026-10-03)."""
+    if not (os.path.isabs(wav_path) and os.path.isabs(out_path)):
+        log.error("Echo: refused to hand ffmpeg a path that isn't absolute")
+        return {"error": "ffmpeg_encode_failed"}
     cmd = [ffmpeg, "-y", "-loglevel", "error", "-f", "wav", "-i", wav_path,
            "-c:a", "libopus", "-b:a", _OPUS_BITRATE, out_path]
     proc = subprocess.run(cmd, capture_output=True, creationflags=_NO_WINDOW)

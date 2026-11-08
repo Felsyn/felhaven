@@ -104,6 +104,18 @@ class TestDegradedPaths(unittest.TestCase):
         finally:
             hypatia._STARS = original
 
+    def test_set_preset_on_an_empty_catalog_is_none_and_logged(self):
+        # A click is not a Kairos worker, so nothing would catch fetch()'s
+        # raise. None is what Kairos hands the panel when fetch() fails.
+        original = hypatia._STARS
+        hypatia._STARS = {}
+        try:
+            with self.assertLogs("METIS.hypatia", "WARNING"):
+                self.assertIsNone(hypatia.set_preset("equator"))
+        finally:
+            hypatia._STARS = original
+            hypatia._active_preset = "current"
+
     def test_missing_stars_file_returns_empty_dict(self):
         self.assertEqual(hypatia._load_stars("Z:/does/not/exist.json"), {})
 

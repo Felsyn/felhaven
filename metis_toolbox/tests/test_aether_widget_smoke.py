@@ -44,18 +44,34 @@ class TestAetherWidgetSmoke(unittest.TestCase):
         w = self._widget()
         w.update(None)
         self.root.update_idletasks()
-        self.assertEqual(w._wifi_lbl.cget("text"), "—")   # em dash placeholder
-        self.assertEqual(w._api_lbl.cget("text"), "—")
+        for lbl in (w._wifi_lbl, w._internet_lbl, w._ollama_lbl):
+            self.assertEqual(lbl.cget("text"), "—")        # em dash placeholder
 
     def test_update_every_state(self):
         w = self._widget()
         for wifi in ("connected", "disconnected", "unknown"):
-            for api in ("operational", "degraded", "down", "unknown"):
-                with self.subTest(wifi=wifi, api=api):
-                    w.update({"wifi": wifi, "api_status": api})
-                    self.root.update_idletasks()
-                    self.assertEqual(w._wifi_lbl.cget("text"), wifi)
-                    self.assertEqual(w._api_lbl.cget("text"), api)
+            for internet in ("online", "limited", "offline", "unknown"):
+                for ollama in ("online", "offline", "unknown"):
+                    with self.subTest(wifi=wifi, internet=internet, ollama=ollama):
+                        w.update({"wifi": wifi, "internet": internet,
+                                  "ollama": ollama})
+                        self.root.update_idletasks()
+                        self.assertEqual(w._wifi_lbl.cget("text"), wifi)
+                        self.assertEqual(w._internet_lbl.cget("text"), internet)
+                        self.assertEqual(w._ollama_lbl.cget("text"), ollama)
+
+    def test_only_a_known_bad_state_is_red(self):
+        # Red is reserved for a KNOWN-bad link; "unknown" stays dim and a
+        # captive portal is amber, not an alarm.
+        from theme import C
+        w = self._widget()
+        dot = lambda canvas: canvas.itemcget(canvas.find_all()[0], "fill")
+        w.update({"wifi": "connected", "internet": "limited", "ollama": "unknown"})
+        self.assertEqual(dot(w._internet_dot), C["amber"])
+        self.assertEqual(dot(w._ollama_dot), C["text3"])
+        w.update({"wifi": "connected", "internet": "offline", "ollama": "offline"})
+        self.assertEqual(dot(w._internet_dot), C["red"])
+        self.assertEqual(dot(w._ollama_dot), C["red"])
 
 
 if __name__ == "__main__":

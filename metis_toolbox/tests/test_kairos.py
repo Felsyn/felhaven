@@ -16,6 +16,7 @@ Instead every seam is faked:
 Run from metis_toolbox/:
 
     python -X utf8 -m unittest discover -s tests -p "test_*.py"
+    python -X utf8 -m unittest tests.test_kairos        (this file alone)
 
 Behavioral tests (Groups B/C/D) patch Kairos.WORKERS before instantiation so
 construction resolves test stub fetch functions instead of importing the
@@ -98,9 +99,15 @@ def fetch_boom():
     raise RuntimeError("synthetic failure")
 
 
+# The fakes' dotted path is however this file was imported: "test_kairos"
+# under discover -s tests, "tests.test_kairos" under -m unittest. A literal
+# "test_kairos." resolved only under discover, so the other run broke on
+# imports, not on Kairos.
+_FAKES = __name__
+
 TEST_WORKERS = [
-    ("alpha", 60, "test_kairos.fetch_ok"),
-    ("beta", 5, "test_kairos.fetch_ok"),
+    ("alpha", 60, f"{_FAKES}.fetch_ok"),
+    ("beta", 5, f"{_FAKES}.fetch_ok"),
 ]
 
 
@@ -317,7 +324,7 @@ class TestRetryLadder(KairosBehaviorTestCase):
 
     def _long_kairos(self, interval=1800):
         """A Kairos whose single worker polls slowly enough for the ladder to bite."""
-        workers = [("slow", interval, "test_kairos.fetch_ok")]
+        workers = [("slow", interval, f"{_FAKES}.fetch_ok")]
         with mock.patch.object(Kairos, "WORKERS", workers):
             return Kairos(FakeRoot())
 

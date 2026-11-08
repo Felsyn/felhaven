@@ -578,13 +578,15 @@ class TestPythiaRiteRecords(unittest.TestCase):
         return events[0]
 
     def test_successful_call_records_ok(self):
+        # A made-up tool name: a real one's schema would put `city` through
+        # the argument gate (test_pythia_gate.py), and this is about the record.
         ev = self._ask(
-            [_tool_round(("get_weather", {"city": "Ely"})), _stream(_final("Sun."))],
-            {"get_weather": lambda **_: {"temp": 12}})
+            [_tool_round(("lookup_weather", {"city": "Ely"})), _stream(_final("Sun."))],
+            {"lookup_weather": lambda **_: {"temp": 12}})
         (rec,) = ev["tool_records"]
         self.assertEqual(rec["seq"], 1)
         self.assertEqual(rec["round"], 1)
-        self.assertEqual(rec["name"], "get_weather")
+        self.assertEqual(rec["name"], "lookup_weather")
         self.assertEqual(rec["arguments"], {"city": "Ely"})
         self.assertFalse(rec["arguments_truncated"])
         self.assertEqual(rec["status"], "ok")
@@ -607,7 +609,7 @@ class TestPythiaRiteRecords(unittest.TestCase):
         # Dropping it would show the operator a bare slug and lose the sentence
         # that explains it.
         ev = self._ask(
-            [_tool_round(("play_music", {})), _stream(_final("No."))],
+            [_tool_round(("play_music", {"query": ""})), _stream(_final("No."))],
             {"play_music": lambda **_: {"error": "no_query",
                                         "detail": "No song was specified."}})
         self.assertEqual(ev["tool_records"][0]["error"],
@@ -645,6 +647,34 @@ class TestPythiaRiteRecords(unittest.TestCase):
         (rec,) = ev["tool_records"]
         self.assertEqual(rec["status"], "failed")
         self.assertTrue(rec["error"].startswith("unknown_tool: "))
+
+
+class TestOversizeToolResultIsLogged(unittest.TestCase):
+    """A tool result that floods the model's context should show up in the log
+    before it shows up as a broken turn. read_document once returned a whole
+    1 MB note; the next unbounded tool gets caught here instead."""
+
+    def _ask(self, result: dict) -> None:
+        with mock.patch("pythia.requests.post",
+                        side_effect=[_tool_round(("big", {})), _stream(_final("Ok."))]), \
+             mock.patch.dict(pythia._DISPATCH, {"big": lambda **_: result}):
+            pythia.ask("q", [])
+
+    def test_a_result_over_the_budget_is_warned_about(self):
+        with self.assertLogs("METIS.pythia", level="WARNING") as logs:
+            self._ask({"text": "x" * pythia._LARGE_RESULT_CHARS})
+        self.assertTrue(any("'big'" in line for line in logs.output), logs.output)
+
+    def test_a_normal_result_is_not(self):
+        with self.assertNoLogs("METIS.pythia", level="WARNING"):
+            self._ask({"text": "x" * 100})
+
+    def test_the_budget_sits_above_the_tools_own_caps(self):
+        # fetch_page and read_document return this much by design; warning on
+        # every normal read would bury the one that matters.
+        from tools import callimachus, herodotus
+        self.assertGreater(pythia._LARGE_RESULT_CHARS, callimachus._PAGE_CHARS + 1000)
+        self.assertGreater(pythia._LARGE_RESULT_CHARS, herodotus._READ_CHARS + 1000)
 
 
 class TestPythiaRiteCancellation(unittest.TestCase):

@@ -30,8 +30,8 @@ Contract:    The layer shape Hecate and Poseidon use, plus the raster:
 Key:         Reads 'opentopography_api_key' from the Cerberus Vault at call
              time, never cached to disk (the Midas/Callimachus pattern), and
              only during ingest — the offline render path never touches it.
-             Seed it with:
-               python cerberus.py set <PIN> opentopography_api_key <key>
+             Set it in its row of the CERBERUS tab, or with:
+               python cerberus.py set opentopography_api_key   (hidden prompts)
 
 Raster:      Three tiers split by PERCENTILE (terciles) of the local
              elevation distribution, not equal interval: equal interval
@@ -56,26 +56,41 @@ Datum:       3DEP/USGS10m is NAVD88; the global products are EGM96, tens of
 Source:      OpenTopography REST API, AAIGrid output:
                portal.opentopography.org/API/usgsdem?datasetName=USGS10m
              AAIGrid is a six-line text header then whitespace-separated
-             values, row-major, north-to-south — parsing is a split().
+             values, row-major, north-to-south. They are parsed from the
+             downloaded bytes a window at a time, straight into int16 (see
+             Bounds:).
 
 Upstream:    tools/artemis.py — ingest_area orchestrates ingest();
              panels/artemis_panel.py — calls raster() to draw.
 Downstream:  cerberus.py (the key), palette.py (the band colours),
              tools/artemis.py (geometry, paths, atomic writes).
 
-Requires:    stdlib only — array, gzip, logging, os, struct, threading,
-             urllib.parse, urllib.request.
+Requires:    tools/hermes.py (the bounded network read), and array, gzip,
+             logging, math, os, re, struct, threading (stdlib).
+
+Bounds:      The download's cap is computed from the box asked for, not
+             fixed: grid_cap(box) = the cells a 1/3 arc-second grid needs to
+             cover it, times the longest value OpenTopography writes, times
+             1.5, plus the header. Measured, with the date, beside the
+             constants below; Demeter logs the bytes received against the
+             cap on every ingest, so a real download can confirm it.
+             The parse is bounded too: the bytes are never decoded whole and
+             never split whole. A header claiming more cells than the box can
+             hold (grid_cells(box) x 1.5) is refused before anything is
+             allocated from it; values are read _CHUNK bytes at a time into a
+             2-byte-a-cell array, so a parse costs a small fraction of the
+             download, not several times it (§12, 2026-10-03).
 """
 
 import array
 import gzip
 import logging
+import math
 import os
+import re
 import struct
 import sys
 import threading
-import urllib.parse
-import urllib.request
 from typing import Any
 
 # Demeter reaches UP to app-root siblings (cerberus.py, palette.py) as well as
@@ -86,7 +101,7 @@ if __name__ == "__main__":
 
 import cerberus
 from palette import C, rgb
-from tools import artemis
+from tools import artemis, hermes
 
 log = logging.getLogger("METIS.demeter")
 
@@ -95,7 +110,41 @@ log = logging.getLogger("METIS.demeter")
 _API_URL = "https://portal.opentopography.org/API/usgsdem"
 _DATASET = "USGS10m"
 _VDATUM = "NAVD88"
-_HTTP_TIMEOUT = 180
+_HTTP_TIMEOUT = 180          # per socket operation; hermes.deadline_for() sets the whole
+# Measured 2026-10-01 on two 0.01-degree boxes (108 x 108 cells each, the
+# centre of the contiguous US and Pikes Peak): the header is 143-144 B, and a
+# value is up to 18 characters. OpenTopography writes full-precision floats, so
+# a value's length follows its digits, not its height: 17.99 bytes a cell at
+# ~560 m, 16.29 at ~4,300 m. A full Artemis box at 39 N is ~3.8 M cells, so a
+# real download is ~69 MB, and grid_cap() allows ~109 MB for it.
+# Confirmed live 2026-10-03 on a full area: 75,645,519 B against a cap of
+# 109,373,393 (69%), about 19.7 B a cell. That is a little over the 19 the
+# small boxes suggested, and the 1.5x margin is what absorbed it: keep it.
+_CELL_DEG = 1.0 / 10800.0        # USGS10m: 1/3 arc-second cells
+_GRID_HEADER_BYTES = 1024        # an allowance; measured 144
+_GRID_BYTES_PER_CELL = 19        # the longest value (18) plus its separator
+# The parse. Measured 2026-10-03 on a full box's worth of OpenTopography-shaped
+# values (3.8 M cells, 68 MB): split() over the whole text peaked at 7.5x the
+# download (513 MB) and 2.31 s; split() over 256 KiB windows into an int16
+# array peaks at 0.13x (8.8 MB) in 2.08 s. A window's tokens are the parse's
+# only transient, so the window size is the knob (1 MiB measured 0.18x).
+# Confirmed live 2026-10-04: a full-area ingest (72.9 MB grid) peaked 171 MB
+# over the app's resting working set, with the parse ~2 s; at 7.5x, the old
+# parse alone would have added ~570 MB.
+_CHUNK = 256 * 1024
+# The header's ncols x nrows comes from the server, and the array is sized
+# from it, so it is checked against the box first: at most 1.5x the cells a
+# 1/3 arc-second grid needs to cover the box. Its own margin, not grid_cap's:
+# that one absorbs value lengths, this one the grid's extent past the box.
+# Measured 2026-10-03: a hostile header at this limit parses in 2.05 s at
+# 0.14x the download; with no limit, a grid of two-character values at the cap
+# took 12.9 s. A real grid's cells against the limit are logged every ingest.
+# Confirmed live 2026-10-04 on a full area: 2219 x 1729 = 3,836,651 cells
+# against a limit of 5,764,230 (67%), 0.998x the box's own count, so the grid
+# doesn't reach past the box at all and the margin is all headroom: keep it.
+_CELLS_MARGIN = 1.5
+_MAX_TOKEN = 64      # bytes; the longest value OpenTopography writes is 18
+_QUOTED = 40         # a bad token is quoted at most this long in a message
 _VAULT_KEY_NAME = "opentopography_api_key"
 
 _BIN_NAME = artemis.TERRAIN_BIN   # a cache-layout fact; Artemis owns the name
@@ -139,12 +188,14 @@ def _api_key() -> str:
 # ── AAIGrid ───────────────────────────────────────────────────────────────────
 
 class AsciiGrid:
-    """A parsed AAIGrid: the six header fields plus the value rows."""
+    """A parsed AAIGrid: the six header fields plus the values, int16
+    metres, row-major, north-to-south."""
 
     __slots__ = ("ncols", "nrows", "xll", "yll", "cellsize", "nodata", "values")
 
     def __init__(self, ncols: int, nrows: int, xll: float, yll: float,
-                 cellsize: float, nodata: float, values: list[int]) -> None:
+                 cellsize: float, nodata: float,
+                 values: "array.array[int]") -> None:
         self.ncols = ncols
         self.nrows = nrows
         self.xll = xll
@@ -154,22 +205,46 @@ class AsciiGrid:
         self.values = values
 
 
-def parse_aaigrid(text: str) -> AsciiGrid:
+_TOKEN = re.compile(rb"\S+")
+_SPACE = re.compile(rb"\s")
+
+
+def _quoted(token: bytes) -> str:
+    """A token as an error message shows it: decoded the way the grid always
+    was, and cut short, so a message can never carry the body into the log."""
+    return repr(token[:_QUOTED].decode("utf-8", "replace"))
+
+
+def parse_aaigrid(body: bytes, max_cells: int) -> AsciiGrid:
     """Six header lines then row-major values, north-to-south. Values may be
     floats (USGS10m ships decimals); they round to int16 metres. Raises
-    ValueError (slug-first) on a malformed grid."""
-    tokens = text.split()
-    if len(tokens) < 12:
+    ValueError (slug-first) on a malformed grid.
+
+    Parsed from the bytes as downloaded: never decoded whole, never split
+    whole. A header that claims more than `max_cells` values is refused
+    before the array is allocated, since its size comes from the server.
+    The values are split one _CHUNK window at a time, each window widened to
+    the next whitespace so no value is cut in two, and written straight into
+    the array. A value over _MAX_TOKEN bytes is refused."""
+    header_tokens = []
+    for match in _TOKEN.finditer(body):
+        header_tokens.append(match)
+        if len(header_tokens) == 12:
+            break
+    if len(header_tokens) < 12:
         raise ValueError("bad_grid: too short to be an AAIGrid")
+    if any(m.end() - m.start() > _MAX_TOKEN for m in header_tokens):
+        raise ValueError(f"bad_grid: a value longer than {_MAX_TOKEN} characters")
     header: dict[str, float] = {}
-    pos = 0
-    for _ in range(6):
-        key = tokens[pos].lower()
+    for i in range(0, 12, 2):
+        key = header_tokens[i].group().lower().decode("utf-8", "replace")
         try:
-            header[key] = float(tokens[pos + 1])
+            value = float(header_tokens[i + 1].group())
         except ValueError as exc:
             raise ValueError(f"bad_grid: header field {key!r}") from exc
-        pos += 2
+        if not math.isfinite(value):
+            raise ValueError(f"bad_grid: header field {key!r}")
+        header[key] = value
     try:
         ncols = int(header["ncols"])
         nrows = int(header["nrows"])
@@ -182,20 +257,48 @@ def parse_aaigrid(text: str) -> AsciiGrid:
     if ncols <= 0 or nrows <= 0 or cellsize <= 0:
         raise ValueError(f"bad_grid: {ncols}x{nrows} at cellsize {cellsize}")
 
-    body = tokens[pos:]
-    if len(body) < ncols * nrows:
-        raise ValueError(
-            f"bad_grid: header says {ncols * nrows} values, found {len(body)}")
-    values: list[int] = []
-    for token in body[:ncols * nrows]:
-        try:
-            value = float(token)
-        except ValueError as exc:
-            raise ValueError(f"bad_grid: non-numeric value {token!r}") from exc
-        if value == nodata or not -32767.0 <= value <= 32767.0:
-            values.append(NODATA)
+    count = ncols * nrows
+    if count > max_cells:
+        raise ValueError(f"bad_grid: header says {count} values, more than "
+                         f"the {max_cells} the box allows")
+    values = array.array("h", [0]) * count
+    filled = 0
+    pos = header_tokens[-1].end()
+    size = len(body)
+    while filled < count and pos < size:
+        end = pos + _CHUNK
+        if end >= size:
+            end = size
         else:
-            values.append(int(round(value)))
+            # Widen the window to the next whitespace, so the value the edge
+            # falls in stays whole. An honest value ends within a few bytes.
+            space = _SPACE.search(body, end, end + _MAX_TOKEN + 1)
+            if space is not None:
+                end = space.start()
+            elif end + _MAX_TOKEN + 1 >= size:
+                end = size
+            else:
+                raise ValueError(
+                    f"bad_grid: a value longer than {_MAX_TOKEN} characters")
+        for token in body[pos:end].split():
+            if filled == count:
+                break
+            if len(token) > _MAX_TOKEN:
+                raise ValueError(
+                    f"bad_grid: a value longer than {_MAX_TOKEN} characters")
+            try:
+                value = float(token)
+            except ValueError as exc:
+                raise ValueError(
+                    f"bad_grid: non-numeric value {_quoted(token)}") from exc
+            if value == nodata or not -32767.0 <= value <= 32767.0:
+                values[filled] = NODATA
+            else:
+                values[filled] = round(value)
+            filled += 1
+        pos = end
+    if filled < count:
+        raise ValueError(f"bad_grid: header says {count} values, found {filled}")
     return AsciiGrid(ncols, nrows, xll, yll, cellsize, nodata, values)
 
 
@@ -365,45 +468,78 @@ def raster(area: str) -> bytes:
 
 # ── Ingest (online) ───────────────────────────────────────────────────────────
 
+def grid_cells(box: artemis.BBox) -> int:
+    """The cells a 1/3 arc-second grid needs to cover `box`: rows and
+    columns rounded up, plus an edge cell each way."""
+    lat_min, lon_min, lat_max, lon_max = box
+    rows = math.ceil((lat_max - lat_min) / _CELL_DEG) + 1
+    cols = math.ceil((lon_max - lon_min) / _CELL_DEG) + 1
+    return rows * cols
+
+
+def grid_cap(box: artemis.BBox) -> int:
+    """The most bytes an honest AAIGrid for `box` can take: its cells, at
+    the longest value seen, with a 1.5x margin, plus the header."""
+    return int(_GRID_HEADER_BYTES + grid_cells(box) * _GRID_BYTES_PER_CELL * 1.5)
+
+
 def ingest(area: str, center: tuple[float, float], box: artemis.BBox,
            cancel: threading.Event, progress: artemis.Progress) -> dict[str, Any]:
     """Fetch one elevation clip, resample, write terrain.bin + derived raster
     into the partial dir. Returns grid info for the manifest."""
     key = _api_key()                       # slugs before any network work
     lat_min, lon_min, lat_max, lon_max = box
-    query = urllib.parse.urlencode({
+    params: dict[str, str | float] = {
         "datasetName": _DATASET, "south": lat_min, "north": lat_max,
         "west": lon_min, "east": lon_max, "outputFormat": "AAIGrid",
         "API_Key": key,
-    })
+    }
+    cap = grid_cap(box)
     progress("terrain: downloading elevation")
     try:
-        with urllib.request.urlopen(f"{_API_URL}?{query}",
-                                    timeout=_HTTP_TIMEOUT) as resp:
-            text = resp.read().decode("utf-8", "replace")
+        reply = hermes.get(_API_URL, params=params, cap=cap, timeout=_HTTP_TIMEOUT)
+        reply.raise_for_status()
+    except hermes.TooLarge as exc:
+        raise artemis.IngestError(
+            f"too_large: the elevation grid is over its {cap}-byte cap") from exc
     except Exception as exc:
         raise artemis.IngestError(f"download_failed: {type(exc).__name__}") from exc
+    # The live confirmation of grid_cap(): every real download, against its cap.
+    log.info("Demeter: elevation grid %d bytes, cap %d (%.0f%%)",
+             len(reply.content), cap, 100.0 * len(reply.content) / cap)
     if cancel.is_set():
         raise artemis.IngestError("cancelled")
 
     progress("terrain: parsing grid")
+    max_cells = int(grid_cells(box) * _CELLS_MARGIN)
     try:
-        grid = parse_aaigrid(text)
+        grid = parse_aaigrid(reply.content, max_cells)
     except ValueError as exc:
         # The API reports quota/auth problems as a short text body, which
         # lands here as a parse failure — keep its own slug, not a guess.
-        log.error("Demeter: grid parse failed (%s); first 200 chars: %s",
-                  exc, text[:200].replace("\n", " "))
+        # Only the excerpt is decoded; the body never is.
+        excerpt = reply.content[:200].decode("utf-8", "replace")
+        log.error("Demeter: grid parse failed (%s); first 200 bytes: %s",
+                  exc, excerpt.replace("\n", " "))
         raise artemis.IngestError(str(exc)) from exc
+    # The live confirmation of the cell limit, like the cap's line above.
+    cell_count = grid.ncols * grid.nrows
+    log.info("Demeter: grid %d x %d = %d cells, limit %d (%.0f%%)",
+             grid.ncols, grid.nrows, cell_count, max_cells,
+             100.0 * cell_count / max_cells)
     if cancel.is_set():
         raise artemis.IngestError("cancelled")
 
     progress("terrain: resampling")
-    cells = resample(grid, center)
+    # GRID is read here, once, and handed to every stage. Their `size=GRID`
+    # defaults were bound at import, so a GRID changed since (a test's patch)
+    # reached none of them.
+    size = GRID
+    cells = resample(grid, center, size)
     info = write_bin(os.path.join(artemis.partial_dir(area), _BIN_NAME),
-                     cells, center)
+                     cells, center, size)
     progress("terrain: rendering raster")
-    write_derived(artemis.partial_dir(area), cells)
+    write_derived(artemis.partial_dir(area), cells, size)
     return info
 
 

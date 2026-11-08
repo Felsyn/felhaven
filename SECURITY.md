@@ -3,18 +3,30 @@
 ## Scope — please read this first
 
 Felhaven is a **personal, local-first desktop dashboard**, not security software.
-Two of its modules *look* security-shaped and are **soft gates by design**, as
-their own documentation states:
+Two of its modules *look* security-shaped. Here is exactly what each one does:
 
 - **Sphynx** (the boot PIN/riddle gate) is explicitly *"family-misclick theater,"*
   not real access control.
-- **Cerberus** (the secrets vault) protects against **accidental exposure and
-  casual local snooping** — kids at the keyboard, a screen-share slip — **not** a
-  determined attacker with tools and time. It uses stdlib crypto sized to that
-  threat model, not an OS keychain or HSM.
+- **Cerberus** keeps the API keys Felhaven uses (market prices, web search,
+  terrain) **encrypted to your Windows account** with Windows DPAPI, and puts a
+  **PIN child lock** over *using* them.
+  - **What it protects:** the keys at rest. A copy of the vault file (a backup,
+    a synced folder, a thumb drive, malware that copies it and leaves) can't be
+    decrypted on another Windows account or another PC. Each key is bound to its
+    own entry name, so moving one into another's slot fails, and a key that
+    won't decrypt is logged and shown, never silently skipped.
+  - **What the PIN does:** it decides when Felhaven's tools may use the keys and
+    when its UI may change them. It **decrypts nothing**, so knowing the PIN
+    yields no key. It is a child lock: it keeps people at the keyboard from
+    clicking into things, and it locks itself when Felhaven closes, when Windows
+    is locked, when the PC sleeps, and after an hour with no input.
+  - **What it does not protect against:** anyone who can sign in to your
+    Windows account, and any program running as you. Such a program can decrypt
+    the keys at any time, PIN or no PIN, vault open or not.
 
-So "the PIN is brute-forceable" or "the vault isn't a real password manager" are
-**known, documented properties**, not vulnerabilities.
+So "the PIN is short" or "a program running as the user can read the keys" are
+**known, documented properties**, not vulnerabilities. A copy of the vault file
+that could be read on another account or PC **would** be one.
 
 ## Reporting a vulnerability
 

@@ -37,8 +37,10 @@ untested — treat it as best-effort.
 
 ## 1. Prerequisites
 
-- **Python 3.10+** (PEP 604 `X | Y` type unions are used in the codebase, so 3.9
-  and below will not import; CI runs 3.10 and 3.13).
+- **Python 3.13**, 64-bit. The dependency lock is compiled for 3.13. pip
+  refuses it on 3.10, 3.11 and 3.14, and on 3.12, where it would install, the
+  test suite fails the venv. CI runs 3.13 too. Install it with the Python install manager (`py install 3.13`) or the
+  3.13 Windows installer from <https://www.python.org/downloads/windows/>.
 - **git**, and enough disk for the venv (~a few hundred MB) plus the optional
   ~350 MB of voice-model binaries.
 
@@ -47,15 +49,23 @@ untested — treat it as best-effort.
 ```powershell
 git clone https://github.com/Felsyn/metis.git
 cd metis\metis_toolbox
-py -3.10 -m venv .venv
+py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+python -m pip install --require-hashes --only-binary=:all: -r requirements.txt
 ```
 
-`requirements.txt` is the **only** dependency file. It pulls: `psutil` +
-`requests` (dashboard core) and `kokoro-onnx` + `sounddevice` + `numpy`
-(Calliope's text-to-speech — onnxruntime-backed, **no torch**). That's the whole
-runtime; the house style is stdlib-first, so there is nothing else to install.
+`requirements.txt` is a **lock**: every package Felhaven needs, direct or pulled
+in (22 in all), pinned to one version and checked against a hash. pip installs
+exactly those files or refuses. `--only-binary=:all:` means nothing is built
+from source, so no package runs its own code while installing. The five direct
+dependencies are listed in `requirements.in`: `psutil` + `requests` (dashboard
+core) and `kokoro-onnx` + `sounddevice` + `numpy` (Calliope's text-to-speech,
+onnxruntime-backed, **no torch**). The house style is stdlib-first, so there is
+nothing else to install.
+
+**Don't `pip install` anything else into `.venv`.** A test fails on any package
+the lock doesn't name. To change a dependency, see CONVENTIONS §11. To rebuild
+the venv from scratch, delete `.venv` and run the last three commands again.
 
 > No-activation alternative (sidesteps PowerShell execution-policy prompts): call
 > the venv Python directly, e.g. `.\.venv\Scripts\python.exe felhaven.py`.
@@ -99,24 +109,73 @@ is affected.
 
 The **Vox Array** card's three tabs need two external binaries between them (Echo
 and Orpheus share one). All follow the same rule: a copy in `metis_toolbox/bin/`
-**wins over** PATH (flash-drive-portable), and absence degrades cleanly — never a
+**wins over** PATH (flash-drive-portable), **but only if it matches its entry in
+`metis_toolbox/config/bin_manifest.json`**, and absence degrades cleanly — never a
 crash. All are gitignored, so a fresh clone won't have them: this is a per-machine
 setup step.
 
-- **Morpheus** (YouTube audio playback) — `mpv.exe` + `yt-dlp.exe`. Drop them in
-  `metis_toolbox/bin/` or install to PATH. Missing → the MORPHEUS tab shows a
-  placeholder with inert controls. *Caveat:* `yt-dlp` is the one churn-prone piece
-  in the whole stack — it breaks when YouTube changes its internals; the fix is
-  `yt-dlp -U`.
+- **Morpheus** (YouTube audio playback) — `mpv.exe` + `yt-dlp.exe`. yt-dlp from
+  its official releases, <https://github.com/yt-dlp/yt-dlp/releases>; mpv from
+  shinchiro's Windows builds, <https://github.com/shinchiro/mpv-winbuild-cmake/releases>
+  (the builds mpv.io points to). Drop them in `metis_toolbox/bin/` or install to
+  PATH. Missing → the MORPHEUS tab shows a placeholder with inert controls.
+  *Caveat:* `yt-dlp` is the one churn-prone piece in the whole stack — it breaks
+  when YouTube changes its internals; the fix is to update it and record the
+  update (below).
 - **Echo** (text → audio *file*) and **Orpheus** (play that file back) —
   `ffmpeg.exe`, **built with libopus** (the Opus codec both use, Echo to encode
   and Orpheus to decode). A Windows build with libopus is the "release-essentials"
-  package at <https://www.gyan.dev/ffmpeg/builds/> — unzip and drop its
-  `bin/ffmpeg.exe` into `metis_toolbox/bin/`. Missing, or built without libopus →
+  package at <https://www.gyan.dev/ffmpeg/builds/> (also published, with a
+  checksum per file, at <https://github.com/GyanD/codexffmpeg/releases>) — unzip
+  and drop its `bin/ffmpeg.exe` into `metis_toolbox/bin/`. Missing, or built without libopus →
   ECHO returns a clean error and writes nothing, and ORPHEUS shows a placeholder
   with an empty file list. Echo's synthesis reuses Calliope's kokoro model (§4),
   so it needs those binaries too. Orpheus needs no model at all — it only decodes
   what Echo already wrote.
+
+### Checked before they run
+
+`config/bin_manifest.json` (committed) records, for each program, where it came
+from, the checksum its publisher published, and the sha256 of the copy in
+`bin/`. Felhaven checks each `bin/` copy against it once per launch
+(`tools/aegis.py`):
+
+- **A copy that doesn't match is refused**, and Felhaven does not fall back to a
+  copy on PATH instead. Its tab says so, and Emanon shows the ERROR. This is what
+  you will see after updating a program without recording it.
+- **A program only on PATH** (nothing in `bin/`) runs unverified, with one
+  WARNING per launch. That copy is your own install, outside the manifest.
+
+Check everything at any time, from `metis_toolbox\`:
+
+```powershell
+.\.venv\Scripts\python.exe -m tools.aegis verify
+```
+
+**Recording a yt-dlp update** (the common one): update it with its own updater,
+then record it. `record` first checks the file against the latest release's
+published `SHA2-256SUMS` without running it, then reads its version and checks
+that release's sums too, and refuses unless the file matches both. If it says
+the file isn't the latest release, run `-U` again:
+
+```powershell
+.\bin\yt-dlp.exe -U
+```
+```powershell
+.\.venv\Scripts\python.exe -m tools.aegis record yt-dlp
+```
+
+Then commit `config/bin_manifest.json`.
+
+**Recording mpv or ffmpeg**: download the official archive, take the publisher's
+checksum for it (GitHub shows a sha256 beside every release file), put the new
+exe in `bin/`, and pass both. For a `.zip`, aegis finds the exe inside and
+checks it is the one in `bin/`; for a `.7z`, extract it yourself (Windows'
+`tar -xf` reads `.7z`) and pass it as `--extracted`:
+
+```powershell
+.\.venv\Scripts\python.exe -m tools.aegis record ffmpeg --version 8.1.2 --source https://github.com/GyanD/codexffmpeg/releases/download/8.1.2/ffmpeg-8.1.2-essentials_build.zip --expect PUBLISHED_SHA256 --archive D:\path\to\ffmpeg-8.1.2-essentials_build.zip
+```
 
 Echo's output `.opus` files land in `metis_toolbox/local_audio/` (gitignored,
 machine-local, no retention cap) — the same folder Orpheus's ORPHEUS tab lists
@@ -127,34 +186,38 @@ Calliope already needs.
 
 ## 6. Keys — seed your own (both optional, both degrade gracefully)
 
-These are **your** keys; none are shipped in the repo.
+These are **your** keys; none are shipped in the repo. They live only in the
+Cerberus vault, encrypted to your Windows account (never in a file, an env var
+or the repo). Set your Cerberus PIN first (§7). Then, in the **CERBERUS** tab
+(under **Moderati**), each key below has its own row: click **set** and paste
+the key into the masked box. Or, from `metis_toolbox/` in PowerShell:
 
-- **Finnhub** — Midas market prices (PRICES tab). Get a free key at
-  <https://finnhub.io/register>, then seed it into the Cerberus vault, in
-  `metis_toolbox/`:
-  ```
-  python cerberus.py set <PIN> finnhub_api_key <your-finnhub-key>
-  ```
-  (`<PIN>` is your Cerberus PIN — see §7.) The key lives only in the vault,
-  never in a file. No key, or a locked vault → PRICES shows a placeholder;
-  the LEDGER tab (local bookkeeping) works regardless.
-- **Brave Search** — Callimachus web search (a Pythia tool). The key lives only in
-  the Cerberus vault, never in a file:
-  ```
-  python cerberus.py set <PIN> brave_api_key <your-brave-key>
-  ```
-  (`<PIN>` is your Cerberus PIN — see §7.) No key → web search returns a clean
-  "search unavailable" error; the rest of the chat is unaffected.
-- **OpenTopography** — Demeter's terrain for the Cartograph map (Navigation →
-  Cartograph). Get a free key at
-  <https://portal.opentopography.org/requestService?service=api>, then:
-  ```
-  python cerberus.py set <PIN> opentopography_api_key <your-opentopo-key>
-  ```
-  (`<PIN>` is your Cerberus PIN — see §7.) The key is read only while caching
-  an area, never while drawing one. No key, or a vault that was sealed at
-  ingest → the area still caches its roads and water and simply has no
-  terrain; the panel says so, and re-caching later fills it in.
+```
+python cerberus.py set finnhub_api_key
+```
+
+It asks for your PIN and then the key at hidden prompts. **Never type a key on
+the command line:** your shell keeps every command in its history file, so
+Cerberus refuses a key there.
+
+- **Finnhub** (`finnhub_api_key`) — Midas market prices (PRICES tab). Get a free
+  key at <https://finnhub.io/register>. No key, or a locked vault → PRICES
+  shows a placeholder; the LEDGER tab (local bookkeeping) works regardless.
+- **Brave Search** (`brave_api_key`) — Callimachus web search (a Pythia tool).
+  No key → web search returns a clean "search unavailable" error; the rest of
+  the chat is unaffected.
+- **OpenTopography** (`opentopography_api_key`) — Demeter's terrain for the
+  Cartograph map (Navigation → Cartograph). Get a free key at
+  <https://portal.opentopography.org/requestService?service=api>. The key is
+  read only while caching an area, never while drawing one. No key, or a vault
+  that was sealed at ingest → the area still caches its roads and water and
+  simply has no terrain; the panel says so, and re-caching later fills it in.
+
+To change a key later (say, after regenerating it at the provider), use the
+row's **replace**: the old key is never shown. `python cerberus.py status`
+lists which keys read back, without printing any. If your Windows password is
+ever *reset* (a normal change is fine) or your profile rebuilt, the keys can't
+be decrypted any more: the tab says so, and **replace** puts them back.
 
 ### Waypoints (optional, no key, offline)
 
@@ -193,11 +256,15 @@ setting your own** instead of inheriting the author's:
   choice is remembered). Later launches pose your riddle and take your PIN; three
   wrong tries close the window (relaunch for a fresh three — nothing is ever
   locked on disk).
-- **Cerberus** — the *real* secrets gate (guards the vault where the Finnhub
-  and Brave keys live). On first launch the **CERBERUS** tab (under **Moderati**) shows a **set
-  a PIN** prompt when `cerberus_data.json` is absent; choose one and confirm and
-  it opens straight into your (empty) vault. You can still do it from the CLI if
-  you prefer: `python cerberus.py setpin <new-pin>`.
+- **Cerberus** — guards your API keys (§6). The keys are encrypted to your
+  Windows account; the PIN is a child lock that decides when tools may use
+  them, and decrypts nothing (`SECURITY.md` says what that does and doesn't
+  protect). On first launch the **CERBERUS** tab (under **Moderati**) shows a
+  **set a PIN** prompt when `cerberus_data.json` is absent; choose one and
+  confirm and it opens straight into your (empty) vault. Use a PIN you use
+  nowhere else. The CLI works too: `python cerberus.py setpin` asks for it at a
+  hidden prompt. Cerberus locks itself when you close Felhaven, lock Windows,
+  put the PC to sleep, or leave it untouched for an hour.
 
 Both PIN files are gitignored, so they never leave your machine and a future clone
 starts fresh. If you only want the dashboard panels (no chat, no keys), you can
@@ -265,9 +332,18 @@ Sphynx gate, which `Felhaven.bat` normally fronts.
 
 ## 9. Optional — run the tests
 
-Hermetic (no network, no audio, no models needed):
+Hermetic (no network, no audio, no models needed). Run them with the venv's
+Python (activated as in §2); one test checks that the venv is exactly the lock.
 
 ```
 cd metis_toolbox
 python -X utf8 -m unittest discover -s tests -p "test_*.py"
+```
+
+To run the type check CI runs, add the dev lock (mypy and its stubs) to the
+venv. The test above accepts the venv with or without it:
+
+```
+python -m pip install --require-hashes --only-binary=:all: -r requirements.txt -r requirements-dev.txt
+python -m mypy --strict --explicit-package-bases tools/
 ```

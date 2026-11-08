@@ -24,10 +24,8 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import requests
 
-from tools import aura
-from tools import selene
+from tools import aura, hermes
 from tests._fixtures import (load_real_j1, load_real_open_meteo,
                              open_meteo_snow_payload)
 
@@ -44,7 +42,7 @@ class _FakeResp:
 
 
 def _routed(wttr, open_meteo):
-    """A requests.get stand-in that answers each host differently.
+    """A hermes.get stand-in that answers each host differently.
 
     Either value may be an Exception instance (raised) or a payload (returned).
     Routing on the URL is what lets one test assert "wttr failed AND Open-Meteo
@@ -58,9 +56,19 @@ def _routed(wttr, open_meteo):
     return _get
 
 
+class _FreshCache(unittest.TestCase):
+    """fetch() stores what it gets and handle() answers from it (T7). Each test
+    starts and ends with an empty cache, so a reading one test fetched can
+    never answer another's handle()."""
+
+    def setUp(self):
+        aura._clear_cache()
+        self.addCleanup(aura._clear_cache)
+
+
 # ── The failover decision ─────────────────────────────────────────────────────
 
-class TestFailover(unittest.TestCase):
+class TestFailover(_FreshCache):
 
     def test_primary_success_never_calls_the_fallback(self):
         """Open-Meteo is a fallback, not a second opinion: a healthy wttr.in
@@ -71,15 +79,15 @@ class TestFailover(unittest.TestCase):
             calls.append(url)
             return _FakeResp(load_real_j1())
 
-        with mock.patch("tools.aura.requests.get", side_effect=_get):
+        with mock.patch("tools.aura.hermes.get", side_effect=_get):
             out = aura.fetch()
         self.assertNotIn("error", out)
         self.assertEqual(len(calls), 1)
         self.assertNotIn("open-meteo", calls[0])
 
     def test_fallback_rescues_a_failed_primary(self):
-        with mock.patch("tools.aura.requests.get",
-                        side_effect=_routed(requests.ConnectionError(),
+        with mock.patch("tools.aura.hermes.get",
+                        side_effect=_routed(hermes.Offline(),
                                             load_real_open_meteo())):
             out = aura.fetch()
         self.assertNotIn("error", out)
@@ -89,8 +97,8 @@ class TestFailover(unittest.TestCase):
         """The failure that prompted all this: wttr.in served an expired cert
         for nine hours on 2026-09-15. SSLError subclasses ConnectionError, so
         this also guards the except-ordering in handle()."""
-        with mock.patch("tools.aura.requests.get",
-                        side_effect=_routed(requests.exceptions.SSLError(),
+        with mock.patch("tools.aura.hermes.get",
+                        side_effect=_routed(hermes.CertError(),
                                             load_real_open_meteo())):
             out = aura.fetch()
         self.assertNotIn("error", out)
@@ -98,31 +106,31 @@ class TestFailover(unittest.TestCase):
     def test_both_sources_failing_reraises_the_primary_error(self):
         """The log tracks wttr.in; surfacing the fallback's error instead would
         bury the failure anyone is actually watching."""
-        with mock.patch("tools.aura.requests.get",
-                        side_effect=_routed(requests.Timeout(),
-                                            requests.ConnectionError())):
-            with self.assertRaises(requests.Timeout):
+        with mock.patch("tools.aura.hermes.get",
+                        side_effect=_routed(hermes.Timeout(),
+                                            hermes.Offline())):
+            with self.assertRaises(hermes.Timeout):
                 aura.fetch()
 
     def test_handle_degrades_when_both_fail(self):
         """handle() still never raises (§2), fallback or no fallback."""
-        with mock.patch("tools.aura.requests.get",
-                        side_effect=_routed(requests.exceptions.SSLError(),
-                                            requests.ConnectionError())):
+        with mock.patch("tools.aura.hermes.get",
+                        side_effect=_routed(hermes.CertError(),
+                                            hermes.Offline())):
             out = aura.handle()
         self.assertEqual(out["error"], "weather_cert_error")
 
 
 # ── Shape parity — the contract that keeps panels ignorant of the source ──────
 
-class TestShapeParity(unittest.TestCase):
+class TestShapeParity(_FreshCache):
 
     def _both(self):
-        with mock.patch("tools.aura.requests.get",
+        with mock.patch("tools.aura.hermes.get",
                         return_value=_FakeResp(load_real_j1())):
             primary = aura.fetch()
-        with mock.patch("tools.aura.requests.get",
-                        side_effect=_routed(requests.ConnectionError(),
+        with mock.patch("tools.aura.hermes.get",
+                        side_effect=_routed(hermes.Offline(),
                                             load_real_open_meteo())):
             fallback = aura.fetch()
         return primary, fallback
@@ -155,15 +163,15 @@ class TestShapeParity(unittest.TestCase):
 
 # ── Where the dialects genuinely differ ───────────────────────────────────────
 
-class TestWmoTranslation(unittest.TestCase):
+class TestWmoTranslation(_FreshCache):
     """weather_code must stay a WWO code: panels/aura_panel.py's _icon() maps
     that space, and leaking a raw WMO code would silently show the wrong emoji
     (WMO 3 "overcast" would read as WWO 3, which is not a code at all)."""
 
     def test_codes_land_in_the_wwo_space(self):
         from panels import aura_panel
-        with mock.patch("tools.aura.requests.get",
-                        side_effect=_routed(requests.ConnectionError(),
+        with mock.patch("tools.aura.hermes.get",
+                        side_effect=_routed(hermes.Offline(),
                                             load_real_open_meteo())):
             out = aura.fetch()
         for day in out["forecast"]:
@@ -200,8 +208,9 @@ class TestWmoTranslation(unittest.TestCase):
 
 
 class TestMissingMoon(unittest.TestCase):
-    """Open-Meteo has no moon data. The documented cost is that SELENE reads
-    blank on the fallback — it must NOT be that the widget crashes."""
+    """Open-Meteo has no moon data, so the fallback's moon fields are empty.
+    Since V0.03 audit M3 nothing on screen reads them (Selene computes the
+    moon), but get_weather's output must keep the same keys either way."""
 
     def test_moon_fields_are_present_but_empty(self):
         out = aura._from_open_meteo(load_real_open_meteo())
@@ -209,20 +218,13 @@ class TestMissingMoon(unittest.TestCase):
         for key in ("moonrise", "moonset", "moon_phase", "moon_illumination"):
             self.assertEqual(astro[key], "", msg=key)
 
-    def test_selene_degrades_rather_than_raising(self):
-        out = aura._from_open_meteo(load_real_open_meteo())
-        moon = selene.interpret(out["astronomy"])
-        self.assertIsNotNone(moon)
-        self.assertEqual(moon["moonrise"], "—")
-        self.assertEqual(moon["illumination"], "")
-
     def test_sun_fields_survive_in_wttr_clock_format(self):
-        """helios.py parses wttr.in's "07:02 AM" strings, not ISO stamps."""
+        """get_weather's astronomy block reads the same whichever host
+        answered: wttr.in's "07:02 AM" strings, not Open-Meteo's ISO stamps.
+        (Helios no longer reads this block; it computes the sun, M3.)"""
         out = aura._from_open_meteo(load_real_open_meteo())
-        from tools import helios
-        sun = helios.interpret(out["astronomy"])
-        self.assertIsNotNone(sun)
-        self.assertTrue(sun["day_length"])
+        for key in ("sunrise", "sunset"):
+            self.assertRegex(out["astronomy"][key], r"^\d{2}:\d{2} [AP]M$", msg=key)
 
 
 class TestPlaceName(unittest.TestCase):

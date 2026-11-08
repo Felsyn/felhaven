@@ -15,6 +15,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -139,21 +140,68 @@ class TestAcknowledge(_TempState):
 
 
 class TestHandle(_TempState):
-    def test_start_is_one_indexed(self):
-        out = ammit.handle(action="start", slot=1, duration_minutes=5)
-        self.assertTrue(out["ok"])
-        self.assertTrue(ammit.query_all()[0]["running"])
+    def test_start_returns_the_timer_it_started(self):
+        # The state it PRODUCED, so the model can say "set for 5 minutes" from
+        # data rather than from its own assumption (was {"ok": True}).
+        out = ammit.handle(action="start", duration_minutes=5)
+        self.assertEqual(out["action"], "start")
+        (t,) = out["timers"]
+        self.assertTrue(t["running"])
+        self.assertGreater(t["remaining_seconds"], 290)
+        self.assertLessEqual(t["remaining_seconds"], 300)
 
-    def test_out_of_range_slot_clamps_not_crashes(self):
-        # slot 5 has no backing store (MAX_SLOTS == 1); it clamps to slot 0.
-        out = ammit.handle(action="start", slot=5, duration_minutes=1)
-        self.assertTrue(out["ok"])
-        self.assertTrue(ammit.query_all()[0]["running"])
+    def test_stop_and_reset_return_the_resulting_state(self):
+        ammit.handle(action="start", duration_minutes=5)
+        stopped = ammit.handle(action="stop")
+        self.assertFalse(stopped["timers"][0]["running"])
+        self.assertGreater(stopped["timers"][0]["remaining_seconds"], 0)
+        reset = ammit.handle(action="reset")
+        self.assertEqual(reset["timers"][0]["remaining_seconds"], 0)
 
-    def test_query_is_the_default_action(self):
-        out = ammit.handle()                       # action defaults to "query"
+    def test_query_reads_every_slot(self):
+        out = ammit.handle(action="query")
         self.assertIn("timers", out)
         self.assertEqual(len(out["timers"]), ammit.MAX_SLOTS)
+
+    def test_start_without_a_duration_does_not_fire_the_alarm(self):
+        # The bug: duration defaulted to 0, so "start a timer" saved a running
+        # 0-second countdown — expired=True on the next read, which is exactly
+        # the edge AmmitAlarm fires its popup and spoken announcement on.
+        # 0.001 min rounds to 0 s — the same instant alarm by another route.
+        for bad in (None, 0, -5, 0.001):
+            with self.subTest(duration_minutes=bad):
+                out = ammit.handle(action="start", duration_minutes=bad)
+                self.assertTrue(out["error"].startswith("bad_arguments: "), out)
+                t = ammit.query_all()[0]
+                self.assertFalse(t["running"])
+                self.assertFalse(t["expired"])
+
+    def test_a_duration_that_is_not_a_number_is_a_slug_not_a_raise(self):
+        # "ten" * 60 used to build "tenten…" and int() raised ValueError (§2:
+        # handle() never raises). The gate catches this for the model; a
+        # direct caller must be safe too.
+        for bad in ("ten", float("nan"), float("inf"), [5]):
+            with self.subTest(duration_minutes=bad):
+                out = ammit.handle(action="start", duration_minutes=bad)
+                self.assertTrue(out["error"].startswith("bad_arguments: "), out)
+                self.assertFalse(ammit.query_all()[0]["running"])
+
+    def test_a_numeric_string_duration_still_starts(self):
+        out = ammit.handle(action="start", duration_minutes="2")
+        self.assertTrue(out["timers"][0]["running"])
+
+    def test_an_unknown_action_is_refused_and_changes_nothing(self):
+        # Used to run `query` silently.
+        ammit.handle(action="start", duration_minutes=5)
+        out = ammit.handle(action="explode")
+        self.assertTrue(out["error"].startswith("unknown_action: "), out)
+        self.assertTrue(ammit.query_all()[0]["running"])
+
+    def test_the_handler_takes_only_what_the_schema_declares(self):
+        # `slot` used to be a hidden parameter the model was never shown.
+        import inspect
+        declared = set(ammit.TOOL_DEFINITION["function"]["parameters"]["properties"])
+        self.assertEqual(set(inspect.signature(ammit.handle).parameters), declared)
 
     def test_handle_never_raises_on_corrupt_state(self):
         # Attack the real _load seam: a garbled file must degrade to defaults,
@@ -163,6 +211,31 @@ class TestHandle(_TempState):
         out = ammit.handle(action="query")
         self.assertIn("timers", out)
         self.assertFalse(out["timers"][0]["running"])
+
+
+class TestSaveIsAtomic(_TempState):
+    """The state is written beside the file and os.replace()d into place, so a
+    crash mid-write leaves the old timer whole (CONVENTIONS §9)."""
+
+    def test_a_crash_mid_write_leaves_the_old_timer_whole(self):
+        ammit.start_timer(0, 300)
+        before = ammit.STATE_FILE.read_text(encoding="utf-8")
+        real_write = Path.write_text
+
+        def torn(path, text, *args, **kwargs):
+            real_write(path, text[:10], *args, **kwargs)   # half a file, then the crash
+            raise OSError("disk pulled mid-write")
+
+        with mock.patch.object(Path, "write_text", torn):
+            ammit.stop_timer(0)
+        self.assertEqual(ammit.STATE_FILE.read_text(encoding="utf-8"), before)
+
+    def test_a_save_lands_in_the_state_file_and_leaves_no_temp(self):
+        ammit.start_timer(0, 300)
+        # The write really moved here (STATE_FILE is read at call time), and
+        # the temp file was replaced into place, not left beside it.
+        self.assertEqual(os.listdir(self._tmp.name), ["timer_state.json"])
+        self.assertTrue(ammit.query_all()[0]["running"])
 
 
 if __name__ == "__main__":

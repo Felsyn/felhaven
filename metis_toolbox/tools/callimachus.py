@@ -19,14 +19,20 @@ Contract:    First MULTI-TOOL module — exports TOOL_DEFINITIONS (a list of two
              zeno/eudoxus row of CONVENTIONS §2): no fetch(), no Kairos worker.
              Neither handler ever raises; every failure is an {"error": ...}
              dict with a stable identifier first, detail second (Midas pattern).
+             Every request goes out through one opener that connects only to
+             public internet addresses (no loopback, no LAN), checked on every
+             redirect hop, with the checked IP the one dialled. Which URLs
+             fetch_page may be CALLED with is Pythia's rule, not this module's
+             (pythia._dispatch, URL provenance).
 
 Source:      Brave Search API — one JSON GET over stdlib urllib (free tier,
              ~2k/mo). SearXNG on Obelisk is the documented sovereignty upgrade,
              out of scope here.
 
 Key:         The Brave API key lives ONLY in the Cerberus Vault (the sole
-             secrets authority) under the entry name 'brave_api_key'. Seed it
-             once with:  python cerberus.py set <PIN> brave_api_key <key>
+             secrets authority) under the entry name 'brave_api_key'. Set it
+             in its row of the CERBERUS tab, or with
+             `python cerberus.py set brave_api_key` (hidden prompts).
              It is read at call time, never cached to disk, never in this file,
              the repo, an env var, or a gitignored key file. Because vault_get()
              needs an unlocked session, web search only works in a session where
@@ -47,9 +53,12 @@ Upstream:    pythia.py (registration + dispatch — the sole registry consumer).
              (A second, voice-side registry once existed in
              metis_toolbox/__init__.py; it was retired with voice input, so
              Pythia's typed chat is now the only way any tool is called.)
-Downstream:  cerberus.py (vault_get for the Brave key).
+Downstream:  cerberus.py (vault_get for the Brave key); tools/hermes.py (the
+             deadline, the dial wrapper and the bounded read, under this
+             module's own opener and its address guard).
 
-Requires:    stdlib only — json, logging, socket, urllib, html.parser. No pip
+Requires:    stdlib only — http.client, ipaddress, json, logging, socket,
+             urllib, html.parser. No pip
              deps (no requests, no beautifulsoup4). Plus cerberus (app-root
              sibling) for the key.
 
@@ -62,6 +71,8 @@ V0.02:       Audited 2026-07-24 — every search_failed/fetch_failed error dict
              output-contract allowlist.
 """
 
+import http.client
+import ipaddress
 import json
 import logging
 import os
@@ -83,6 +94,7 @@ if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import cerberus
+from tools import hermes
 
 log = logging.getLogger("METIS.callimachus")
 
@@ -92,6 +104,7 @@ _RESULT_COUNT       = 3            # search_web returns at most this many result
 _PAGE_CHARS         = 4000        # fetch_page text budget before truncation
 _TIMEOUT_S          = 10          # socket timeout for every request
 _MAX_DOWNLOAD_BYTES = 1_048_576   # 1 MB hard cap on a fetched page
+_SEARCH_MAX_BYTES = 64 * 1024     # Brave's answer; measured 2026-10-01: 10,334 B at count=3 (4x, power of two)
 _SAFESEARCH         = "moderate"  # Brave 'safesearch' param passthrough
 
 _SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
@@ -167,10 +180,6 @@ class _NonHttpsRedirect(Exception):
     """A redirect pointed at a non-https URL — rejected (handoff fetch_page)."""
 
 
-class _TooLarge(Exception):
-    """A response exceeded _MAX_DOWNLOAD_BYTES (Content-Length or while reading)."""
-
-
 class _HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
     """Follow redirects, but refuse to leave https and cap the hop count."""
 
@@ -190,32 +199,139 @@ class _HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_OPENER = urllib.request.build_opener(_HttpsOnlyRedirect())
+# ── The address guard — public internet only (CONVENTIONS §12) ────────────────
+# fetch_page takes a URL from the model, and the model reads text strangers
+# wrote. Without this, "https://192.168.1.1/" (a router's admin page) or
+# "https://localhost:8443/" would be fetched and its text handed back to the
+# model: the home network, probed from the inside on a stranger's say-so.
+#
+# The check lives in the CONNECTION, not in a look at the URL beforehand, for
+# two reasons. A redirect is a new connection, so every hop is checked, not
+# just the first URL. And the address that was checked is the address that is
+# dialled: the name is resolved once, here, and we connect to that IP, so a DNS
+# answer that changes between a check and a connect (rebinding) has nothing to
+# change. TLS still verifies the certificate against the NAME (server_hostname
+# stays self.host), so pinning the IP costs no https guarantee.
+
+# A few IPv6 ranges carry an IPv4 address inside them. The outer address can
+# look public while the inner one is 127.0.0.1, so the inner one is checked too.
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
 
 
-def _fetch_bytes(req: urllib.request.Request, cap: "int | None") -> "tuple[bytes, str]":
-    """Open req through the https-only opener and return (body, final_url).
+class _PrivateAddress(OSError):
+    """The host resolved to an address that is not on the public internet.
+    An OSError, so urllib wraps it in URLError like any failed connect."""
 
-    When `cap` is set, refuse an oversize body — first by Content-Length if the
-    server declares one, then by reading one byte past the cap and rejecting if
-    it arrives (a lying/absent Content-Length can't sneak past). Raises
-    _TooLarge / _NonHttpsRedirect / socket.timeout / urllib errors for the
-    caller to translate."""
-    resp: Any = _OPENER.open(req, timeout=_TIMEOUT_S)
+
+def _embedded_v4(ip: ipaddress.IPv6Address) -> "ipaddress.IPv4Address | None":
+    """The IPv4 address an IPv6 address carries inside it, if it carries one."""
+    if ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    if ip.sixtofour is not None:
+        return ip.sixtofour
+    if ip in _NAT64:
+        return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    return None
+
+
+def _is_public(address: str) -> bool:
+    """Is this resolved address on the public internet?
+
+    `is_global` does the work: it is False for loopback, the private ranges,
+    link-local, carrier-grade NAT (100.64/10), "this network" (0/8), the IPv6
+    unique-local and link-local ranges, and the reserved blocks. Multicast is
+    ruled out separately, because Python counts some of it as global. Anything
+    that doesn't parse is not public."""
     try:
-        final_url = str(resp.geturl())
-        if cap is not None:
-            declared = resp.headers.get("Content-Length")
-            if declared and str(declared).isdigit() and int(declared) > cap:
-                raise _TooLarge()
-            data = resp.read(cap + 1)
-            if len(data) > cap:
-                raise _TooLarge()
-        else:
-            data = resp.read()
-        return bytes(data), final_url
-    finally:
-        resp.close()
+        ip = ipaddress.ip_address(address.split("%", 1)[0])   # drop an IPv6 zone
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address):
+        inner = _embedded_v4(ip)
+        if inner is not None and not _is_public(str(inner)):
+            return False
+    return ip.is_global and not ip.is_multicast
+
+
+def _connect_public(address: "tuple[str, int]", timeout: "float | None",
+                    source_address: "tuple[str, int] | None" = None) -> socket.socket:
+    """socket.create_connection, but only to the public internet.
+
+    Resolves the host ONCE and refuses if ANY answer is not public. One bad
+    answer is enough: a name that returns a public and a private address is a
+    name built to be tried twice. Then it dials the checked addresses
+    themselves, in the order the resolver gave them."""
+    host, port = address
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    ips = [str(info[4][0]) for info in infos]
+    if not ips or not all(_is_public(ip) for ip in ips):
+        log.warning("Callimachus: refused %s — resolves to a non-public address",
+                    host)
+        raise _PrivateAddress(f"{host} is not a public internet address")
+    for ip in ips[:-1]:
+        try:
+            return socket.create_connection((ip, port), timeout, source_address)
+        except OSError:
+            continue                             # the next checked address
+    return socket.create_connection((ips[-1], port), timeout, source_address)
+
+
+class _GuardedHTTPSConnection(http.client.HTTPSConnection):
+    """An HTTPSConnection whose TCP connect goes through _connect_public.
+
+    http.client dials through its _create_connection hook, and everything
+    else — TLS, the certificate check against the name, TCP_NODELAY — stays
+    stdlib's own. Swapping one hook is less code to get wrong than a
+    hand-written connect().
+
+    hermes adds the deadline without touching the guard: bounded_dial wraps
+    _connect_public (the same addresses, checked the same way) so the socket
+    it returns re-arms its timeout from the deadline, and hermes.TLS_CONTEXT
+    does the same for the TLS socket. The context is set here because a
+    handler's context= never reaches a connection class passed to do_open."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs["context"] = hermes.TLS_CONTEXT
+        super().__init__(*args, **kwargs)
+        self._create_connection = hermes.bounded_dial(_connect_public)
+
+
+class _GuardedHTTPSHandler(urllib.request.HTTPSHandler):
+    """Route every https request, redirects included, through the guard."""
+
+    def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+        return self.do_open(_GuardedHTTPSConnection, req)
+
+
+# ProxyHandler({}) turns off proxies from the environment (HTTPS_PROXY). With a
+# proxy, the guard would check the PROXY's address and the proxy would dial the
+# real target unchecked. search_web shares this opener: Brave's host is public,
+# so the guard changes nothing there (CONVENTIONS §12, 2026-09-30).
+def _build_opener() -> urllib.request.OpenerDirector:
+    """The one opener both tools use. A function so a test can build it with a
+    proxy in the environment and see that none is honoured."""
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), _GuardedHTTPSHandler(), _HttpsOnlyRedirect())
+
+
+_OPENER = _build_opener()
+
+
+def _fetch_bytes(req: urllib.request.Request, cap: int) -> "tuple[bytes, str]":
+    """Open req through the guarded opener and return (body, final_url).
+
+    The whole request, connect to last byte, runs inside a hermes deadline
+    (hermes.deadline_for: 20 s at these caps), and the body is read by
+    hermes.read_bounded: refused by Content-Length, then by reading one byte
+    past the cap. Raises hermes.TooLarge / _NonHttpsRedirect / socket.timeout
+    (hermes.DeadlinePassed is one) / urllib errors for the caller to
+    translate."""
+    with hermes.within(hermes.deadline_for(cap, _TIMEOUT_S), _TIMEOUT_S):
+        resp: Any = _OPENER.open(req, timeout=_TIMEOUT_S)
+        try:
+            return hermes.read_bounded(resp, cap), str(resp.geturl())
+        finally:
+            resp.close()
 
 
 # ── Brave key (Cerberus Vault only) ───────────────────────────────────────────
@@ -280,18 +396,21 @@ def search_web(query: str) -> dict[str, Any]:
         headers={
             "X-Subscription-Token": key,
             "Accept":               "application/json",
+            "Accept-Encoding":      "identity",
             "User-Agent":           _USER_AGENT,
         },
     )
 
     try:
-        raw, _ = _fetch_bytes(req, cap=None)
+        raw, _ = _fetch_bytes(req, cap=_SEARCH_MAX_BYTES)
     except urllib.error.HTTPError as exc:
         if exc.code == 429:
             return {"error": "rate_limited"}
         return {"error": f"search_failed: HTTP {exc.code}"}
     except socket.timeout:
         return {"error": "timeout"}
+    except hermes.TooLarge:
+        return {"error": "search_failed: response over the size cap"}
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, socket.timeout):
             return {"error": "timeout"}
@@ -322,8 +441,12 @@ def fetch_page(url: str) -> dict[str, Any]:
     _PAGE_CHARS. Never raises.
 
     Success:  {"url": str, "text": str, "truncated": bool}
-    Errors:   {"error": "non_https_url" | "timeout" | "too_large"
-                          | "fetch_failed: <detail>"}
+    Errors:   {"error": "non_https_url" | "private_address" | "timeout"
+                          | "too_large" | "fetch_failed: <detail>"}
+
+    private_address: the host, or a host it redirected to, is this computer
+    or the local network. Refused at connect time by _GuardedHTTPSConnection,
+    even for a URL the user typed — a browser is the tool for a router page.
     """
     u = (url or "").strip()
     # https-only, rejected before any network I/O (and a redirect off https is
@@ -331,14 +454,17 @@ def fetch_page(url: str) -> dict[str, Any]:
     if not u.lower().startswith("https://"):
         return {"error": "non_https_url"}
 
-    req = urllib.request.Request(u, headers={"User-Agent": _USER_AGENT})
+    req = urllib.request.Request(u, headers={"User-Agent": _USER_AGENT,
+                                             "Accept-Encoding": "identity"})
 
     try:
         raw, final_url = _fetch_bytes(req, cap=_MAX_DOWNLOAD_BYTES)
     except _NonHttpsRedirect:
         return {"error": "non_https_url"}
-    except _TooLarge:
+    except hermes.TooLarge:
         return {"error": "too_large"}
+    except _PrivateAddress:                      # urllib wraps it; belt and braces
+        return {"error": "private_address"}
     except urllib.error.HTTPError as exc:
         return {"error": f"fetch_failed: HTTP {exc.code}"}
     except socket.timeout:
@@ -346,6 +472,8 @@ def fetch_page(url: str) -> dict[str, Any]:
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, socket.timeout):
             return {"error": "timeout"}
+        if isinstance(exc.reason, _PrivateAddress):
+            return {"error": "private_address"}
         # Foreign message (socket/OS error) — class only, never its text (§2).
         return {"error": f"fetch_failed: {type(exc.reason).__name__}"}
     except Exception as exc:

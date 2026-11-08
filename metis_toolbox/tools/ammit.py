@@ -30,13 +30,29 @@ V0.02:       Audited 2026-07-24 — countdown display only, no alarm (deliberate
              itself is untouched, only the alarm styling both displays draw
              from `expired` calms down (red -> green) once the alert has been
              seen. Stop/Reset is still the only way to actually clear it.
+
+2026-09-27:  handle() hardened (Pythia tools audit, H1/H2). `start` with no,
+             zero, negative or non-numeric duration used to save a running
+             0-second countdown — expired on the next read, which is the edge
+             AmmitAlarm fires on, so "start a timer" set the alarm off at
+             once; "ten" raised. Both are now bad_arguments slugs that save
+             nothing. An unknown action is unknown_action instead of a silent
+             query, every action returns the timer state it produced (was
+             {"ok": True}), and the undeclared `slot` parameter is gone.
+
+2026-10-05:  _save() writes timer_state.json.tmp beside the file and
+             os.replace()s it into place (the argus/plutus shape). It used to
+             write the file where it stood, so a crash mid-write left a torn
+             file, which _load() reads as "no timer" (CONVENTIONS §9).
 """
 
 import json
 import logging
+import math
+import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 log = logging.getLogger("METIS.ammit")
 
@@ -65,8 +81,11 @@ def _load() -> dict[str, Any]:
 
 
 def _save(state: dict[str, Any]) -> None:
+    """Temp-then-replace so a crash mid-write can't truncate the timer."""
     try:
-        STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        os.replace(tmp, STATE_FILE)
     except Exception as e:
         log.error(f"Ammit: save failed: {e}")
 
@@ -175,8 +194,8 @@ TOOL_DEFINITION = {
                 },
                 # No `slot` parameter: there is exactly one timer, so declaring it
                 # only asks the model to reason about a value that can never vary.
-                # handle() still defaults slot=1. If MAX_SLOTS ever grows, it
-                # comes back.
+                # handle() always uses slot 0. If MAX_SLOTS ever grows, it comes
+                # back — declared here AND accepted by handle(), never just one.
                 "duration_minutes": {
                     "type": "number",
                     "description": "Duration in minutes. Required for start action.",
@@ -188,24 +207,46 @@ TOOL_DEFINITION = {
 }
 
 
-def handle(action: str = "query", slot: int = 1, duration_minutes: float = 0) -> dict[str, Any]:
-    """
-    Called by Pythia's dispatcher when the model invokes manage_timer.
-    slot is 1-indexed in the contract; converted to 0-indexed internally.
-    """
-    idx = max(0, min(MAX_SLOTS - 1, slot - 1))
+def _duration_seconds(duration_minutes: object) -> Optional[int]:
+    """duration_minutes as a whole number of seconds, at least 1 — or None.
 
+    Seconds, not minutes, are what get checked: 0.001 min rounds to a 0-second
+    countdown, which is the same instant alarm as no duration at all. Takes
+    `object` because a direct caller can pass anything; Pythia's argument gate
+    has already made it a number on the model's path."""
+    if duration_minutes is None or isinstance(duration_minutes, bool):
+        return None
+    if not isinstance(duration_minutes, (int, float, str)):
+        return None
+    try:
+        minutes = float(duration_minutes)
+    except ValueError:
+        return None
+    if not math.isfinite(minutes):
+        return None
+    seconds = round(minutes * 60)
+    return seconds if seconds >= 1 else None
+
+
+def handle(action: str, duration_minutes: Optional[float] = None) -> dict[str, Any]:
+    """
+    Called by Pythia's dispatcher when the model invokes manage_timer. Never
+    raises. Every action returns {"action", "timers"} — the state it produced,
+    in query's shape — or a §2 slug: bad_arguments (start without a usable
+    duration; nothing is saved) or unknown_action.
+    """
     if action == "start":
-        start_timer(idx, int(duration_minutes * 60))
-        return {"ok": True, "slot": slot, "duration_minutes": duration_minutes}
+        seconds = _duration_seconds(duration_minutes)
+        if seconds is None:
+            return {"error": "bad_arguments: start needs a positive duration_minutes"}
+        start_timer(0, seconds)
     elif action == "stop":
-        stop_timer(idx)
-        return {"ok": True, "slot": slot}
+        stop_timer(0)
     elif action == "reset":
-        reset_timer(idx)
-        return {"ok": True, "slot": slot}
-    else:  # query
-        return {"timers": query_all()}
+        reset_timer(0)
+    elif action != "query":
+        return {"error": f"unknown_action: {action!r} — use start, stop, reset or query"}
+    return {"action": action, "timers": query_all()}
 
 
 # ── Standalone test ───────────────────────────────────────────────────────────

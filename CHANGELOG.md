@@ -14,6 +14,153 @@ New here? Start with [`README.md`](README.md) for what Felhaven is,
 [`SETUP.md`](SETUP.md) to run it, and [`CONVENTIONS.md`](CONVENTIONS.md) for how
 the code is put together.
 
+- `2026-11-08` — `BACKLOG.md`: drops the smoke tests' `<<ThemeChanged>>` stderr item; no such line in two local full runs or CI on Python 3.13 (Tcl 8.6.15), against 63 on the 2026-09-29 CI run (3.10 and 3.11).
+- `2026-11-08` — `BACKLOG.md`: drops the three leftover worktrees item; their sessions are archived and the worktrees removed.
+- `2026-11-07` — `publish/`: Clio stays out of the public snapshot; `private_paths.txt` lists its files and `public_tree.py` removes them and every pointer to them.
+- `2026-11-07` — `publish/publish-snapshot.sh`: the public tree must pass its own test suite before a push; `--dry-run [<branch>]` rehearses without pushing.
+- `2026-11-07` — `tests/test_file_writes.py`, `tests/test_process_launches.py`: in a tree without `publish/`, lines naming a file it lacks are dropped.
+- `2026-11-07` — `BACKLOG.md`: Auto-DJ's picks are kept nowhere lasting, and Emanon's times look wrong (found 2026-10-02, never landed).
+- `2026-11-07` — `BACKLOG.md`: drops Pheme's `wvnews` HTTP 429 item; the log shows none since 2026-10-08 and the feed loads.
+- `2026-11-07` — `tools/hermes.py`: `TLS_CONTEXT` offers ALPN `http/1.1` and post-handshake auth, as http.client's own context does; Hacker News refused the bare handshake with HTTP 419.
+- `2026-11-01` — `panels/cerberus_panel.py`: the Vault note reads "keys show only on reveal", not "decrypt": tools decrypt a key whenever they call for it.
+- `2026-11-01` — `requirements.txt`: certifi 2026.7.22 → 2026.10.23, which drops the emSign ECC Root CA - G3 root (its intermediates' keys were compromised, GHSA-6q48-6c7w-9gw2); no other pin moved.
+- `2026-10-31` — `tools/clio.py`: every line of text stands on its baseline, a capital's height below its y, so a caption line with no capital or tall letter no longer draws 11 px high; layout checks measure each glyph's height from the font.
+- `2026-10-31` — `tools/herodotus.py`: the filename allowlist is ASCII only; the four non-ASCII letters `IGNORECASE` also let through are refused.
+- `2026-10-31` — `tools/hypatia.py`: `set_preset()` never raises; with no star catalog a preset click logs a warning and the panel reads "stale".
+- `2026-10-31` — `tools/demeter.py`: `ingest()` reads `GRID` once and hands it to every stage, so a test's 16-cell patch renders 16 x 16, not 1024 x 1024.
+- `2026-10-31` — `tests/test_kairos.py`: runs on its own (`-m unittest tests.test_kairos`), not only under `discover -s tests`.
+- `2026-10-31` — `tools/helios.py`, `tools/selene.py`: sun and moon times follow Settings' 24-hour clock ("05:56", "05:56 – 06:56"), in the panel and the tools alike.
+- `2026-10-31` — `panels/artemis_panel.py`: CACHE AREA's confirm says ~75–90 MB, or ~3–15 MB with the vault sealed (measured), instead of ~10–30 MB.
+- `2026-10-31` — `panels/aura_panel.py`: drops its unused `tools.aura` import.
+- `2026-10-28` — `tools/clio.py`: QC measures every finished video; loudness outside -15..-13 LUFS or a final hold under 1.5 s fails the run, and the video is renamed `.failed-qc.mp4`.
+- `2026-10-28` — `tools/clio.py`: run with no command, it renders a bundled two-line demo episode (the smoke check).
+- `2026-10-28` — `README_PANTHEON/clio.md`: new. Clio's Pantheon page and index row.
+- `2026-10-28` — `tools/clio.py`: segments sharing a `short` tag make one 9:16 short with its own narration, face and loudness; `render` now makes the long-form video and every short, and `short` makes one.
+- `2026-10-28` — `tools/clio.py`: the card-only vertical reel is gone; a short tagged on every segment makes the same video.
+- `2026-10-28` — `panels/clio_face.py`: the face window sits on screen at zero opacity instead of off screen, where Windows had begun painting it lazily (about 1 s a frame).
+- `2026-10-28` — `tools/clio.py`: `long` makes the 16:9 1920x1080 video: captured panels with Pythia's face as an inset, title cards, and a two-line caption strip below.
+- `2026-10-28` — `tools/clio.py`: `capture` records Felhaven's window for one segment while its line plays as a cue, and notes where the cue began in the clip.
+- `2026-10-28` — `config/clio_config.json`: `window_title`, the Felhaven window Clio records, held to `felhaven.py`'s title by a test.
+- `2026-10-28` — `tools/clio.py`: a segment's `pronounce` hint respells a word for the voice only (`{"live": "liv"}`); the caption keeps the word as written.
+- `2026-10-28` — `tools/clio.py`: `render` makes the vertical 1080x1920 video: Pythia's face, verbatim captions clear of the platforms' safe zones, audio at -14 LUFS.
+- `2026-10-28` — `panels/clio_face.py`: new. Renders the real face off-screen, frame by frame, as raw video for Clio.
+- `2026-10-28` — `panels/pythia_face.py`: `advance()` draws one frame and schedules nothing; an optional `rng` makes a seeded face draw the same frames twice.
+- `2026-10-28` — `tools/clio.py`: new. Clio validates an episode script, speaks it in Pythia's voice and writes the narration track and `timing.json`, caching each line.
+- `2026-10-28` — `config/clio_config.json`: new. Clio's default voice, af_nicole at speed 1.3.
+- `2026-10-28` — `calliope.py`: `synthesize()` takes `speed=` for one call; live narration keeps the configured speed.
+- `2026-10-06` — `BACKLOG.md`: Artemis's cached-areas list should scroll past 5 areas, CACHE AREA re-downloads what is already cached, and its size estimate is stale.
+- `2026-10-05` — `tests/test_file_writes.py`: new. Every file write, move and delete is listed with its operations, folders, path sources and verdict; a new or stale one fails, and so does a new caller of a checked helper.
+- `2026-10-05` — `tests/test_file_writes.py`: a function that writes a file's content must `os.replace` it into place, or be listed with why a torn file is harmless there.
+- `2026-10-05` — `metis_logging.py`: a log record is one entry; line breaks in a message are escaped and a traceback's lines lose the ` | ` delimiter, so quoted text can't start a line Emanon reads as an entry.
+- `2026-10-05` — `tools/ammit.py`: the timer is saved through a temp file and `os.replace`, so a crash mid-write can't tear it.
+- `2026-10-05` — `tools/eratosthenes.py`: a waypoint or geocoder answer that isn't a finite, in-range coordinate is refused instead of reaching the chart.
+- `2026-10-05` — `BACKLOG.md`: semgrep write sinks parked; Cerberus's Ledger has no cap; Herodotus's filename allowlist takes four non-ASCII letters.
+- `2026-10-04` — `tools/demeter.py`: records the live confirmation of the cell limit (3,836,651 cells against 5,764,230, 67%) and of a full-area ingest's memory (+171 MB peak).
+- `2026-10-03` — `tools/demeter.py`: the elevation grid is parsed from the downloaded bytes, 256 KiB at a time, into an int16 array: 0.13x the download instead of 7.5x, and a little faster.
+- `2026-10-03` — `tools/demeter.py`: a grid header claiming more cells than its box can hold (1.5x) is refused before anything is allocated; every ingest logs the cells against that limit.
+- `2026-10-03` — `tools/demeter.py`: a grid value over 64 characters is refused, a bad one is quoted at most 40 characters, and a non-finite header field is `bad_grid`.
+- `2026-10-03` — `tools/cadmus.py`: a part is one flat `array("d")`, read through `cadmus.points()`; the largest county's roads decode at 1.5x the file instead of 6.3x, 4x faster.
+- `2026-10-03` — `tools/cadmus.py`: `read_pair` checks the .dbf's record count against the .shp's before decoding any record.
+- `2026-10-03` — `BACKLOG.md`: Demeter's raster-stage memory, and a test whose `GRID` patch shrinks nothing.
+- `2026-10-03` — `tests/test_process_launches.py`: new. Every process launch and shell opener is listed with its program, argument sources and verdict; a new or stale one fails, and so does a new caller of a checked helper.
+- `2026-10-03` — `tests/test_process_launches.py`: mpv's IPC pipe takes only the commands, properties and loadfile options Morpheus uses today.
+- `2026-10-03` — `tests/semgrep/felhaven_sinks.yml`: new. A taint tripwire from the network, config and the model into launches, run by hand; its sinks are held to the launch guard's.
+- `2026-10-03` — `tools/echo.py`, `tools/orpheus.py`: ffmpeg is only ever handed absolute paths; anything else is refused before it starts.
+- `2026-10-03` — `tools/morpheus.py`: `play()` loads only http(s) URLs; anything else is refused before mpv starts.
+- `2026-10-03` — `tools/aegis.py`: `record yt-dlp` checks the file against the latest release's published sums before it ever runs it.
+- `2026-10-03` — `SETUP.md`: section 5 describes `record yt-dlp`'s new order.
+- `2026-10-03` — `tests/test_palette_guard.py`: also scans `tests/semgrep/`.
+- `2026-10-03` — `BACKLOG.md`: `play_music` also answers `now_playing` when `play()` did nothing.
+- `2026-10-03` — `tools/hermes.py`: a connect that times out is `ConnectTimeout`, both `Offline` and `Timeout`, so a stopped Ollama reads "offline" again (Windows refuses a closed local port only after ~2 s).
+- `2026-10-03` — `tools/demeter.py`: records the live confirmation of `grid_cap()`: 75.6 MB against a 109.4 MB cap (69%).
+- `2026-10-03` — `BACKLOG.md`: Pheme's `hackernews` feed answering HTTP 419.
+- `2026-10-01` — `config/bin_manifest.json`: new. yt-dlp 2026.08.19 and ffmpeg 8.1.2 matched their publishers' checksums; mpv's untraceable build was replaced with shinchiro's official 20260610 x86_64 build.
+- `2026-10-01` — `tools/aegis.py`: new. A program in `bin/` must match `config/bin_manifest.json` before it runs; a mismatch is refused, with no PATH fallback. A PATH-only program runs unverified, warned once.
+- `2026-10-01` — `tools/morpheus.py`, `tools/echo.py`, `tools/orpheus.py`: find mpv, yt-dlp and ffmpeg through aegis; `available()` reports a refusal as `problem`.
+- `2026-10-01` — `panels/morpheus_panel.py`, `panels/echo_panel.py`, `panels/orpheus_panel.py`: a refused program says so and names the fix, instead of "not found".
+- `2026-10-01` — `config/cerberus_manifest.json`: Custody lists `bin_manifest.json`.
+- `2026-10-01` — `SETUP.md`: section 5 names each program's official source and how to record a deliberate update.
+- `2026-10-01` — `BACKLOG.md`: parks a per-module egress allowlist (hermes is its home) and adds Artemis's cancel waiting out a download.
+- `2026-10-01` — `requirements.in`: requests is now only Pythia's Ollama stream and a dev script; every other read uses `tools/hermes.py`.
+- `2026-10-01` — `tools/demeter.py`: the elevation grid reads through hermes with a cap computed from the box (`grid_cap()`, ~109 MB for a full area; a real one is ~69 MB), and logs bytes against it.
+- `2026-10-01` — `panels/artemis_panel.py`: terrain skipped as `too_large` reads "the elevation download was far larger than expected".
+- `2026-10-01` — `tests/test_network_reads.py`: the migration list is empty; every runtime reader goes through hermes.
+- `2026-10-01` — `tools/midas.py`: quotes read through hermes (64 KiB cap; a quote measured 93 B); an HTTP error logs its status from `HTTPStatus.status`, still never the message.
+- `2026-10-01` — `tools/callimachus.py`: both tools run inside a hermes deadline and read through its bounded read; `search_web` is capped at 64 KiB (Brave measured 10 KB). The address guard is unchanged.
+- `2026-10-01` — `tools/artemis.py`: `download()` reads through hermes and takes a required `cap`; a file over it is `too_large`, not retried. New `read_member()` refuses a zip member over its cap before inflating it.
+- `2026-10-01` — `tools/hecate.py`, `tools/poseidon.py`: census zips and their members are capped at 1.5x the largest 2025 file, measured across every county (roads 35 MiB, members 53 MiB).
+- `2026-10-01` — `panels/artemis_panel.py`: maps `too_large` to "a download was far larger than expected".
+- `2026-10-01` — `tests/test_artemis_offline.py`: the network block also blocks `hermes.get`, so a render path that reads can't fail quietly as "offline".
+- `2026-10-01` — `tools/eratosthenes.py`: the census geocoder reads through hermes (64 KiB cap; answers measured at 665 B), and an HTTP error status is now `geocode_failed: HTTPStatus`.
+- `2026-10-01` — `tools/aether.py`: both probes read through hermes (plain http allowed for them only, 64 KiB cap); a page too big to be the 22-byte probe reads as `limited`.
+- `2026-10-01` — `tools/pheme.py`: each feed reads through hermes, capped at 1 MiB (largest shipped feed 244 KB), and ends at its deadline; a feed over the cap reports `feed_too_large`.
+- `2026-10-01` — `panels/pheme_panel.py`: maps `feed_too_large` to "feed is too large to read".
+- `2026-10-01` — `tools/aura.py`: reads through hermes, capped at 256 KiB (wttr.in) and 64 KiB (Open-Meteo), so the cache lock is held 24 s at worst; a test drips both sources and times it.
+- `2026-10-01` — `tools/hermes.py`: percent-encodes a URL's spaces and non-ASCII characters, as requests did, so a location such as "Zürich" still reaches wttr.in.
+- `2026-10-01` — `tools/hermes.py`: new. One bounded network read: a byte cap and a deadline for the whole request, enforced inside the socket; https only, and a redirect may not leave https.
+- `2026-10-01` — `tests/test_network_reads.py`: new guard. A runtime module that imports a network library itself fails, unless it is allowlisted with a reason or still on the migration list.
+- `2026-10-01` — `tools/morpheus.py`: `describe()` takes only a YouTube watch URL, rebuilds it from the video id, and passes `--` before it, so yt-dlp can't read it as an option.
+- `2026-10-01` — `tools/hypnos.py`, `tests/test_hypnos.py`: record the live readings (Win+L, an hour idle, a real sleep against Windows' log) in the Measured note.
+- `2026-09-30` — `CONVENTIONS.md`: §12 records Cerberus v2 (DPAPI at rest, the PIN as a policy gate, polling for lock/sleep/idle, loud tampering, contained Custody).
+- `2026-09-30` — `BACKLOG.md`: the per-row REPLACE and the Home lamp are done; a passphrase vault is parked until Plutus holds real data.
+- `2026-09-30` — `.gitignore`: retired vault files (`cerberus_vault*.old`).
+- `2026-09-30` — `SETUP.md`, `README.md`, `.env.example`: keys go in through the CERBERUS tab or hidden prompts, never on the command line; what to do after a Windows password reset.
+- `2026-09-30` — `publish/SECURITY.md`: what Cerberus protects (a copied vault file) and what it doesn't (anything running as you); the PIN decrypts nothing.
+- `2026-09-30` — `tests/_cerberus_sandbox.py`: new — points Cerberus at a temp dir and resets it without ever writing the real ledger.
+- `2026-09-30` — `tests/test_secret_fixtures.py`: new — PIN and key fixtures must say "fake", no tracked literal may look like an API key, and `KNOWN_KEYS` matches every key a tool reads.
+- `2026-09-30` — `felhaven.py`: registers the `cerberus` worker's three faces (the tab, the Dynastic Vault, the lamp); locks Cerberus first on exit.
+- `2026-09-30` — `panels/midas_panel.py`: the Dynastic Vault reseals within 2 s of any Cerberus lock and says why; its no-PIN message points at the CERBERUS tab.
+- `2026-09-30` — `panels/home_panel.py`: a Cerberus lamp beside Scraptoken Flux — dim when sealed, amber when open, red on a tamper alarm.
+- `2026-09-30` — `panels/cerberus_panel.py`: a red banner for tamper alarms, with RETIRE OLD VAULT (two clicks) and dismiss; refused Custody rows can't be clicked.
+- `2026-09-30` — `panels/cerberus_panel.py`: a row per known key with set/replace in a masked box (the old key is never shown); reseals on any outside lock and clears revealed keys.
+- `2026-09-30` — `kairos.py`: new `cerberus` worker, every 2 s.
+- `2026-09-30` — `tools/hypnos.py`: new — reads whether Windows is locked, how long the PC has slept, and how long since any keyboard or mouse input.
+- `2026-09-30` — `cerberus.py`: the CLI takes PINs and keys only at hidden prompts (`set NAME`, `setpin`) and refuses them on the command line; `get` removed; `status` says which keys read back, never printing one.
+- `2026-09-30` — `cerberus.py`: Custody opens only listed `.json` files inside `config/` (`custody_open`); refusals are Ledger rows.
+- `2026-09-30` — `cerberus.py`: tamper alarms (an old-format or unparseable vault, a key that won't decrypt, a PIN reset) write a Ledger row and an ERROR; unlocks, wrong PINs and locks are Ledger rows.
+- `2026-09-30` — `cerberus.py`: one session lock, held across a whole read; `fetch()` locks on a Windows lock, sleep, or an hour with no input; `lock()` takes a reason.
+- `2026-09-30` — `cerberus.py`: the PIN is a policy gate that decrypts nothing, and changing it touches no key; a PIN file recreated while the vault holds keys raises a `pin_reset` alarm.
+- `2026-09-30` — `cerberus.py`: keys encrypted with Windows DPAPI to the current user, each bound to its entry name; the PIN-derived key (PBKDF2) and the hand-built cipher are gone; a v1 vault is refused and can be retired from the tab.
+- `2026-09-30` — `CONVENTIONS.md`: §11 says Dependabot moves the Action pins; §12 records why (weekly, grouped, 7-day cooldown, Actions only).
+- `2026-09-30` — `.github/dependabot.yml`: new — one weekly PR updating CI's SHA-pinned Actions and their tag comments, for releases at least 7 days old.
+- `2026-09-30` — `CONVENTIONS.md`: §11 says how dependencies change (edit the `.in`, recompile the hashed lock, rebuild the venv); §12 records the lock, Python 3.13 and SHA-pinned Actions.
+- `2026-09-30` — `SETUP.md`: Python 3.13 (was 3.10+); install with `--require-hashes --only-binary=:all:`; the dev lock for running mypy locally.
+- `2026-09-30` — `tests/test_ci_pins.py`: every Action a tracked workflow uses is a full commit SHA with its release tag in a comment.
+- `2026-09-30` — `tests/test_environment_lock.py`: the venv running the suite is exactly the lock (runtime, or runtime + dev) on the lock's Python; every lock line is an exact, hashed pin.
+- `2026-09-30` — `.github/workflows/ci.yml`: each job builds a venv from the hashed lock on 3.13 only (3.10 dropped); Actions pinned to commit SHAs (checkout v7.0.1, setup-python v7.0.0); credentials not persisted.
+- `2026-09-30` — `requirements-dev.in`, `requirements-dev.txt`: new — mypy 2.1.0 and its two stubs, declared and locked the same way, constrained to the runtime lock.
+- `2026-09-30` — `requirements.txt`: now a lock compiled from the new `requirements.in` on Python 3.13 — all 22 packages pinned and hashed (was 5 unpinned names).
+- `2026-09-30` — `CONVENTIONS.md`: §8 says a tool that changes files joins `pythia._CONFIRM_TOOLS`; §12 records Pythia's dispatch gate.
+- `2026-09-30` — `panels/home_panel.py`: a write or edit Pythia asks for shows its full content with an Allow/Deny bar; Deny, Stop, Refresh or 10 min unanswered mean no.
+- `2026-09-30` — `pythia.py`: `fetch_page` opens only a URL the user wrote or a `search_web` result gave (`untrusted_url`); `write_document` and `edit_document` run only on `ask(on_confirm=)`'s yes, and a no holds for the rest of the turn.
+- `2026-09-30` — `tools/callimachus.py`: fetches connect to public internet addresses only, checked on every redirect hop and pinned to the IP checked (`private_address`); environment proxies are ignored.
+- `2026-09-29` — `CONVENTIONS.md`: §12 records why the backlog lives in the repo and keeps no done section.
+- `2026-09-29` — `BACKLOG.md`: new — the one home for things found but not fixed (18 items seeded); security issues never go in it.
+- `2026-09-29` — `tests/test_backlog_format.py`: every backlog item says what it needs and when it was found; no done section.
+- `2026-09-28` — `CONVENTIONS.md`: §12 records local sun and moon (M3) and the logger guard (L5).
+- `2026-09-28` — `panels/aura_panel.py`, `panels/hypatia_panel.py`: HELIOS, SELENE and Hypatia's moon row ride their own workers; a weather outage no longer blanks them.
+- `2026-09-28` — `kairos.py`: new `helios` and `selene` workers (300 s); Settings Save refetches both.
+- `2026-09-28` — `tools/selene.py`: `get_moon_phase` computes phase, illumination, moonrise and moonset locally (no network, no `as_of`); phase names follow USNO's whole-percent rule.
+- `2026-09-28` — `tools/helios.py`: `get_sun_times` computes sunrise and sunset locally (no network, no `as_of`), in this computer's zone; polar day/night say which.
+- `2026-09-28` — `tests/test_tool_loggers.py`: every tool module must declare its own `METIS.<name>` logger (horai allowlisted).
+- `2026-09-28` — `CONVENTIONS.md`: §6 lets workers share state behind a lock (copies only toward the main thread); §12 records T7 freshness and that gemma4 does not relay `stale`.
+- `2026-09-28` — `tools/pheme.py`: `get_news_stories` answers from the last good fan-out for 15 min (`CACHE_TTL`) with `as_of`; a failed refresh serves it for up to 30 min with `stale: true`.
+- `2026-09-28` — `tools/helios.py`, `tools/selene.py`: `get_sun_times` and `get_moon_phase` read Aura's cached reading and pass on its `as_of`; weather, sun and moon in one turn is one fetch, not three.
+- `2026-09-28` — `tools/aura.py`: `get_weather` answers from the last good fetch for 30 min (`CACHE_TTL`) with `as_of`; a failed refresh serves it for up to an hour with `stale: true`.
+- `2026-09-27` — `CONVENTIONS.md`: §8 says the schema is enforced at dispatch; §12 records the argument gate, read budgets, Aether's repoint, `num_ctx` 16384, and the parked Tool Broker.
+- `2026-09-27` — `pythia.py`: `num_ctx` 8192 → 16384.
+- `2026-09-27` — `kairos.py`: the `aether` worker polls every 300 s (was 3600).
+- `2026-09-27` — `panels/hephaestus_panel.py`: `AetherWidget` shows three rows (WiFi / Internet / Ollama), replacing "Anthropic's Status"; a captive portal is amber.
+- `2026-09-27` — `tools/aether.py`: probes the internet (Windows' NCSI page, captive portal = `limited`) and the local Ollama instead of Anthropic's Statuspage; `handle()` returns `wifi`/`internet`/`ollama`.
+- `2026-09-27` — `tools/midas.py`: `get_market_prices` no longer offers "portfolio performance" — it says it lists the watchlist and knows no holdings.
+- `2026-09-27` — `pythia.py`: `ask()` logs a warning for any tool result over 8000 chars (`_LARGE_RESULT_CHARS`).
+- `2026-09-27` — `tools/herodotus.py`: `read_document` returns at most 6000 chars per call (`_READ_CHARS`), with `truncated`/`next_offset` and a new `offset` parameter.
+- `2026-09-27` — `tools/ammit.py`: `start` without a positive duration is `bad_arguments` and saves nothing (it fired the alarm at once); unknown action is `unknown_action`; every action returns the timer; `slot` removed.
+- `2026-09-27` — `pythia.py`: every tool call passes `_check_arguments`, a schema-driven gate — `bad_arguments` for undeclared, missing or mistyped parameters; numeric strings and enum case normalized.
+- `2026-09-27` — `panels/artemis_panel.py`: a `<Configure>` delivered mid-`destroy()` can no longer re-arm the resize debounce — a `_destroyed` flag, set first, refuses it. Ends 36 `invalid command name "…_on_resize_settled"` lines in the full run.
+- `2026-09-27` — `panels/artemis_panel.py`: `_drain()` cancels its own pending id before it re-arms or ends the run, so a direct call can no longer orphan the timer (the run's one `invalid command name "…_drain"`).
+- `2026-09-27` — `tests/test_panel_after_teardown.py`: two Artemis cases — a `<Configure>` forced mid-destroy, and direct `_drain()` calls on both branches — each confirmed red with its fix reverted.
+- `2026-09-27` — `CONVENTIONS.md`: §6 gains the mid-teardown gap (an event Tk delivers during `super().destroy()` needs a `_destroyed` flag) and the cancel-at-the-top shape for a chain that can end inside its callback.
 - `2026-09-27` — `theme.py`: new `_init_widget_defaults(root)` — via Tk's option database, every Entry/Text selects in `select_bg`/`select_fg` and types with a `text1` cursor, not Windows blue and black. `felhaven.py` and `sphynx_panel.py` call it.
 - `2026-09-27` — `palette.py`: new identity aliases `select_bg` (→ `border`) and `select_fg` (→ `text1`), the look of a hovered menu item.
 - `2026-09-27` — `theme.py`: a Text's `sel` tag is raised on every `<<Selection>>`, so selected text in Home's and Emanon's tagged logs takes the selection colours instead of keeping its tag's.

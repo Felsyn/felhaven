@@ -1,0 +1,22 @@
+# requirements.in — Felhaven dashboard runtime (what we DECLARE)
+# ================================================================
+# The dashboard core is stdlib + two tiny packages; the narration feature
+# (Calliope, output-only TTS) adds a lightweight ONNX speech stack. There is no
+# separate voice-assistant install anymore — voice INPUT was retired, so the old
+# torch-backed `requirements-metis.txt` is gone. kokoro-onnx pulls onnxruntime,
+# not torch/transformers, so this stays light.
+#
+# This file is the input. `requirements.txt` is the lock compiled from it: every
+# package pinned and hashed, generated, never edited by hand. To add, remove or
+# upgrade a dependency, edit THIS file and recompile (CONVENTIONS.md §11).
+
+# ── Dashboard core ────────────────────────────────────────────────────────────
+psutil              # system vitals (Hephaestus), process attribution (Argus)
+requests            # Pythia's Ollama stream and a dev script; other reads use tools/hermes.py
+
+# ── Calliope — narration (output-only TTS) ────────────────────────────────────
+kokoro-onnx         # text -> speech via ONNX (no torch/transformers)
+sounddevice         # speaker playback of Calliope's PCM (bundles PortAudio)
+numpy               # PCM buffers from kokoro-onnx
+# Model files (voices-v1.0.bin + a kokoro-v1.0*.onnx) are downloaded separately
+# and gitignored — see SETUP.md section 4 for the one-time step.

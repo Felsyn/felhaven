@@ -1,0 +1,14 @@
+# requirements-dev.in — the type checker CI runs (what we DECLARE)
+# ==================================================================
+# `mypy --strict --explicit-package-bases tools/` is a blocking CI job. These
+# stay pinned exactly: a new mypy or stub release can add strict errors, and
+# that upgrade should be its own change, not a side effect of a lock refresh.
+#
+# Compiled to `requirements-dev.txt` (pinned, hashed). The constraint line keeps
+# every package these share with the runtime at the runtime lock's version, so
+# installing both locks in one pip command never conflicts.
+-c requirements.txt
+
+mypy==2.1.0
+types-requests==2.33.0.20260518
+types-psutil==7.2.2.20260518

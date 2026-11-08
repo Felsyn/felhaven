@@ -1,7 +1,7 @@
 """
 test_midas.py — unit tests for tools/midas.py's Vault-backed Finnhub key.
 
-Hermetic: the network seam (requests.get) and the Cerberus-key seam
+Hermetic: the network seam (hermes.get) and the Cerberus-key seam
 (midas._finnhub_key / cerberus.is_unlocked) are mocked, so no test touches the
 network or the real Cerberus Vault. Covers the migration off .env/env onto the
 Cerberus Vault (mirrors test_callimachus.py's _brave_key coverage):
@@ -17,11 +17,11 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import cerberus
-from tools import midas
+from tools import hermes, midas
 
 
 class _FakeResp:
-    """Stand-in for requests.get's return value: .json(), .raise_for_status()."""
+    """Stand-in for hermes.get's return value: .json(), .raise_for_status()."""
 
     def __init__(self, payload: dict, status: int = 200) -> None:
         self._payload = payload
@@ -54,7 +54,7 @@ class TestFetchOneVaultKey(unittest.TestCase):
 
     def test_success_shapes_result(self) -> None:
         with mock.patch.object(midas, "_finnhub_key", return_value="fake-key"), \
-                mock.patch("requests.get",
+                mock.patch("tools.midas.hermes.get",
                            return_value=_FakeResp({"c": 105.0, "pc": 100.0})) as get:
             out = midas._fetch_one("AAPL")
         self.assertNotIn("error", out)
@@ -65,22 +65,37 @@ class TestFetchOneVaultKey(unittest.TestCase):
 
     def test_zero_fields_is_no_data(self) -> None:
         with mock.patch.object(midas, "_finnhub_key", return_value="fake-key"), \
-                mock.patch("requests.get", return_value=_FakeResp({"c": 0, "pc": 0})):
+                mock.patch("tools.midas.hermes.get", return_value=_FakeResp({"c": 0, "pc": 0})):
             out = midas._fetch_one("BADSYM")
         self.assertEqual(out, {"symbol": "BADSYM", "error": midas.ERR_NO_DATA})
 
     def test_request_exception_is_fetch_failed(self) -> None:
         with mock.patch.object(midas, "_finnhub_key", return_value="fake-key"), \
-                mock.patch("requests.get", side_effect=Exception("boom")):
+                mock.patch("tools.midas.hermes.get", side_effect=Exception("boom")):
             out = midas._fetch_one("AAPL")
         self.assertEqual(out, {"symbol": "AAPL", "error": midas.ERR_FETCH_FAILED})
+
+    def test_an_http_error_logs_its_status(self) -> None:
+        with mock.patch.object(midas, "_finnhub_key", return_value="fake-key"), \
+                mock.patch("tools.midas.hermes.get", side_effect=hermes.HTTPStatus(429)), \
+                self.assertLogs("METIS.midas", level="WARNING") as cm:
+            out = midas._fetch_one("AAPL")
+        self.assertEqual(out["error"], midas.ERR_FETCH_FAILED)
+        self.assertIn("HTTPStatus 429", "\n".join(cm.output))
+
+    def test_every_quote_is_capped(self) -> None:
+        with mock.patch.object(midas, "_finnhub_key", return_value="fake-key"), \
+                mock.patch("tools.midas.hermes.get",
+                           return_value=_FakeResp({"c": 1.0, "pc": 1.0})) as get:
+            midas._fetch_one("AAPL")
+        self.assertEqual(get.call_args.kwargs["cap"], midas._MAX_BYTES)
 
     def test_key_never_cached_across_calls(self) -> None:
         # Each fetch re-derives the key at call time — never memoized on the
         # module — so a key rotated mid-session takes effect on the next call.
         with mock.patch.object(midas, "_finnhub_key",
                                side_effect=["key-1", "key-2"]) as key_fn, \
-                mock.patch("requests.get",
+                mock.patch("tools.midas.hermes.get",
                            return_value=_FakeResp({"c": 1.0, "pc": 1.0})):
             midas._fetch_one("AAPL")
             midas._fetch_one("AAPL")
@@ -99,7 +114,7 @@ class TestLogDoesNotLeakKey(unittest.TestCase):
                  "https://finnhub.io/api/v1/quote?symbol=AAPL&token=SECRETKEY123")
         with mock.patch.object(cerberus, "is_unlocked", return_value=True), \
                 mock.patch.object(midas, "_finnhub_key", return_value="SECRETKEY123"), \
-                mock.patch("requests.get", side_effect=Exception(leaky)):
+                mock.patch("tools.midas.hermes.get", side_effect=Exception(leaky)):
             with self.assertLogs("METIS.midas", level="WARNING") as cm:
                 out = midas._fetch_one("AAPL")
         self.assertEqual(out["error"], midas.ERR_FETCH_FAILED)

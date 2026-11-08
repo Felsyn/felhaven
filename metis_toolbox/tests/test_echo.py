@@ -93,13 +93,22 @@ class TestSanitizeFilename(unittest.TestCase):
 class TestAvailable(unittest.TestCase):
     """available() is the panel's build-time ffmpeg gate (mirrors orpheus)."""
 
+    def _aegis(self, path, problem=None):
+        return mock.patch.object(echo.aegis, "resolve",
+                                 return_value=echo.aegis.Resolution(path, problem))
+
     def test_reports_resolved_ffmpeg(self):
-        with mock.patch.object(echo, "_resolve", return_value="C:\\bin\\ffmpeg.exe"):
-            self.assertEqual(echo.available(), {"ffmpeg": "C:\\bin\\ffmpeg.exe"})
+        with self._aegis("C:\\bin\\ffmpeg.exe"):
+            self.assertEqual(echo.available(),
+                             {"ffmpeg": "C:\\bin\\ffmpeg.exe", "problem": None})
 
     def test_reports_none_when_missing(self):
-        with mock.patch.object(echo, "_resolve", return_value=None):
-            self.assertEqual(echo.available(), {"ffmpeg": None})
+        with self._aegis(None):
+            self.assertEqual(echo.available(), {"ffmpeg": None, "problem": None})
+
+    def test_reports_a_refused_bin_copy(self):
+        with self._aegis(None, "binary_unverified: ffmpeg.exe does not match its manifest entry"):
+            self.assertEqual(echo.available(), {"ffmpeg": None, "problem": "binary_unverified: ffmpeg.exe does not match its manifest entry"})
 
 
 class TestTextToAudioGuards(unittest.TestCase):
@@ -219,6 +228,38 @@ class TestTextToAudioConversion(unittest.TestCase):
             self.assertEqual(result, {"error": "ffmpeg_encode_failed"})
             self.assertFalse(os.path.exists(out_path),
                              "partial output should be removed on encode failure")
+
+
+class TestEncodeOnlyTakesAbsolutePaths(unittest.TestCase):
+    """ffmpeg reads '-x' as an option and 'name:' as a protocol (see
+    _encode_opus), so neither path reaches it unless it is absolute. The fake
+    ffmpeg would SUCCEED, so only the refusal can produce the error."""
+
+    def test_a_wav_path_that_isnt_absolute_never_reaches_ffmpeg(self):
+        out = os.path.abspath("out.opus")
+        for wav in ("-x.wav", "concat:a.wav|b.wav", "in.wav"):
+            with self.subTest(wav=wav), \
+                    mock.patch("tools.echo.subprocess.run",
+                               return_value=_FakeProc(0)) as run:
+                self.assertEqual(echo._encode_opus("ffmpeg", wav, out),
+                                 {"error": "ffmpeg_encode_failed"})
+                run.assert_not_called()
+
+    def test_an_output_path_that_isnt_absolute_never_reaches_ffmpeg(self):
+        wav = os.path.abspath("in.wav")
+        for out in ("-y.opus", "http:x.opus", "out.opus"):
+            with self.subTest(out=out), \
+                    mock.patch("tools.echo.subprocess.run",
+                               return_value=_FakeProc(0)) as run:
+                self.assertEqual(echo._encode_opus("ffmpeg", wav, out),
+                                 {"error": "ffmpeg_encode_failed"})
+                run.assert_not_called()
+
+    def test_absolute_paths_do(self):
+        wav, out = os.path.abspath("in.wav"), os.path.abspath("out.opus")
+        with mock.patch("tools.echo.subprocess.run", return_value=_FakeProc(0)) as run:
+            self.assertEqual(echo._encode_opus("ffmpeg", wav, out), {"path": out})
+        run.assert_called_once()
 
 
 if __name__ == "__main__":

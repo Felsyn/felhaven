@@ -13,7 +13,9 @@ Contract:    MULTI-TOOL module (second after callimachus) — exports
              TOOL_DEFINITIONS (a list of five) and five like-named handlers:
                • list_documents()                      -> {"documents": [...]}
                • search_documents(query)               -> {"matches": [...]}
-               • read_document(filename)               -> {"filename", "content", "size"}
+               • read_document(filename, offset=0)     -> {"filename", "content", "size",
+                                                           "offset", "truncated"
+                                                           [, "next_offset"]}
                • write_document(filename, content,
                                 source="")             -> {"filename", "size", "overwrote"}
                • edit_document(filename, operation,
@@ -99,6 +101,12 @@ _ARCHIVE_ROOT = os.path.join(
 )
 
 _MAX_DOC_BYTES     = 1_048_576   # 1 MB cap per document (Callimachus precedent)
+# What ONE read_document hands the model — a separate budget from the storage
+# cap above. The cap says what a file may hold; this says what fits in Pythia's
+# context window. A whole 1 MB note is ~250k tokens; fetch_page's 4000-char
+# `truncated` budget is the precedent. Characters, not bytes, so an offset
+# never lands inside a multi-byte character.
+_READ_CHARS        = 6000
 _MAX_FILENAME_LEN  = 100         # generous; guards pathological tool calls
 _SEARCH_MAX_FILES  = 10          # search reports at most this many documents
 _SEARCH_MAX_LINES  = 3           # ... with at most this many snippet lines each
@@ -106,8 +114,11 @@ _SNIPPET_CHARS     = 200         # per snippet line
 
 # Bare name, must start alphanumeric, then a conservative allowlist, .md suffix.
 # No separators of any kind — traversal is impossible by construction; the
-# resolve-then-contain check in _resolve() backstops it anyway.
-_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]*\.md$", re.IGNORECASE)
+# resolve-then-contain check in _resolve() backstops it anyway. re.ASCII
+# because IGNORECASE alone lets [A-Za-z] match four non-ASCII letters that
+# case-fold to ASCII ones (U+0130, U+0131, U+017F, U+212A).
+_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]*\.md$",
+                          re.IGNORECASE | re.ASCII)
 
 # Windows reserves these device names regardless of extension ("CON.md" can
 # still misbehave on Win10). Flash-drive portability (§11) says refuse them.
@@ -400,12 +411,19 @@ def search_documents(query: str) -> "dict[str, Any]":
     return {"matches": out}
 
 
-def read_document(filename: str) -> "dict[str, Any]":
-    """Return one document's full text (front matter included). Never raises.
+def read_document(filename: str, offset: int = 0) -> "dict[str, Any]":
+    """Return up to _READ_CHARS of one document's text (front matter included),
+    starting at character `offset`. Never raises.
 
-    Success:  {"filename": str, "content": str, "size": int}
+    "size" is the WHOLE file in bytes. "truncated" means more text follows this
+    part, and "next_offset" (present only then) is where the next read starts.
+    A negative offset reads from the start; one past the end is a slug.
+
+    Success:  {"filename": str, "content": str, "size": int, "offset": int,
+               "truncated": bool[, "next_offset": int]}
     Errors:   {"error": "invalid_filename: ..." | "not_found" | "not_utf8: ..."
-                       | "too_large: ..." | "read_failed: ..."}
+                       | "too_large: ..." | "read_failed: ..."
+                       | "bad_arguments: ..."}
     """
     path = _resolve(filename)
     if isinstance(path, dict):
@@ -415,7 +433,23 @@ def read_document(filename: str) -> "dict[str, Any]":
     body = _read_utf8(path)
     if isinstance(body, dict):
         return body
-    return {"filename": path.name, "content": body, "size": len(body.encode("utf-8"))}
+    try:
+        start = max(0, int(offset))
+    except (TypeError, ValueError):
+        return {"error": "bad_arguments: offset must be a whole number"}
+    if start and start >= len(body):
+        return {"error": f"bad_arguments: offset {start} is past the end of "
+                         f"this {len(body)}-character document"}
+    part = body[start:start + _READ_CHARS]
+    end = start + len(part)
+    out: "dict[str, Any]" = {
+        "filename": path.name, "content": part,
+        "size": len(body.encode("utf-8")), "offset": start,
+        "truncated": end < len(body),
+    }
+    if out["truncated"]:
+        out["next_offset"] = end
+    return out
 
 
 def write_document(filename: str, content: str, source: str = "") -> "dict[str, Any]":
@@ -544,12 +578,21 @@ READ_TOOL_DEFINITION: "dict[str, Any]" = {
             "exact filename (e.g. 'notes.md'). Call when the user refers to "
             "something they saved earlier, or when a document's contents are "
             "needed to answer. Call list_documents or search_documents first if "
-            "the filename isn't known."
+            "the filename isn't known. A long document comes back in parts: if "
+            "'truncated' is true, call again with offset set to 'next_offset'. "
+            "To change part of a long document, use edit_document rather than "
+            "rewriting it."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "filename": {"type": "string", "description": "Bare .md filename."},
+                "offset": {
+                    "type": "integer",
+                    "description": ("Where to continue reading: the next_offset "
+                                    "a previous read returned. Omit to start at "
+                                    "the beginning."),
+                },
             },
             "required": ["filename"],
         },

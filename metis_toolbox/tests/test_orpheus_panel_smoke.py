@@ -59,6 +59,24 @@ class TestOrpheusPanelDisabled(unittest.TestCase):
     def test_stop_starts_disabled(self):
         self.assertEqual(self.panel._stop_btn.cget("cursor"), "arrow")
 
+    def test_a_missing_ffmpeg_says_missing(self):
+        from panels.orpheus_panel import _NO_BIN_MSG
+        self.assertEqual(self.panel._no_bin_text, _NO_BIN_MSG)
+
+    def test_a_refused_ffmpeg_says_why_not_missing(self):
+        """A bin/ copy aegis refused must not read as 'not found': the fix is
+        different (record a deliberate update, or replace the file)."""
+        from panels.orpheus_panel import OrpheusPanel, _UNVERIFIED_MSG
+        orpheus.available = lambda: {"ffmpeg": None,
+                                     "problem": "binary_unverified: ffmpeg.exe does not match"}
+        panel = OrpheusPanel(self.root)
+        try:
+            texts = [w.cget("text") for w in panel.winfo_children()
+                     if isinstance(w, tk.Label)]
+            self.assertIn(_UNVERIFIED_MSG, texts)
+        finally:
+            panel.destroy()
+
 
 class _EnabledPanelCase(unittest.TestCase):
     """Shared scaffolding for the ffmpeg-'present' cases: a withdrawn root and

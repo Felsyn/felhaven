@@ -34,7 +34,8 @@ Defaults:    The old hardcoded values live on here as the fail-soft fallback —
              source anymore; these are only a floor.
 
 Upstream:    panels/themis_panel.py (the Settings tab), tools/aura.py,
-             tools/hypatia.py, tools/horai.py (readers).
+             tools/hypatia.py, tools/horai.py, tools/helios.py,
+             tools/selene.py (readers).
 Downstream:  felhaven_settings.json (committed? no — it is per-user state, so
              gitignored like the other machine-local JSON in §9).
 

@@ -2,11 +2,12 @@
 test_poseidon.py — the water layer against captured-real TIGER bytes: the
 name-driven tier rule, polygon clipping that keeps lakes closed, the
 load()-never-fetches contract, and ingest with both county downloads mocked
-at the urllib seam (including the tolerated missing-AREAWATER case).
+at the hermes seam (including the tolerated missing-AREAWATER case).
 
     python -X utf8 -m unittest tests.test_poseidon
 """
 
+import array
 import io
 import os
 import shutil
@@ -14,18 +15,22 @@ import sys
 import tempfile
 import threading
 import unittest
-import urllib.error
 import zipfile
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tools import artemis
+from tools import artemis, hermes
 from tools import cadmus
 from tools import poseidon
 
 _FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "fixtures", "artemis")
+
+
+def _part(*points):
+    """A Cadmus part (a flat x, y array) from (x, y) points."""
+    return array.array("d", [c for point in points for c in point])
 
 
 def _pairs(stem):
@@ -37,7 +42,8 @@ def _pairs(stem):
 
 
 def _center(pairs):
-    points = [pt for (_, parts), _ in pairs for part in parts for pt in part]
+    points = [pt for (_, parts), _ in pairs for part in parts
+              for pt in cadmus.points(part)]
     xs = [x for x, _ in points]
     ys = [y for _, y in points]
     return ((min(ys) + max(ys)) / 2.0, (min(xs) + max(xs)) / 2.0)
@@ -68,13 +74,13 @@ class TestNormalizeLinear(unittest.TestCase):
         self.assertIn("West Fork Riv", names)
 
     def test_canal_stays_minor_even_when_named(self):
-        shape = (3, [[(-80.3, 39.4), (-80.301, 39.401)]])
+        shape = (3, [_part((-80.3, 39.4), (-80.301, 39.401))])
         canal = [(shape, {"MTFCC": "H3020", "FULLNAME": "Big Ditch"})]
         feats = poseidon.normalize_linear(canal, (39.4, -80.3))
         self.assertEqual(feats[0]["tier"], 2)
 
     def test_connector_is_suppressed(self):
-        shape = (3, [[(-80.3, 39.4), (-80.301, 39.401)]])
+        shape = (3, [_part((-80.3, 39.4), (-80.301, 39.401))])
         conn = [(shape, {"MTFCC": "H1100", "FULLNAME": ""})]
         self.assertEqual(poseidon.normalize_linear(conn, (39.4, -80.3)), [])
 
@@ -101,14 +107,14 @@ class TestNormalizeArea(unittest.TestCase):
         self.assertIn("Buffalo Creek Reservoir", names)   # the lone H2040
 
     def test_marsh_is_lesser_tier(self):
-        ring = [(-80.30, 39.40), (-80.29, 39.40), (-80.29, 39.41),
-                (-80.30, 39.41)]
+        ring = _part((-80.30, 39.40), (-80.29, 39.40), (-80.29, 39.41),
+                     (-80.30, 39.41))
         marsh = [((5, [ring]), {"MTFCC": "H2025", "FULLNAME": "Big Swamp"})]
         feats = poseidon.normalize_area(marsh, (39.405, -80.295))
         self.assertEqual(feats[0]["tier"], 2)
 
     def test_ring_entirely_outside_is_dropped(self):
-        ring = [(-70.0, 20.0), (-70.01, 20.0), (-70.01, 20.01)]
+        ring = _part((-70.0, 20.0), (-70.01, 20.0), (-70.01, 20.01))
         far = [((5, [ring]), {"MTFCC": "H2030", "FULLNAME": "Elsewhere"})]
         self.assertEqual(poseidon.normalize_area(far, (39.4, -80.3)), [])
 
@@ -136,25 +142,21 @@ class TestIngestAndLoad(unittest.TestCase):
             zf.writestr(stem + ".dbf", dbf)
         return buf.getvalue()
 
-    class _Resp:
-        def __init__(self, payload):
-            self._payload = payload
-
-        def read(self):
-            return self._payload
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
+    @staticmethod
+    def _Resp(payload, status=200):
+        """What hermes.get returns: a finished Reply."""
+        return hermes.Reply(status, {}, payload, "https://census.example.invalid/x.zip")
 
     def _urlopen(self, area_error=None):
-        """Serve the right fixture zip for whichever URL is asked for."""
-        def opener(url, timeout=None):
+        """Serve the right fixture zip for whichever URL is asked for.
+        `area_error` is raised if it is an exception, or answered as that
+        HTTP status if it is a number (hermes hands a 404 back as a reply)."""
+        def opener(url, **kwargs):
             if "linearwater" in url:
                 return self._Resp(self._zip("tl_2025_54033_linearwater",
                                             self._lin_shp, self._lin_dbf))
+            if isinstance(area_error, int):
+                return self._Resp(b"", status=area_error)
             if area_error is not None:
                 raise area_error
             return self._Resp(self._zip("tl_2025_54033_areawater",
@@ -163,14 +165,13 @@ class TestIngestAndLoad(unittest.TestCase):
 
     @staticmethod
     def _http_404():
-        return urllib.error.HTTPError("http://example/x", 404, "Not Found",
-                                      {}, None)
+        return 404
 
     def test_ingest_writes_then_load_reads(self):
         os.makedirs(artemis.partial_dir(self.area))
         with mock.patch("tools.artemis.counties_for_bbox",
                         return_value=["54033"]), \
-             mock.patch("tools.artemis.urllib.request.urlopen",
+             mock.patch("tools.artemis.hermes.get",
                         side_effect=self._urlopen()):
             poseidon.ingest(self.area, self.center, self.box,
                             threading.Event(), lambda msg: None)
@@ -190,7 +191,7 @@ class TestIngestAndLoad(unittest.TestCase):
         seen = []
         with mock.patch("tools.artemis.counties_for_bbox",
                         return_value=["54033"]), \
-             mock.patch("tools.artemis.urllib.request.urlopen",
+             mock.patch("tools.artemis.hermes.get",
                         side_effect=self._urlopen()):
             poseidon.ingest(self.area, self.center, self.box,
                             threading.Event(), seen.append)
@@ -203,7 +204,7 @@ class TestIngestAndLoad(unittest.TestCase):
         os.makedirs(artemis.partial_dir(self.area))
         with mock.patch("tools.artemis.counties_for_bbox",
                         return_value=["54033"]), \
-             mock.patch("tools.artemis.urllib.request.urlopen",
+             mock.patch("tools.artemis.hermes.get",
                         side_effect=self._urlopen(area_error=self._http_404())):
             poseidon.ingest(self.area, self.center, self.box,
                             threading.Event(), lambda msg: None)
@@ -218,8 +219,8 @@ class TestIngestAndLoad(unittest.TestCase):
         os.makedirs(artemis.partial_dir(self.area))
         with mock.patch("tools.artemis.counties_for_bbox",
                         return_value=["54033"]), \
-             mock.patch("tools.artemis.urllib.request.urlopen",
-                        side_effect=self._urlopen(area_error=TimeoutError())):
+             mock.patch("tools.artemis.hermes.get",
+                        side_effect=self._urlopen(area_error=hermes.Timeout())):
             with self.assertRaises(artemis.IngestError) as ctx:
                 poseidon.ingest(self.area, self.center, self.box,
                                 threading.Event(), lambda msg: None)
@@ -230,16 +231,16 @@ class TestIngestAndLoad(unittest.TestCase):
         calls = {"area": 0}
         good = self._urlopen()
 
-        def flaky(url, timeout=None):
+        def flaky(url, **kwargs):
             if "areawater" in url:
                 calls["area"] += 1
                 if calls["area"] == 1:
-                    raise TimeoutError()
-            return good(url, timeout)
+                    raise hermes.Timeout()
+            return good(url, **kwargs)
 
         with mock.patch("tools.artemis.counties_for_bbox",
                         return_value=["54033"]), \
-             mock.patch("tools.artemis.urllib.request.urlopen",
+             mock.patch("tools.artemis.hermes.get",
                         side_effect=flaky):
             poseidon.ingest(self.area, self.center, self.box,
                             threading.Event(), lambda msg: None)
@@ -255,12 +256,12 @@ class TestIngestAndLoad(unittest.TestCase):
         wrong rather than "this county has no streams"."""
         os.makedirs(artemis.partial_dir(self.area))
 
-        def all_404(url, timeout=None):
-            raise self._http_404()
+        def all_404(url, **kwargs):
+            return self._Resp(b"", status=404)
 
         with mock.patch("tools.artemis.counties_for_bbox",
                         return_value=["54033"]), \
-             mock.patch("tools.artemis.urllib.request.urlopen",
+             mock.patch("tools.artemis.hermes.get",
                         side_effect=all_404):
             with self.assertRaises(artemis.IngestError) as ctx:
                 poseidon.ingest(self.area, self.center, self.box,
@@ -272,12 +273,33 @@ class TestIngestAndLoad(unittest.TestCase):
         os.makedirs(artemis.partial_dir(self.area))
         with mock.patch("tools.artemis.counties_for_bbox",
                         return_value=["54033"]), \
-             mock.patch("tools.artemis.urllib.request.urlopen",
-                        side_effect=OSError("no route")):
+             mock.patch("tools.artemis.hermes.get",
+                        side_effect=hermes.Offline("no route")):
             with self.assertRaises(artemis.IngestError) as ctx:
                 poseidon.ingest(self.area, self.center, self.box,
                                 threading.Event(), lambda msg: None)
         self.assertIn("download_failed", str(ctx.exception))
+
+    def test_each_layer_reads_with_its_own_caps(self):
+        os.makedirs(artemis.partial_dir(self.area))
+        caps = {}
+
+        def opener(url, **kwargs):
+            caps["linear" if "linearwater" in url else "area"] = kwargs["cap"]
+            return self._urlopen()(url, **kwargs)
+
+        with mock.patch("tools.artemis.counties_for_bbox",
+                        return_value=["54033"]), \
+             mock.patch("tools.artemis.hermes.get", side_effect=opener), \
+             mock.patch("tools.artemis.read_member",
+                        wraps=artemis.read_member) as member:
+            poseidon.ingest(self.area, self.center, self.box,
+                            threading.Event(), lambda msg: None)
+        self.assertEqual(caps, {"linear": poseidon._LINEAR_MAX_BYTES,
+                                "area": poseidon._AREA_MAX_BYTES})
+        self.assertEqual({c.args[2] for c in member.call_args_list},
+                         {poseidon._LINEAR_MEMBER_MAX_BYTES,
+                          poseidon._AREA_MEMBER_MAX_BYTES})
 
     def test_cancel_between_counties(self):
         cancel = threading.Event()
@@ -290,7 +312,7 @@ class TestIngestAndLoad(unittest.TestCase):
         self.assertIn("cancelled", str(ctx.exception))
 
     def test_load_missing_area_raises_and_never_fetches(self):
-        with mock.patch("tools.artemis.urllib.request.urlopen",
+        with mock.patch("tools.artemis.hermes.get",
                         side_effect=AssertionError("load fetched!")):
             with self.assertRaises(FileNotFoundError):
                 poseidon.load("n00p000_e000p000")

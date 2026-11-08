@@ -106,6 +106,18 @@ class TestVoxArrayPanelSmoke(_LedgerRedirect, unittest.TestCase):
         self.assertIsInstance(self.panel.orpheus, self.OrpheusPanel)
         self.assertIsInstance(self.panel.euterpe, self.EuterpePanel)
 
+    def test_echo_says_why_when_its_ffmpeg_is_refused(self):
+        from panels.echo_panel import _UNVERIFIED_MSG
+        echo.available = lambda: {"ffmpeg": None,
+                                  "problem": "binary_unverified: ffmpeg.exe does not match"}
+        panel = self.EchoPanel(self.root)
+        try:
+            texts = [w.cget("text") for w in panel.winfo_children()
+                     if isinstance(w, tk.Label)]
+            self.assertIn(_UNVERIFIED_MSG, texts)
+        finally:
+            panel.destroy()
+
     def test_starts_on_morpheus_tab(self):
         self.assertEqual(self.panel._active, "morpheus")
 

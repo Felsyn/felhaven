@@ -3,8 +3,8 @@ Aura panel — weather display for the Felhaven dashboard.
 
 WeatherPanel — two tabs, updated by Kairos every 30 min via update():
     NOW       current temp + description + details (feels-like, H/L, wind,
-              humidity, rain chance, UV), plus two collapsible sub-widgets
-              fed from the same astronomy block:
+              humidity, rain chance, UV), plus two collapsible sub-widgets,
+              each fed by its own Kairos worker rather than by this panel:
                   HeliosWidget — sun  (sunrise, sunset, golden hours, day length)
                   SeleneWidget — moon (phase, illumination, moonrise, moonset)
     FORECAST  3-day outlook — emoji icon + description + H/L + chance of rain.
@@ -16,6 +16,12 @@ before handing the dict over, so this panel never learns which host answered.
 2026-09-15: the None branch says "no weather source reachable" rather than
        "fetch failed" — with a fallback source in place, reaching it means both
        hosts are down, which is a different (and rarer) thing to tell a user.
+
+2026-09-28: the sun and moon are computed, not fetched (V0.03 audit M3). The
+       sub-widgets are exposed as `helios_widget` / `selene_widget` and
+       registered with Kairos directly (felhaven.py). WeatherPanel no longer
+       feeds them, so a weather outage, or Aura's moonless Open-Meteo
+       fallback, leaves both on screen.
 """
 
 import tkinter as tk
@@ -23,9 +29,6 @@ from datetime import datetime
 
 import themis
 from theme import C, FONTS, Card
-
-from tools import aura
-from tools import helios, selene
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -78,11 +81,15 @@ class HeliosWidget(tk.Frame):
     """
     Solar timing sub-widget inside WeatherPanel — sunrise, sunset, golden
     hours, day length. Collapsed by default; toggled with ▶/▼ like Ammit.
-    Pure display: all interpretation lives in tools/helios.py.
+    Pure display: the sun is computed in tools/helios.py, and Kairos's helios
+    worker delivers that answer here (registered in felhaven.py).
 
     V0.02: Audited 2026-07-25 — class-scoped tag (this file is shared with
     session-19's WeatherPanel and session-20's SeleneWidget). update(astro) →
     helios.interpret; None degrades to "unavailable". No code change.
+
+    2026-09-28: update(info) takes helios.fetch()'s dict, the same one
+    get_sun_times returns, so the widget and the tool cannot disagree.
     """
 
     ROWS = ("sunrise", "sunset", "golden AM", "golden PM", "day length")
@@ -142,10 +149,11 @@ class HeliosWidget(tk.Frame):
             self._toggle_lbl.config(text="▶")
             self._collapsed = True
 
-    def update(self, astro: dict | None) -> None:
-        """Feed the astronomy dict (or None) straight from WeatherPanel."""
-        info = helios.interpret(astro)
-        if info is None:
+    def update(self, info: dict | None) -> None:
+        """Kairos's helios worker delivers helios.fetch(): the same dict
+        get_sun_times hands the model. An error (a polar day or night) or None
+        reads "unavailable"."""
+        if not info or "error" in info:
             self._rows.pack_forget()
             self._unavail.pack(fill="x")
             return
@@ -166,10 +174,14 @@ class SeleneWidget(tk.Frame):
     """
     Lunar sub-widget inside WeatherPanel — phase glyph + name, illumination,
     moonrise, moonset. Collapsed by default; toggled with ▶/▼ like Ammit.
-    Pure display: all interpretation lives in tools/selene.py.
+    Pure display: the moon is computed in tools/selene.py, and Kairos's
+    selene worker delivers that answer here (registered in felhaven.py).
 
     V0.02: Audited 2026-07-25 — class-scoped tag (shared file). update(astro) →
     selene.interpret; None → "unavailable", illumination "" → "—". No code change.
+
+    2026-09-28: update(info) takes selene.fetch()'s dict, the same one
+    get_moon_phase returns, so the widget and the tool cannot disagree.
     """
 
     ROWS = ("illumination", "moonrise", "moonset")
@@ -234,19 +246,18 @@ class SeleneWidget(tk.Frame):
             self._toggle_lbl.config(text="▶")
             self._collapsed = True
 
-    def update(self, astro: dict | None) -> None:
-        """Feed the astronomy dict (or None) straight from WeatherPanel."""
-        info = selene.interpret(astro)
-        if info is None:
+    def update(self, info: dict | None) -> None:
+        """Kairos's selene worker delivers selene.fetch(): the same dict
+        get_moon_phase hands the model. An error or None reads "unavailable".
+        A day with no moonrise or moonset already arrives as "—"."""
+        if not info or "error" in info:
             self._content.pack_forget()
             self._unavail.pack(fill="x")
             return
         self._unavail.pack_forget()
         self._content.pack(fill="x")
-        self._phase_lbl.config(text=f"{info['emoji']} {info['phase']}".strip())
-        # illumination can be "" when wttr omits it — fall back to the em-dash
-        # glyph the other rows use rather than showing a blank value.
-        self._values["illumination"].config(text=info["illumination"] or "—")
+        self._phase_lbl.config(text=f"{info['emoji']} {info['phase']}")
+        self._values["illumination"].config(text=info["illumination"])
         self._values["moonrise"].config(text=info["moonrise"])
         self._values["moonset"].config(text=info["moonset"])
 
@@ -343,11 +354,12 @@ class WeatherPanel(Card):
             v.pack(side="right")
             self._detail_labels[key] = v
 
-        # Sun + moon sub-widgets, fed from the same astronomy block.
-        self._helios = HeliosWidget(parent)
-        self._helios.pack(fill="x")
-        self._selene = SeleneWidget(parent)
-        self._selene.pack(fill="x")
+        # Sun + moon sub-widgets. Public because felhaven.py hands them to
+        # Kairos's helios/selene workers (the HypatiaPanel.conditions precedent).
+        self.helios_widget = HeliosWidget(parent)
+        self.helios_widget.pack(fill="x")
+        self.selene_widget = SeleneWidget(parent)
+        self.selene_widget.pack(fill="x")
 
     # ── FORECAST tab ───────────────────────────────────────────────────────────
 
@@ -437,8 +449,8 @@ class WeatherPanel(Card):
             # naming — it points at the link rather than at one flaky host, and
             # Kairos is already retrying on its short ladder.
             self.desc_lbl.config(text="no weather source reachable — retrying")
-            self._helios.update(None)
-            self._selene.update(None)
+            # HELIOS and SELENE are not touched: they ride their own Kairos
+            # workers and need no weather (V0.03 audit M3).
             # Forecast rows keep their last values — the NOW tab already signals
             # staleness; blanking the outlook on a transient fetch miss is noise.
             return
@@ -463,6 +475,4 @@ class WeatherPanel(Card):
         self._detail_labels["humidity"].config(text=f"{data['humidity_pct']}%")
         self._detail_labels["rain chance"].config(text=f"{data.get('rain_chance_pct', 0)}%")
         self._detail_labels["UV"].config(text=str(data["uv_index"]))
-        self._helios.update(data.get("astronomy") if data else None)
-        self._selene.update(data.get("astronomy") if data else None)
         self._update_forecast(data.get("forecast", []), suf)

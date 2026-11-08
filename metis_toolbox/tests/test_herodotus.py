@@ -59,6 +59,18 @@ class TestFilenameLaw(HerodotusBase):
                     msg=f"{name!r} -> {result['error']}",
                 )
 
+    def test_the_four_case_folding_letters_are_refused(self) -> None:
+        # Under IGNORECASE alone, [A-Za-z] also matched U+0130, U+0131, U+017F
+        # and U+212A (they case-fold to ASCII letters). re.ASCII keeps the
+        # allowlist to the 52 letters it names, first character and after.
+        for code in (0x130, 0x131, 0x17F, 0x212A):
+            for name in (f"{chr(code)}notes.md", f"no{chr(code)}tes.md"):
+                result = herodotus.write_document(name, "body")
+                self.assertTrue(
+                    result.get("error", "").startswith("invalid_filename"),
+                    msg=f"U+{code:04X} in {name!r} -> {result}",
+                )
+
     def test_nothing_escapes_the_root(self) -> None:
         # Even if a hostile name slipped the regex, resolve-then-contain holds.
         outside = os.path.join(os.path.dirname(self.tmp), "escaped.md")
@@ -128,6 +140,64 @@ class TestReadLaw(HerodotusBase):
     def test_roundtrip_utf8(self) -> None:
         herodotus.write_document("greek.md", "Ἡροδότου Ἁλικαρνησσέος ἱστορίης ἀπόδεξις")
         self.assertIn("Ἁλικαρνησσέος", herodotus.read_document("greek.md")["content"])
+
+
+class TestReadBudget(HerodotusBase):
+    """The model-facing read budget, separate from the 1 MB storage cap. A
+    whole 1 MB note is ~250k tokens against Pythia's context window; one read
+    now returns at most _READ_CHARS, and says where to continue (fetch_page's
+    `truncated` pattern)."""
+
+    def test_a_short_document_comes_back_whole(self) -> None:
+        herodotus.write_document("short.md", "Just a line.")
+        out = herodotus.read_document("short.md")
+        self.assertIn("Just a line.", out["content"])
+        self.assertEqual(out["offset"], 0)
+        self.assertFalse(out["truncated"])
+        self.assertNotIn("next_offset", out)
+
+    def test_a_long_document_comes_back_in_parts_that_rejoin(self) -> None:
+        budget = herodotus._READ_CHARS
+        body = "".join(chr(ord("a") + i % 26) for i in range(budget * 2 + budget // 2))
+        self.raw("long.md", body.encode("utf-8"))
+        parts, offset = [], 0
+        while True:
+            out = herodotus.read_document("long.md", offset=offset)
+            self.assertNotIn("error", out)
+            self.assertLessEqual(len(out["content"]), budget)
+            self.assertEqual(out["size"], len(body))    # the WHOLE file, in bytes
+            parts.append(out["content"])
+            if not out["truncated"]:
+                self.assertNotIn("next_offset", out)
+                break
+            offset = out["next_offset"]
+        self.assertEqual(len(parts), 3)
+        self.assertEqual("".join(parts), body)
+
+    def test_the_offset_counts_characters_not_bytes(self) -> None:
+        body = "Ἡ" * (herodotus._READ_CHARS + 10)        # 2 bytes each
+        self.raw("greek_long.md", body.encode("utf-8"))
+        first = herodotus.read_document("greek_long.md")
+        self.assertEqual(first["next_offset"], herodotus._READ_CHARS)
+        rest = herodotus.read_document("greek_long.md", offset=first["next_offset"])
+        self.assertEqual(rest["content"], "Ἡ" * 10)
+
+    def test_an_offset_past_the_end_is_a_slug(self) -> None:
+        herodotus.write_document("short.md", "Just a line.")
+        out = herodotus.read_document("short.md", offset=10_000)
+        self.assertTrue(out["error"].startswith("bad_arguments: "), out)
+
+    def test_a_negative_offset_reads_from_the_start(self) -> None:
+        herodotus.write_document("short.md", "Just a line.")
+        self.assertEqual(herodotus.read_document("short.md", offset=-5)["offset"], 0)
+
+    def test_a_non_numeric_offset_is_a_slug_not_a_raise(self) -> None:
+        herodotus.write_document("short.md", "Just a line.")
+        out = herodotus.read_document("short.md", offset="later")  # type: ignore[arg-type]
+        self.assertTrue(out["error"].startswith("bad_arguments: "), out)
+
+    def test_the_budget_is_not_the_storage_cap(self) -> None:
+        self.assertLess(herodotus._READ_CHARS, herodotus._MAX_DOC_BYTES)
 
 
 class TestListAndSearch(HerodotusBase):

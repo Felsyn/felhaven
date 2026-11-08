@@ -13,6 +13,11 @@ Contract:    Plain functions, not a brain tool — bytes in, Python data out:
                • read_shp(data)        -> list[(shape_type, parts)]
                • read_dbf(data)        -> list[dict[str, str]]
                • read_pair(shp, dbf)   -> list[((shape_type, parts), record)]
+               • points(part)          -> the part's (x, y) pairs
+             A part is one flat array('d') of x0, y0, x1, y1, …: 16 bytes a
+             point, as in the file. A list of (x, y) tuples cost ~112, and
+             the real largest county's roads decoded to 6.3x the file
+             (§12, 2026-10-03). Read a part through points().
              Raises ValueError with a slug-first message on malformed input
              (bad magic, truncation, unsupported shape type, record-count
              mismatch). Callers that must never raise (the Artemis ingest
@@ -45,11 +50,21 @@ Upstream:    tools/hecate.py, tools/poseidon.py, tools/artemis.py (reference
              layer) — the Artemis layer stack, per its spec.
 Downstream:  none. Cadmus knows nothing about the rest of the stack.
 
-Requires:    stdlib only — struct, logging.
+Bounds:      read_pair checks the .dbf's declared record count against the
+             .shp's BEFORE decoding a single attribute record. Each record
+             becomes a dict, so a .dbf of one-byte records was the worst
+             amplifier measured: ~96x, ~5.35 GB from one 53 MiB zip member
+             (2026-10-03). Now the .dbf can hold no more records than the
+             .shp, whose smallest record is 12 bytes.
+
+Requires:    stdlib only — array, logging, struct, sys.
 """
 
+import array
 import logging
 import struct
+import sys
+from collections.abc import Iterator
 
 log = logging.getLogger("METIS.cadmus")
 
@@ -63,10 +78,13 @@ _TYPE_NULL = 0
 _TYPE_POLYLINE = 3
 _TYPE_POLYGON = 5
 
-# One ring/part of a shape: a list of (x, y) pairs. A ShapeRecord is the
+# One ring/part of a shape: its points as one flat array of doubles, x0, y0,
+# x1, y1, … (see Contract: above; read it with points()). A ShapeRecord is the
 # shape type plus its parts; a null shape has an empty parts list.
-ShapePart = list[tuple[float, float]]
+ShapePart = array.array[float]
 ShapeRecord = tuple[int, list[ShapePart]]
+
+_SWAP = sys.byteorder != "little"   # the file's doubles are little-endian
 
 
 # ── .shp ──────────────────────────────────────────────────────────────────────
@@ -88,6 +106,7 @@ def read_shp(data: bytes) -> list[ShapeRecord]:
         raise ValueError(f"bad_shp: header says {file_len} bytes, have {len(data)}")
 
     records: list[ShapeRecord] = []
+    view = memoryview(data)
     offset = _SHP_HEADER_LEN
     while offset < file_len:
         if offset + 8 > file_len:
@@ -97,12 +116,13 @@ def read_shp(data: bytes) -> list[ShapeRecord]:
         offset += 8
         if offset + content_len > file_len:
             raise ValueError(f"bad_shp: truncated record content at byte {offset}")
-        records.append(_read_shape(data, offset, content_len))
+        records.append(_read_shape(data, view, offset, content_len))
         offset += content_len
     return records
 
 
-def _read_shape(data: bytes, offset: int, content_len: int) -> ShapeRecord:
+def _read_shape(data: bytes, view: memoryview, offset: int,
+                content_len: int) -> ShapeRecord:
     """Decode one record's content: shape type, then the type's geometry."""
     if content_len < 4:
         raise ValueError(f"bad_shp: record content of {content_len} bytes at {offset}")
@@ -124,16 +144,28 @@ def _read_shape(data: bytes, offset: int, content_len: int) -> ShapeRecord:
         struct.unpack_from(f"<{num_parts}i", data, offset + 44)
     )
     coords_off = offset + 44 + 4 * num_parts
-    flat = struct.unpack_from(f"<{2 * num_points}d", data, coords_off)
 
+    # Each part is copied straight from the file's bytes into its own array:
+    # no tuple of every float on the way, and no object per point.
     parts: list[ShapePart] = []
     bounds = part_starts + [num_points]
     for i in range(num_parts):
         lo, hi = bounds[i], bounds[i + 1]
         if not 0 <= lo <= hi <= num_points:
             raise ValueError(f"bad_shp: part index {lo}..{hi} outside {num_points} points")
-        parts.append([(flat[2 * j], flat[2 * j + 1]) for j in range(lo, hi)])
+        part = array.array("d")
+        part.frombytes(view[coords_off + 16 * lo:coords_off + 16 * hi])
+        if _SWAP:
+            part.byteswap()
+        parts.append(part)
     return (shape_type, parts)
+
+
+def points(part: ShapePart) -> Iterator[tuple[float, float]]:
+    """A part's points as (x, y) pairs, in file order: x is the longitude,
+    y the latitude, for the Census files Artemis reads."""
+    coords = iter(part)
+    return zip(coords, coords)
 
 
 # ── .dbf ──────────────────────────────────────────────────────────────────────
@@ -145,9 +177,7 @@ def read_dbf(data: bytes) -> list[dict[str, str]]:
     Raises ValueError (slug-first message) on truncation or a malformed
     field-descriptor block.
     """
-    if len(data) < 32:
-        raise ValueError(f"bad_dbf: {len(data)} bytes is shorter than the header")
-    record_count, header_size, record_size = struct.unpack_from("<IHH", data, 4)
+    record_count, header_size, record_size = _dbf_header(data)
 
     # Field descriptors: 32 bytes each from byte 32 up to the 0x0D terminator.
     fields: list[tuple[str, int]] = []  # (name, byte length)
@@ -189,6 +219,14 @@ def read_dbf(data: bytes) -> list[dict[str, str]]:
     return records
 
 
+def _dbf_header(data: bytes) -> tuple[int, int, int]:
+    """The .dbf header's record count, header size and record size."""
+    if len(data) < 32:
+        raise ValueError(f"bad_dbf: {len(data)} bytes is shorter than the header")
+    record_count, header_size, record_size = struct.unpack_from("<IHH", data, 4)
+    return record_count, header_size, record_size
+
+
 # ── Pairing ───────────────────────────────────────────────────────────────────
 
 def read_pair(shp: bytes, dbf: bytes) -> list[tuple[ShapeRecord, dict[str, str]]]:
@@ -196,9 +234,16 @@ def read_pair(shp: bytes, dbf: bytes) -> list[tuple[ShapeRecord, dict[str, str]]
 
     Raises ValueError if the two files disagree on record count — a mismatch
     means attributes would silently attach to the wrong geometry, the worst
-    possible failure for a map.
+    possible failure for a map. The count the .dbf declares is checked
+    before any of its records is decoded (see Bounds: above); the count it
+    actually holds (deleted records are skipped) is checked again after.
     """
     shapes = read_shp(shp)
+    declared, _, _ = _dbf_header(dbf)
+    if declared != len(shapes):
+        raise ValueError(
+            f"pair_mismatch: {len(shapes)} shapes but {declared} attribute records"
+        )
     attrs = read_dbf(dbf)
     if len(shapes) != len(attrs):
         raise ValueError(
@@ -222,12 +267,13 @@ if __name__ == "__main__":
     with open(shp_path, "rb") as f:
         shp_bytes = f.read()
     shapes_main = read_shp(shp_bytes)
-    points = [pt for _, parts_main in shapes_main for part in parts_main for pt in part]
-    xs = [x for x, _ in points]
-    ys = [y for _, y in points]
+    all_points = [pt for _, parts_main in shapes_main for part in parts_main
+                  for pt in points(part)]
+    xs = [x for x, _ in all_points]
+    ys = [y for _, y in all_points]
     print(f"[Cadmus] {os.path.basename(shp_path)}: {len(shapes_main)} shapes, "
-          f"{len(points)} points")
-    if points:
+          f"{len(all_points)} points")
+    if all_points:
         print(f"[Cadmus] bbox: x {min(xs):.6f}..{max(xs):.6f}  "
               f"y {min(ys):.6f}..{max(ys):.6f}")
     if os.path.exists(dbf_path):

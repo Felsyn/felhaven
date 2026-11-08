@@ -24,7 +24,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tools import artemis
+from tools import artemis, hermes
 
 _FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "fixtures", "artemis")
@@ -441,24 +441,15 @@ def _reference_zip():
     return buf.getvalue()
 
 
-class _FakeResponse:
-    def __init__(self, payload):
-        self._payload = payload
-
-    def read(self):
-        return self._payload
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
+def _FakeResponse(payload, status=200):
+    """What hermes.get returns: a finished Reply."""
+    return hermes.Reply(status, {}, payload, "https://census.example.invalid/x.zip")
 
 
 class TestReference(_CacheDirBase):
 
     def test_ensure_reference_then_counties_for_bbox(self):
-        with mock.patch("tools.artemis.urllib.request.urlopen",
+        with mock.patch("tools.artemis.hermes.get",
                         return_value=_FakeResponse(_reference_zip())) as opened:
             artemis.ensure_reference(threading.Event(), lambda msg: None)
             artemis.ensure_reference(threading.Event(), lambda msg: None)
@@ -481,16 +472,105 @@ class TestReference(_CacheDirBase):
         self.assertGreaterEqual(len(geoids), 2)   # neighbours join via buffer
 
     def test_download_failure_is_slugged(self):
-        with mock.patch("tools.artemis.urllib.request.urlopen",
-                        side_effect=OSError("no route")):
+        with mock.patch("tools.artemis.hermes.get",
+                        side_effect=hermes.Offline("no route")):
             with self.assertRaises(artemis.IngestError) as ctx:
                 artemis.ensure_reference(threading.Event(), lambda msg: None)
         self.assertIn("download_failed", str(ctx.exception))
+
+    def test_the_reference_download_and_members_are_capped(self):
+        with mock.patch("tools.artemis.hermes.get",
+                        return_value=_FakeResponse(_reference_zip())) as get, \
+                mock.patch("tools.artemis.read_member",
+                           wraps=artemis.read_member) as member:
+            artemis.ensure_reference(threading.Event(), lambda msg: None)
+        self.assertEqual(get.call_args.kwargs["cap"], artemis._REFERENCE_MAX_BYTES)
+        self.assertEqual({c.args[2] for c in member.call_args_list},
+                         {artemis._REFERENCE_MEMBER_MAX_BYTES})
+        self.assertEqual(len(member.call_args_list), 2)       # .shp and .dbf
 
     def test_missing_reference_raises(self):
         with self.assertRaises(artemis.IngestError) as ctx:
             artemis.counties_for_bbox(artemis.bbox(*_FIX))
         self.assertIn("reference_missing", str(ctx.exception))
+
+
+class TestDownload(unittest.TestCase):
+    """artemis.download: the one census downloader, now through hermes."""
+
+    def _get(self, *results):
+        return mock.patch("tools.artemis.hermes.get", side_effect=list(results))
+
+    def test_it_reads_through_hermes_with_the_callers_cap(self):
+        with self._get(_FakeResponse(b"zip bytes")) as get:
+            self.assertEqual(artemis.download("https://x.invalid/a.zip", "a", cap=1234),
+                             b"zip bytes")
+        self.assertEqual(get.call_args.kwargs["cap"], 1234)
+
+    def test_too_large_says_so_and_is_not_retried(self):
+        with self._get(hermes.TooLarge("over"), _FakeResponse(b"x")) as get:
+            with self.assertRaises(artemis.IngestError) as ctx:
+                artemis.download("https://x.invalid/a.zip", "county 1 roads", cap=10)
+        self.assertTrue(str(ctx.exception).startswith("too_large: "))
+        self.assertEqual(get.call_count, 1)
+
+    def test_a_404_is_not_published_only_when_allowed(self):
+        with self._get(_FakeResponse(b"", status=404)):
+            with self.assertRaises(artemis.NotPublished):
+                artemis.download("https://x.invalid/a.zip", "a", cap=10,
+                                 allow_missing=True)
+
+    def test_a_404_otherwise_is_a_failure_after_one_retry(self):
+        with self._get(_FakeResponse(b"", status=404),
+                       _FakeResponse(b"", status=404)) as get:
+            with self.assertRaises(artemis.IngestError) as ctx:
+                artemis.download("https://x.invalid/a.zip", "a", cap=10)
+        self.assertEqual(str(ctx.exception), "download_failed: HTTPStatus for a")
+        self.assertEqual(get.call_count, 2)
+
+
+def _zip_with(name, data):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(name, data)
+    return buf.getvalue()
+
+
+class TestReadMember(unittest.TestCase):
+    """A zip a few KB long can inflate to gigabytes, and the download's cap
+    only ever sees the few KB. read_member checks what the member DECLARES
+    before inflating any of it."""
+
+    def test_a_member_within_its_cap_is_read(self):
+        with zipfile.ZipFile(io.BytesIO(_zip_with("a.shp", b"s" * 500))) as zf:
+            self.assertEqual(artemis.read_member(zf, "a.shp", 500), b"s" * 500)
+
+    def test_a_small_zip_that_inflates_huge_is_refused_before_inflating(self):
+        raw = _zip_with("a.shp", bytes(8 * 1024 * 1024))      # 8 MB of zeros
+        self.assertLess(len(raw), 64 * 1024)                   # ...in a tiny zip
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf, \
+                mock.patch.object(zipfile.ZipFile, "read",
+                                  side_effect=AssertionError("inflated anyway")):
+            with self.assertRaises(artemis.IngestError) as ctx:
+                artemis.read_member(zf, "a.shp", 1024 * 1024)
+        self.assertTrue(str(ctx.exception).startswith("too_large: "))
+
+    def test_a_member_that_lies_about_its_size_is_cut_short_and_fails(self):
+        """Declare 100 bytes in the central directory and hide 10,000 behind
+        it. zipfile stops at the declared size, so the read comes out short,
+        fails its CRC, and never hands back more than was declared."""
+        raw = bytearray(_zip_with("a.shp", b"L" * 10_000))
+        central = raw.rfind(b"PK\x01\x02")
+        raw[central + 24:central + 28] = (100).to_bytes(4, "little")
+        with zipfile.ZipFile(io.BytesIO(bytes(raw))) as zf:
+            self.assertEqual(zf.getinfo("a.shp").file_size, 100)
+            with self.assertRaises(zipfile.BadZipFile):
+                artemis.read_member(zf, "a.shp", 1000)
+
+    def test_an_absent_member_is_a_key_error_like_zf_read(self):
+        with zipfile.ZipFile(io.BytesIO(_zip_with("a.shp", b"x"))) as zf:
+            with self.assertRaises(KeyError):
+                artemis.read_member(zf, "b.dbf", 1000)
 
 
 def _write_roads(area, center, box, cancel, progress):

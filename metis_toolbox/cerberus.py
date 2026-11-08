@@ -3,94 +3,102 @@ cerberus.py — The Guardian of Secrets (logic)
 =============================================
 Metis Toolbox | Anti-Legion: THREE HEADS, ONE GUARDIAN
 
-Job:         Guard the toolbox's secrets behind one PIN — the sole encryption
-             authority. One PIN gates three jobs: at-rest encryption of API
-             keys/secrets (Vault), a manifest
-             of PIN-gated config files (Custody), and an access ledger
-             (Ledger). Every subsystem that stores or reads a secret defers
-             here; nothing else in the toolbox rolls its own crypto.
+Job:         Keep the toolbox's API keys encrypted to this Windows account, and
+             gate their use behind a PIN child lock. Its three heads are the
+             Vault (the keys), Custody (a PIN-gated list of config files) and
+             the Ledger (an access log). Every module that stores or reads a
+             secret defers here; nothing else in the toolbox rolls its own
+             crypto.
 
-             This is the one deliberate exception to §0's "one file, one job":
-             the three heads are facets of a single identity — the guardian —
-             and the brief (Cerberus handoff) mandates one independently
-             unit-testable core rather than three modules sharing a PIN and a
-             key. Recorded in CONVENTIONS §12.
+             The one deliberate exception to §0's "one file, one job": the
+             three heads are facets of one guardian, sharing one session.
+             Recorded in CONVENTIONS §12.
 
-Threat model: same class as Sphynx — protects against ACCIDENTAL EXPOSURE and
-             UNAUTHORIZED LOCAL ACCESS (kids at the keyboard, casual snooping,
-             screen-share slips). NOT a defense against a determined attacker
-             with tools and time. So: no OS-keychain, no HSM, and the PIN gate
-             stays as lightweight as Sphynx's (RAM-only attempt counter, no
-             lockout persistence). Only the Vault's encryption key is
-             stretched (PBKDF2), because that runs once per unlock, not per
-             read.
+At rest:     Each key is encrypted with Windows DPAPI (CryptProtectData) under
+             the current Windows user, and the entry's name goes in as DPAPI's
+             optional entropy. A copy of cerberus_vault.json (a backup, a synced
+             folder, a thumb drive, malware that copies it and leaves) can't be
+             read on another account or another PC, and a blob moved into
+             another entry's slot fails. Every failure is loud (see Tamper).
 
-Crypto:      Stdlib only — no `cryptography` dependency (§11 bars new deps
-             casually, and the threat model doesn't justify one). Python's
-             stdlib ships PBKDF2 but no AES, so the at-rest cipher is built
-             from HMAC-SHA256: PBKDF2 derives 64 bytes of key material (split
-             into a 32-byte encryption key + 32-byte MAC key), encryption is
-             a HMAC-SHA256 counter-mode keystream XORed with the plaintext,
-             and integrity is encrypt-then-MAC (HMAC over nonce||ciphertext,
-             verified with a constant-time compare). Adequate for "keep honest
-             people honest"; not marketed as more.
+             What it does NOT stop: anything running as this Windows user can
+             decrypt every key at any time, PIN or no PIN. DPAPI asks Windows,
+             not the PIN. A Windows password RESET (a change is fine) or a
+             rebuilt profile makes the blobs unreadable; the keys are all
+             regenerable, so the answer is to re-enter them.
 
-PIN paths:   TWO independent salts, per R3 —
-               • cerberus_data.json  — verify-salt + a lightweight salted
-                 SHA-256 of the PIN. This only gates access; kept cheap.
-               • cerberus_vault.json — kdf-salt used by PBKDF2 to derive the
-                 encryption key. Different salt, different operation.
-             Losing the PIN means losing the Vault contents (accepted: the
-             initial contents are re-issuable API keys).
+The PIN:     A CHILD LOCK and a policy gate. It decrypts nothing, so knowing it
+             yields no key. It decides when tools may USE the keys (vault_get),
+             when the UI may change them (vault_set, retire_vault), and when
+             Custody opens a config. cerberus_data.json holds a salted SHA-256
+             of it; that hash is fast, and that's fine, because nothing secret
+             sits behind it. Changing the PIN touches no key. Three tries per
+             process: theater, kept on purpose.
 
-Session:     unlock(pin) verifies, then caches the PIN-derived key in RAM for
-             the session so PBKDF2 runs once, not per read. lock() clears it.
-             Vault reads are deduped to one ledger entry per key per unlock
-             session (with a read-count); a fresh unlock starts a fresh entry.
-             Vault WRITES are never deduped — each vault_set() call logs its
-             own Ledger entry (name + action="write", never the value), since
-             a write is a distinct, deliberate event rather than a repeated
-             glance at the same secret.
+Session:     unlock(pin) opens ONE module-level session shared by every tab and
+             tool; lock(reason) closes it. fetch(), Cerberus's own 2 s Kairos
+             worker, closes it when the person steps away: Windows locked, the
+             PC asleep, or 60 min with no keyboard or mouse input anywhere on
+             the PC (tools/hypnos.py reads those). Felhaven's exit closes it
+             too. Each lock and unlock is a Ledger row.
 
-Contract:    preflight()              — validate cerberus_data.json loads.
-             verify(pin) -> bool      — Sphynx-pattern salted-hash check +
-                                         RAM-only attempt decrement.
+Tamper:      Loud, never silent. An old PIN-encrypted (v1) or unparseable vault
+             file, an entry that won't decrypt, and a PIN file recreated while
+             the vault held keys each write a Ledger row, log an ERROR (Emanon
+             shows it) and raise an alarm. fetch() carries the alarms to the
+             Cerberus tab, the Dynastic Vault and the Home lamp.
+
+Contract:    preflight()                 — the PIN file loads (else HashFileError)
+             verify(pin) -> bool         — PIN check; a miss burns an attempt
              attempts_left() -> int
-             unlock(pin) / lock() / is_unlocked()
-             vault_set(name, value)   — encrypt + store (the explicit setup
-                                         step; creates the kdf-salt on first
-                                         use). Requires unlock. Silent
-                                         overwrite of an existing name;
-                                         ledgers a (never-deduped) write.
-             vault_get(name) -> str   — decrypt + ledger a (deduped) read.
-             vault_names() -> list    — key names only, never values.
-             manifest_configs()       — Custody rows (file/desc/exists).
-             manifest_config_dir()    — resolved config folder path or None.
-             ledger_log_custody(file, action)
-             ledger_entries()         — newest-first, for display.
+             unlock(pin) -> bool · lock(reason) · is_unlocked() · lock_reason()
+             set_pin(pin)                — write the PIN check; touches no key
+             vault_set(name, value)      — encrypt + store; session required
+             vault_get(name) -> str      — decrypt; session required
+             vault_names() -> list       — names only, never values
+             vault_status() -> str       — missing | v2 | v1 | corrupt | io_error
+             vault_health() -> dict      — name -> "ok" | "unreadable". Decrypts
+                                           and discards, and needs no PIN: under
+                                           DPAPI a PIN can't stop a decrypt, and
+                                           pretending otherwise is theater.
+             retire_vault() -> str       — set a v1/corrupt file aside (renamed,
+                                           never deleted); session required
+             alarms() -> list · dismiss_alarm(alarm)
+             fetch() -> dict             — the Kairos worker (see Session)
+             KNOWN_KEYS                  — key name -> what uses it
+             manifest_configs() · manifest_config_dir() · custody_open(file)
+             ledger_log_custody(file, action) · ledger_entries()
+             main(argv) -> int           — the CLI (below)
 
-State:       _ATTEMPTS_REMAINING, _SESSION_KEY, _SESSION_READS are module-level
-             and RAM-only — reset every process start. Nothing about attempts
-             or the session key is ever written to disk.
+CLI:         python cerberus.py status   — PIN, vault format, each key readable or
+                                           not; never prints a value
+             python cerberus.py set NAME — asks for the PIN, then the value
+             python cerberus.py setpin   — asks for the current and new PIN
+             Secrets come only through hidden prompts (getpass). A value or PIN
+             on the command line is refused, because shell history keeps it.
 
-Upstream:    panels/cerberus_panel.py, panels/midas_panel.py (PIN gate),
-             future consumers (Sibyl).
-Downstream:  cerberus_data.json (PIN hash, committed), cerberus_vault.json
-             (encrypted blob, gitignored), cerberus_manifest.json (config
-             list, committed), cerberus_ledger.json (access log, gitignored).
+Errors:      VaultError / CustodyError carry a stable `.slug` (§2's error
+             vocabulary); the panels map slugs to text.
 
-Concurrency: Cerberus is called from worker threads, not just the main one —
-             Midas reads the Finnhub key from a ThreadPoolExecutor (5 threads),
-             and every read logs to the Ledger. So the three Ledger mutators
-             hold _LEDGER_LOCK across their whole load→mutate→write, and all
-             three files are written atomically (tempfile + os.replace, §9) so a
-             reader never catches a half-truncated file. The Vault is written
-             only from the main thread / CLI (the pool path only reads it), so
-             it needs no lock — just the atomic write. Recorded in §12.
+State:       Session, attempts, alarms and the per-session read map are
+             RAM-only, under _SESSION_LOCK, and reset every process start.
 
-Requires:    hashlib, hmac, secrets, json, os, threading, logging, pathlib,
-             datetime (stdlib only). No tkinter, no subprocess — stays
-             independently unit-testable and UI-free, like sphynx.py.
+Concurrency: Called from worker threads (Midas's pool, Pythia, Kairos's own
+             fetch) and the main thread. _SESSION_LOCK guards the session and
+             is held across a whole read, so once lock() returns no read can
+             succeed. _LEDGER_LOCK guards the Ledger's load→mutate→write. Order
+             is always session, then Ledger. Every file is written atomically
+             (§9). Recorded in §12.
+
+Upstream:    panels/cerberus_panel.py, panels/midas_panel.py,
+             panels/home_panel.py (the lamp), felhaven.py (exit), kairos.py
+             (fetch), tools/midas.py, tools/callimachus.py, tools/demeter.py
+Downstream:  cerberus_data.json (the PIN check), cerberus_vault.json (DPAPI
+             blobs), cerberus_ledger.json (access log) — all gitignored, per
+             user; config/cerberus_manifest.json (committed); tools/hypnos.py;
+             Windows crypt32 (DPAPI, through ctypes)
+
+Requires:    stdlib only (ctypes for DPAPI). No tkinter, no subprocess.
 
 V0.02:       Audited 2026-07-24 — the deferred Ledger-corruption finding fixed:
              _LEDGER_LOCK + atomic writes (was a non-atomic truncate+rewrite that
@@ -98,49 +106,107 @@ V0.02:       Audited 2026-07-24 — the deferred Ledger-corruption finding fixed
              verified honest and unchanged.
 """
 
+import base64
+import getpass
 import hashlib
 import hmac
 import json
 import logging
 import os
 import secrets
+import sys
 import tempfile
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from tools import hypnos
+
 log = logging.getLogger("METIS.cerberus")
 
-# Anchored to __file__ per §1 — cerberus.py sits AT the app root, so the same
-# rule scribe.py / metis_logging.py use, not the tools/ two-dirname dance.
-_APP_ROOT     = Path(__file__).resolve().parent
-_DATA_PATH    = _APP_ROOT / "cerberus_data.json"      # committed: PIN hash
-_VAULT_PATH   = _APP_ROOT / "cerberus_vault.json"     # gitignored: ciphertext
-_MANIFEST_PATH = _APP_ROOT / "config" / "cerberus_manifest.json"  # committed: config list
-_LEDGER_PATH  = _APP_ROOT / "cerberus_ledger.json"    # gitignored: access log
+# Anchored to __file__ per §1 — cerberus.py sits AT the app root.
+_APP_ROOT = Path(__file__).resolve().parent
+_DATA_PATH = _APP_ROOT / "cerberus_data.json"      # gitignored: the PIN check
+_VAULT_PATH = _APP_ROOT / "cerberus_vault.json"    # gitignored: DPAPI blobs
+_MANIFEST_PATH = _APP_ROOT / "config" / "cerberus_manifest.json"  # committed
+_LEDGER_PATH = _APP_ROOT / "cerberus_ledger.json"  # gitignored: access log
+_CONFIG_DIR = _APP_ROOT / "config"                 # Custody opens nothing outside
 
-# PBKDF2 iterations for the Vault key. Modern default; runs once per unlock,
-# not per read, so the cost is paid at the gate and never in the hot path.
-_KDF_ITERS = 600_000
+# Every key a tool reads, and what reads it. The Cerberus tab shows a row for
+# each even before it's set, so a fresh vault can be filled row by row instead
+# of by retyping exact names. tests/test_secret_fixtures.py holds it in lockstep
+# with every _VAULT_KEY_NAME in tools/.
+KNOWN_KEYS: dict[str, str] = {
+    "finnhub_api_key": "Midas — market prices",
+    "brave_api_key": "Pythia — web search",
+    "opentopography_api_key": "Artemis — terrain",
+}
 
+# ── Lock policy (fetch) ──────────────────────────────────────────────────────
+IDLE_LOCK_S = 60 * 60     # no input anywhere on the PC for an hour
+_SLEEP_LOCK_S = 5.0       # asleep longer than this between two checks
+_GAP_LOCK_S = 60.0        # or this long between two checks of a 2 s worker
+
+LOCK_MANUAL = "manual"
+LOCK_IDLE = "idle"
+LOCK_WINDOWS = "windows_lock"
+LOCK_SLEEP = "sleep"
+LOCK_EXIT = "exit"
+
+# ── Vault format ─────────────────────────────────────────────────────────────
+_VAULT_FORMAT = "cerberus-vault"
+_VAULT_VERSION = 2
+# Prefixed to the entry name to make DPAPI's optional entropy: a blob opens only
+# under its own name, and only as a v2 entry.
+_ENTROPY_LABEL = b"felhaven/cerberus/v2\x00"
+# CRYPTPROTECT_UI_FORBIDDEN, and nothing else: in particular never
+# CRYPTPROTECT_LOCAL_MACHINE (0x4), which would let any account on this PC
+# decrypt. Without it, DPAPI binds the blob to the current Windows user.
+_DPAPI_FLAGS = 0x1
+
+# ── Error slugs (§2) ─────────────────────────────────────────────────────────
+ERR_LOCKED = "cerberus_locked"
+ERR_NO_ENTRY = "cerberus_no_entry"
+ERR_UNREADABLE = "cerberus_unreadable"
+ERR_V1_VAULT = "cerberus_v1_vault"
+ERR_CORRUPT = "cerberus_corrupt"
+ERR_IO = "cerberus_io_error"
+ERR_DPAPI_UNAVAILABLE = "cerberus_dpapi_unavailable"
+ERR_PROTECT_FAILED = "cerberus_protect_failed"
+ERR_WRITE_FAILED = "cerberus_write_failed"
+ERR_BAD_INPUT = "cerberus_bad_input"
+ERR_NOTHING_TO_RETIRE = "cerberus_nothing_to_retire"
+ERR_RETIRE_FAILED = "cerberus_retire_failed"
+
+ERR_NOT_LISTED = "custody_not_listed"
+ERR_NO_CONFIG_DIR = "custody_no_config_dir"
+ERR_OUTSIDE_CONFIG = "custody_outside_config"
+ERR_NOT_JSON = "custody_not_json"
+ERR_MISSING = "custody_missing"
+
+# ── Alarms ───────────────────────────────────────────────────────────────────
+ALARM_V1_VAULT = "vault_v1"
+ALARM_CORRUPT = "vault_corrupt"
+ALARM_PIN_RESET = "pin_reset"
+ALARM_UNREADABLE = "unreadable:"        # + the entry's name
+
+# ── RAM-only state, guarded by _SESSION_LOCK (never persisted) ───────────────
+# An RLock so a public function can call another without deadlocking itself.
+_SESSION_LOCK = threading.RLock()
 _ATTEMPTS_REMAINING = 3   # resets every process start — soft-lock is impossible
+_SESSION_OPEN = False
+_LOCK_REASON: str | None = None
+_SESSION_READS: dict[str, str] = {}     # key name -> this session's ledger id
+_ALARMS: set[str] = set()
+_LAST_PRESENCE: hypnos.Presence | None = None
+_LAST_CHECK: float | None = None        # time.time() of fetch's last check
+_PRESENCE_FAILED = False
 
-# ── RAM-only session state (never persisted) ─────────────────────────────────
-_SESSION_KEY: bytes | None = None          # 64 B PBKDF2 material, set on unlock
-_SESSION_READS: dict[str, str] = {}        # key name -> this-session ledger id
-
-# Serializes the Ledger's load-modify-write. Midas reads the Finnhub key from a
-# ThreadPoolExecutor(max_workers=5) (tools/midas.py), and every vault read
-# appends or bumps a Ledger entry, so several threads do a read-modify-write on
-# cerberus_ledger.json at once — and the panel reads it on the main thread too.
-# Without this lock they raced: an interleaved truncate+rewrite corrupted the
-# file (readers caught it mid-write, writes clobbered each other) and the
-# per-session read dedupe (the _SESSION_READS check-then-set) lost count bumps.
-# The write itself is now atomic (_atomic_write_json); the lock additionally
-# makes the whole load→mutate→write one critical section. It guards only the
-# Ledger — the Vault is never written from the pool (only vault_set, on the main
-# thread / CLI). See CONVENTIONS §12.
+# Serializes the Ledger's load-modify-write: Midas reads keys from a 5-thread
+# pool, and every read appends or bumps a row. Taken after _SESSION_LOCK, never
+# before it. See CONVENTIONS §12 (2026-07-24).
 _LEDGER_LOCK = threading.Lock()
 
 
@@ -149,44 +215,56 @@ class HashFileError(Exception):
 
 
 class VaultError(Exception):
-    """Vault is locked, missing, corrupt, or a ciphertext failed integrity."""
+    """The vault is locked, refused, missing a key, or a key won't decrypt.
+    `slug` is the stable part (§2); the rest of the message is for humans."""
+
+    def __init__(self, slug: str, detail: str = "") -> None:
+        super().__init__(f"{slug}: {detail}" if detail else slug)
+        self.slug = slug
+
+
+class CustodyError(Exception):
+    """Custody refused to open a file. `slug` is the stable part (§2)."""
+
+    def __init__(self, slug: str, detail: str = "") -> None:
+        super().__init__(f"{slug}: {detail}" if detail else slug)
+        self.slug = slug
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  PIN verification — the Sphynx pattern, plus a salt (R3)
-#  Kept lightweight on purpose: a salted SHA-256, NOT the Vault's stretched
-#  KDF. Verifying a PIN and deriving an encryption key are separate operations
-#  with separate salts.
+#  The PIN — a salted hash, and a policy gate only
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _load_verify() -> tuple[bytes, str]:
-    """Return (verify_salt_bytes, stored_pin_hash) from cerberus_data.json."""
+def _load_verify() -> tuple[bytes, str, dict[str, Any]]:
+    """(verify_salt, pin_hash, the whole file) from cerberus_data.json."""
     try:
         with open(_DATA_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return bytes.fromhex(data["verify_salt"]), data["pin_hash"]
-    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
-        raise HashFileError(f"cerberus_data.json missing or malformed: {e}") from e
+        salt = bytes.fromhex(data["verify_salt"])
+        pin_hash = data["pin_hash"]
+        if not isinstance(pin_hash, str):
+            raise TypeError("pin_hash is not a string")
+        return salt, pin_hash, data
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise HashFileError(
+            f"cerberus_data.json missing or malformed: {type(e).__name__}") from e
 
 
 def _hash_pin(pin: str, salt: bytes) -> str:
-    """Lightweight salted SHA-256 of the PIN — the access gate, not the KDF."""
+    """Salted SHA-256 of the PIN. Fast on purpose: it guards a child lock, not
+    a key (see the module docstring)."""
     return hashlib.sha256(salt + pin.strip().encode("utf-8")).hexdigest()
 
 
 def preflight() -> None:
-    """Validate the PIN-hash file loads, without checking a PIN. Lets the panel
-    fail closed before it draws its gate. Raises HashFileError if broken."""
+    """Raise HashFileError unless the PIN file loads. Lets a panel fail closed
+    (or offer first-run setup) before it draws its gate."""
     _load_verify()
 
 
-def verify(pin: str) -> bool:
-    """Check pin against the stored salted hash. Decrements the remaining-
-    attempts counter on a miss; once exhausted, always returns False (even for
-    a correct pin) without decrementing further. Raises HashFileError if the
-    hash file can't be loaded. Mirrors sphynx.verify's contract exactly."""
+def _verify(pin: str) -> bool:
     global _ATTEMPTS_REMAINING
-    salt, expected = _load_verify()
+    salt, expected, _ = _load_verify()
     if _ATTEMPTS_REMAINING <= 0:
         return False
     if hmac.compare_digest(_hash_pin(pin, salt), expected):
@@ -195,109 +273,176 @@ def verify(pin: str) -> bool:
     return False
 
 
+def verify(pin: str) -> bool:
+    """Check the PIN. A miss decrements the attempts; once they're gone this is
+    always False, even for the right PIN. Raises HashFileError if the PIN file
+    can't be loaded. Mirrors sphynx.verify's contract."""
+    with _SESSION_LOCK:
+        return _verify(pin)
+
+
 def attempts_left() -> int:
-    """Read-only peek for the UI to render 'x attempts remaining'. Floors at 0."""
-    return max(0, _ATTEMPTS_REMAINING)
+    """For the UI's 'x attempts remain'. Floors at 0."""
+    with _SESSION_LOCK:
+        return max(0, _ATTEMPTS_REMAINING)
+
+
+def set_pin(pin: str) -> None:
+    """Write a fresh salt and the PIN's hash to cerberus_data.json. Touches no
+    key: the PIN decrypts nothing, so changing it needs no re-encryption.
+
+    Called by the Cerberus tab's first-run screen and by `setpin`. If no PIN
+    file loaded but the vault already holds keys, someone deleted the PIN file
+    to get past the child lock (or it broke): the new file keeps a `reset_at`
+    mark and the pin_reset alarm stays up until it's dismissed."""
+    if not isinstance(pin, str) or not pin.strip():
+        raise ValueError(ERR_BAD_INPUT)
+    with _SESSION_LOCK:
+        try:
+            _, _, old = _load_verify()
+            had_pin = True
+        except HashFileError:
+            old, had_pin = {}, False
+        _, entries = _vault_read()
+        reset = not had_pin and bool(entries)
+        salt = secrets.token_bytes(16)
+        payload: dict[str, Any] = {"verify_salt": salt.hex(),
+                                   "pin_hash": _hash_pin(pin, salt)}
+        if reset:
+            payload["reset_at"] = _now()
+        elif old.get("reset_at"):
+            payload["reset_at"] = old["reset_at"]   # a PIN change isn't a dismissal
+        _atomic_write_json(_DATA_PATH, payload)
+        if reset:
+            _ALARMS.discard(ALARM_PIN_RESET)        # a new reset is a new event
+            _raise_alarm(ALARM_PIN_RESET, ("session", "pin_reset", ""),
+                         "the PIN file was recreated while the vault held keys")
+        else:
+            _ledger_event("session", "pin_changed" if had_pin else "pin_set")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Session — unlock caches the derived key so PBKDF2 runs once, not per read
+#  Session
 # ─────────────────────────────────────────────────────────────────────────────
 
 def unlock(pin: str) -> bool:
-    """Verify the PIN and, on success, open a session: cache the encryption key
-    (if the Vault has been initialized) and reset the read-dedupe map. Returns
-    the verify() result; a wrong PIN still burns an attempt via verify()."""
-    global _SESSION_KEY, _SESSION_READS
-    if not verify(pin):
-        return False
-    _SESSION_READS = {}
-    salt = _vault_salt()
-    _SESSION_KEY = _derive_key(pin, salt) if salt is not None else None
-    # Vault not yet initialized: defer key derivation to the first vault_set,
-    # which mints the salt. Stash the PIN so we can derive then.
-    if _SESSION_KEY is None:
-        _pending_pin_set(pin)
-    return True
+    """Check the PIN and, if it's right, open the shared session. Returns the
+    check's result; a wrong PIN burns an attempt and is a Ledger row."""
+    global _SESSION_OPEN, _LOCK_REASON
+    with _SESSION_LOCK:
+        if not _verify(pin):
+            _ledger_event("session", "wrong_pin")
+            return False
+        _SESSION_OPEN = True
+        _LOCK_REASON = None
+        with _LEDGER_LOCK:
+            _SESSION_READS.clear()
+        _ledger_event("session", "unlock")
+        return True
 
 
-def lock() -> None:
-    """Close the session: drop the cached key and per-session read state."""
-    global _SESSION_KEY, _SESSION_READS
-    _SESSION_KEY = None
-    _SESSION_READS = {}
-    _pending_pin_set(None)
+def lock(reason: str = LOCK_MANUAL) -> None:
+    """Close the session. Never raises: a Ledger that can't be written must not
+    keep the session open, so the session closes first."""
+    with _SESSION_LOCK:
+        _lock_held(reason)
+
+
+def _lock_held(reason: str) -> None:
+    global _SESSION_OPEN, _LOCK_REASON
+    was_open = _SESSION_OPEN
+    _SESSION_OPEN = False
+    with _LEDGER_LOCK:
+        _SESSION_READS.clear()
+    if was_open:
+        _LOCK_REASON = reason
+        _ledger_event("session", "lock", reason)
 
 
 def is_unlocked() -> bool:
-    """True while a session is open (a correct PIN was accepted since lock())."""
-    return _SESSION_KEY is not None or _pending_pin_get() is not None
+    """True while a session is open."""
+    with _SESSION_LOCK:
+        return _SESSION_OPEN
 
 
-# The pending PIN only lives between unlock() and the first vault_set() that
-# mints the kdf-salt. It's RAM-only and equivalent in sensitivity to the
-# session key it will become. Wrapped in accessors so it's easy to audit.
-_PENDING_PIN: str | None = None
-
-
-def _pending_pin_set(pin: str | None) -> None:
-    global _PENDING_PIN
-    _PENDING_PIN = pin
-
-
-def _pending_pin_get() -> str | None:
-    return _PENDING_PIN
+def lock_reason() -> str | None:
+    """Why the last open session closed (LOCK_*), or None."""
+    with _SESSION_LOCK:
+        return _LOCK_REASON
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Crypto primitives — stdlib only (see the module docstring for the why)
+#  DPAPI — the only cipher in the toolbox
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _derive_key(pin: str, salt: bytes) -> bytes:
-    """PBKDF2-HMAC-SHA256 -> 64 bytes: [:32] encryption key, [32:] MAC key."""
-    return hashlib.pbkdf2_hmac(
-        "sha256", pin.strip().encode("utf-8"), salt, _KDF_ITERS, dklen=64
-    )
+def _entropy(name: str) -> bytes:
+    return _ENTROPY_LABEL + name.encode("utf-8")
 
 
-def _keystream(enc_key: bytes, nonce: bytes, n: int) -> bytes:
-    """HMAC-SHA256 counter-mode keystream of n bytes. block_i = HMAC(enc_key,
-    nonce || counter_i); this is a standard PRF-CTR construction."""
-    out = bytearray()
-    counter = 0
-    while len(out) < n:
-        out.extend(hmac.new(enc_key, nonce + counter.to_bytes(8, "big"),
-                            hashlib.sha256).digest())
-        counter += 1
-    return bytes(out[:n])
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+
+    class _Blob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD),
+                    ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    _crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    for _fn in (_crypt32.CryptProtectData, _crypt32.CryptUnprotectData):
+        _fn.argtypes = [ctypes.POINTER(_Blob), ctypes.c_void_p,
+                        ctypes.POINTER(_Blob), ctypes.c_void_p, ctypes.c_void_p,
+                        wintypes.DWORD, ctypes.POINTER(_Blob)]
+        _fn.restype = wintypes.BOOL
+    _kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    _kernel32.LocalFree.restype = ctypes.c_void_p
+
+    def _dpapi(protect: bool, data: bytes, entropy: bytes) -> bytes:
+        """CryptProtectData / CryptUnprotectData. Raises OSError on any failure:
+        a wrong entropy, a changed byte and a blob from another account all
+        come back as WinError 13 (measured on Obelisk, 2026-09-30)."""
+        data_buf = ctypes.create_string_buffer(data, len(data))
+        ent_buf = ctypes.create_string_buffer(entropy, len(entropy))
+        blob_in = _Blob(len(data), ctypes.cast(data_buf, ctypes.POINTER(ctypes.c_char)))
+        blob_ent = _Blob(len(entropy), ctypes.cast(ent_buf, ctypes.POINTER(ctypes.c_char)))
+        blob_out = _Blob()
+        call = _crypt32.CryptProtectData if protect else _crypt32.CryptUnprotectData
+        ok = call(ctypes.byref(blob_in), None, ctypes.byref(blob_ent), None, None,
+                  _DPAPI_FLAGS, ctypes.byref(blob_out))
+        ctypes.memset(data_buf, 0, len(data))   # best effort: our copy of the input
+        if not ok:
+            raise OSError(ctypes.get_last_error(), "DPAPI call failed")
+        try:
+            return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+        finally:
+            if not protect:                     # best effort: Windows's plaintext copy
+                ctypes.memset(blob_out.pbData, 0, blob_out.cbData)
+            _kernel32.LocalFree(blob_out.pbData)
+
+else:
+
+    def _dpapi(protect: bool, data: bytes, entropy: bytes) -> bytes:
+        raise VaultError(ERR_DPAPI_UNAVAILABLE, "DPAPI exists only on Windows")
 
 
-def _encrypt(key: bytes, plaintext: str) -> dict[str, str]:
-    """Encrypt-then-MAC. Fresh random nonce per call so equal plaintexts under
-    the same key still differ. Returns hex fields for JSON storage."""
-    enc_key, mac_key = key[:32], key[32:]
-    nonce = secrets.token_bytes(16)
-    data = plaintext.encode("utf-8")
-    ct = bytes(a ^ b for a, b in zip(data, _keystream(enc_key, nonce, len(data))))
-    mac = hmac.new(mac_key, nonce + ct, hashlib.sha256).hexdigest()
-    return {"nonce": nonce.hex(), "ct": ct.hex(), "mac": mac}
-
-
-def _decrypt(key: bytes, blob: dict[str, str]) -> str:
-    """Verify the MAC (constant-time) before decrypting. Raises VaultError on a
-    tampered/wrong-key ciphertext rather than returning garbage."""
-    enc_key, mac_key = key[:32], key[32:]
+def _seal(name: str, value: str) -> dict[str, str]:
     try:
-        nonce = bytes.fromhex(blob["nonce"])
-        ct = bytes.fromhex(blob["ct"])
-        stored_mac = blob["mac"]
-    except (KeyError, TypeError, ValueError) as e:
-        raise VaultError(f"vault entry malformed: {e}") from e
-    expected = hmac.new(mac_key, nonce + ct, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, stored_mac):
-        raise VaultError("ciphertext failed integrity check (wrong PIN or tampered)")
-    plain = bytes(a ^ b for a, b in zip(ct, _keystream(enc_key, nonce, len(ct))))
-    return plain.decode("utf-8")
+        blob = _dpapi(True, value.encode("utf-8"), _entropy(name))
+    except OSError as e:
+        raise VaultError(ERR_PROTECT_FAILED, type(e).__name__) from e
+    return {"blob": base64.b64encode(blob).decode("ascii")}
+
+
+def _open_entry(name: str, entry: Any) -> str:
+    """Decrypt one entry under its own name. Raises VaultError(ERR_UNREADABLE)
+    for a malformed entry, a wrong name, tampering or another account's blob."""
+    try:
+        if not isinstance(entry, dict) or not isinstance(entry.get("blob"), str):
+            raise ValueError("entry has no blob")
+        blob = base64.b64decode(entry["blob"], validate=True)
+        return _dpapi(False, blob, _entropy(name)).decode("utf-8")
+    except (OSError, ValueError) as e:      # binascii.Error, UnicodeDecodeError too
+        raise VaultError(ERR_UNREADABLE, name) from e
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -305,19 +450,17 @@ def _decrypt(key: bytes, blob: dict[str, str]) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _atomic_write_json(path: "str | os.PathLike[str]", payload: Any) -> None:
-    """Write `payload` as JSON to `path` atomically: a uniquely-named temp file
-    in the same directory, then os.replace (atomic on Windows and POSIX). A
-    crash mid-write can never truncate the destination, and a concurrent reader
-    sees either the whole old file or the whole new one — never the empty middle
-    of a truncate (the §9 rule, and the fix for the Ledger corruption a reader
-    caught mid-rewrite). Unique temp names (not a fixed '.tmp') so a CLI writing
-    beside the running app never collides on the temp path; same reason set_pin
-    used mkstemp."""
+    """A uniquely named temp file in the same directory, flushed to disk, then
+    os.replace: a crash can't truncate the file, and a reader sees the whole
+    old file or the whole new one. Unique names so a CLI writing beside the
+    running app never collides on the temp path."""
     directory = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".cerberus-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
     except BaseException:
         if os.path.exists(tmp):
@@ -326,100 +469,291 @@ def _atomic_write_json(path: "str | os.PathLike[str]", payload: Any) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Vault — encrypted key/value store (R3)
-#  File shape: {"kdf_salt": "<hex>", "entries": {"<name>": {nonce,ct,mac}}}
+#  Vault — {"format", "version": 2, "entries": {name: {"blob": base64}}}
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _vault_load() -> dict[str, Any]:
-    """Load the vault, degrading to an empty structure on missing/corrupt —
-    never raise from the read path (the panel shows an empty vault, not a
-    crash). A corrupt file is logged, not silently reshaped."""
+def _vault_read() -> tuple[str, dict[str, Any]]:
+    """(state, entries). state is missing | v2 | v1 | corrupt | io_error, and
+    entries is empty for anything but v2."""
     if not os.path.exists(_VAULT_PATH):
-        return {"kdf_salt": None, "entries": {}}
+        return "missing", {}
     try:
         with open(_VAULT_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            raise ValueError("vault root is not an object")
-        data.setdefault("kdf_salt", None)
-        data.setdefault("entries", {})
-        return data
-    except (OSError, json.JSONDecodeError, ValueError) as e:
-        log.error("cerberus_vault.json unreadable, treating as empty: %s", e)
-        return {"kdf_salt": None, "entries": {}}
+            raw = f.read()
+    except OSError:
+        return "io_error", {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return "corrupt", {}
+    if not isinstance(data, dict):
+        return "corrupt", {}
+    if data.get("format") == _VAULT_FORMAT and data.get("version") == _VAULT_VERSION:
+        entries = data.get("entries")
+        return ("v2", entries) if isinstance(entries, dict) else ("corrupt", {})
+    if "kdf_salt" in data:
+        return "v1", {}
+    return "corrupt", {}
 
 
-def _vault_write(vault: dict[str, Any]) -> None:
-    # Atomic (§9): the Vault holds the actual secrets, so a crash mid-write must
-    # not truncate it. Not lock-guarded — vault_set only runs on the main thread
-    # or the CLI, never from Midas's fetch pool (that path only reads).
-    _atomic_write_json(_VAULT_PATH, vault)
+def _vault_write(entries: dict[str, Any]) -> None:
+    _atomic_write_json(_VAULT_PATH, {"format": _VAULT_FORMAT,
+                                     "version": _VAULT_VERSION,
+                                     "entries": entries})
 
 
-def _vault_salt() -> bytes | None:
-    """The kdf-salt bytes if the vault has been initialized, else None."""
-    raw = _vault_load().get("kdf_salt")
-    return bytes.fromhex(raw) if raw else None
+def _note_vault_state(state: str) -> None:
+    """Raise or clear the file-level alarms. Caller holds _SESSION_LOCK."""
+    if state == "v1":
+        _raise_alarm(ALARM_V1_VAULT, ("vault", "v1_found", "cerberus_vault.json"),
+                     "cerberus_vault.json is an old PIN-encrypted (v1) vault and is "
+                     "refused; retire it in the Cerberus tab, then re-enter the keys")
+    else:
+        _ALARMS.discard(ALARM_V1_VAULT)
+    if state == "corrupt":
+        _raise_alarm(ALARM_CORRUPT, ("vault", "corrupt", "cerberus_vault.json"),
+                     "cerberus_vault.json can't be parsed and is refused; set it "
+                     "aside in the Cerberus tab, then re-enter the keys")
+    else:
+        _ALARMS.discard(ALARM_CORRUPT)
 
 
-def _require_key() -> bytes:
-    """Return the session encryption key, deriving+caching it from a pending
-    PIN if the vault was minted after unlock. Raises VaultError if locked."""
-    global _SESSION_KEY
-    if _SESSION_KEY is not None:
-        return _SESSION_KEY
-    pin = _pending_pin_get()
-    salt = _vault_salt()
-    if pin is not None and salt is not None:
-        _SESSION_KEY = _derive_key(pin, salt)
-        return _SESSION_KEY
-    raise VaultError("vault is locked — call unlock(pin) first")
+def _require_usable(state: str) -> None:
+    if state == "v1":
+        raise VaultError(ERR_V1_VAULT)
+    if state == "corrupt":
+        raise VaultError(ERR_CORRUPT)
+    if state == "io_error":
+        raise VaultError(ERR_IO)
+
+
+def _unreadable(name: str) -> None:
+    _raise_alarm(ALARM_UNREADABLE + name, ("vault", "unreadable", name),
+                 f"vault entry {name!r} can't be decrypted on this Windows "
+                 f"account; re-enter it")
 
 
 def vault_names() -> list[str]:
-    """Key names only, never values — safe to render without unlocking."""
-    return sorted(_vault_load().get("entries", {}).keys())
+    """Key names in the vault, never values. Empty unless it's a v2 vault."""
+    with _SESSION_LOCK:
+        return sorted(_vault_read()[1])
+
+
+def vault_status() -> str:
+    """missing | v2 | v1 | corrupt | io_error."""
+    with _SESSION_LOCK:
+        return _vault_read()[0]
 
 
 def vault_set(name: str, value: str) -> None:
-    """Encrypt `value` under the session key and store it under `name`. This is
-    the explicit setup step (R3): on the very first call it mints the kdf-salt.
-    Requires an open session (unlock). Overwrites an existing name silently —
-    matches this function's own contract, so callers (CLI, panel) don't need
-    to add a confirmation layer on top. Records a Ledger write (name + action,
-    never the value); unlike reads, writes are NOT deduped — each call is a
-    distinct event."""
-    if not is_unlocked():
-        raise VaultError("vault is locked — call unlock(pin) first")
-    vault = _vault_load()
-    if not vault.get("kdf_salt"):
-        vault["kdf_salt"] = secrets.token_bytes(16).hex()
-        _vault_write(vault)          # persist the salt before deriving from it
-    key = _require_key()
-    vault = _vault_load()            # reload in case the salt write changed it
-    vault["entries"][name] = _encrypt(key, value)
-    _vault_write(vault)
-    log.info("cerberus vault: stored key %r", name)
-    _ledger_add_write(name)
+    """Encrypt `value` under `name` and store it. Session required. Overwrites
+    an existing name (that's how REPLACE works) and is always its own Ledger
+    row; the value is never logged."""
+    name = name.strip() if isinstance(name, str) else ""
+    if not name or not isinstance(value, str) or not value:
+        raise VaultError(ERR_BAD_INPUT)
+    with _SESSION_LOCK:
+        if not _SESSION_OPEN:
+            raise VaultError(ERR_LOCKED)
+        state, entries = _vault_read()
+        _note_vault_state(state)
+        _require_usable(state)
+        entries = dict(entries)
+        entries[name] = _seal(name, value)
+        try:
+            _vault_write(entries)
+        except OSError as e:
+            raise VaultError(ERR_WRITE_FAILED, type(e).__name__) from e
+        _ALARMS.discard(ALARM_UNREADABLE + name)
+        log.info("cerberus vault: stored key %r", name)
+        _ledger_add_write(name)
 
 
 def vault_get(name: str) -> str:
-    """Decrypt and return the secret stored under `name`, recording a (deduped)
-    Ledger read. Requires an open session. Raises VaultError if locked, the
-    name is absent, or the ciphertext fails its integrity check."""
-    key = _require_key()
-    entries = _vault_load().get("entries", {})
-    if name not in entries:
-        raise VaultError(f"no vault entry named {name!r}")
-    plaintext = _decrypt(key, entries[name])
-    _ledger_add_read(name)
-    return plaintext
+    """Decrypt and return the key stored under `name`. Session required; the
+    lock is held across the decrypt, so once lock() returns this can't
+    succeed. A read is a Ledger row, deduped per key per session."""
+    with _SESSION_LOCK:
+        if not _SESSION_OPEN:
+            raise VaultError(ERR_LOCKED)
+        state, entries = _vault_read()
+        _note_vault_state(state)
+        _require_usable(state)
+        if name not in entries:
+            raise VaultError(ERR_NO_ENTRY, name)
+        try:
+            value = _open_entry(name, entries[name])
+        except VaultError as e:
+            if e.slug == ERR_UNREADABLE:
+                _unreadable(name)
+            raise
+        _ALARMS.discard(ALARM_UNREADABLE + name)
+        _ledger_add_read(name)
+        return value
+
+
+def vault_health() -> dict[str, str]:
+    """name -> "ok" | "unreadable" for every entry. Decrypts and discards; never
+    returns a value. Needs no session (see the module docstring), and raises
+    the same alarms a read would, so a bad key shows before any tool trips."""
+    with _SESSION_LOCK:
+        state, entries = _vault_read()
+        _note_vault_state(state)
+        out: dict[str, str] = {}
+        for name in sorted(entries):
+            try:
+                _open_entry(name, entries[name])
+            except VaultError as e:
+                if e.slug != ERR_UNREADABLE:
+                    raise
+                _unreadable(name)
+                out[name] = "unreadable"
+            else:
+                _ALARMS.discard(ALARM_UNREADABLE + name)
+                out[name] = "ok"
+        return out
+
+
+def retire_vault() -> str:
+    """Rename a v1 or unparseable vault file aside so a fresh v2 vault can
+    start; returns the new file name. Session required. Never deletes and never
+    overwrites: deleting the .old file is the owner's step."""
+    with _SESSION_LOCK:
+        if not _SESSION_OPEN:
+            raise VaultError(ERR_LOCKED)
+        state, _ = _vault_read()
+        if state not in ("v1", "corrupt"):
+            raise VaultError(ERR_NOTHING_TO_RETIRE)
+        src = Path(_VAULT_PATH)
+        kind = "v1" if state == "v1" else "unreadable"
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        dst = src.with_name(f"{src.stem}.{kind}-{stamp}.old")
+        try:
+            if dst.exists():
+                raise FileExistsError(dst.name)
+            os.rename(src, dst)
+        except OSError as e:
+            raise VaultError(ERR_RETIRE_FAILED, type(e).__name__) from e
+        _note_vault_state("missing")
+        log.warning("cerberus: retired the vault file as %s", dst.name)
+        _ledger_event("vault", "retired", dst.name)
+        return dst.name
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Ledger — access log (R2). Metadata only, never secret values → NOT encrypted.
-#  Vault reads dedupe to one entry per key per session (read-count); Custody
-#  opens/edits log at full fidelity.
+#  Alarms
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _raise_alarm(alarm: str, row: tuple[str, str, str] | None, message: str) -> None:
+    """Raise `alarm` once: an ERROR log line (Emanon shows it) and, if `row` is
+    given, a Ledger row. Already raised: nothing. Caller holds _SESSION_LOCK."""
+    if alarm in _ALARMS:
+        return
+    _ALARMS.add(alarm)
+    log.error("cerberus: %s", message)
+    if row is not None:
+        _ledger_event(*row)
+
+
+def _refresh_alarms() -> None:
+    """Re-derive the file-level alarms. Caller holds _SESSION_LOCK."""
+    _note_vault_state(_vault_read()[0])
+    try:
+        marked = bool(_load_verify()[2].get("reset_at"))
+    except HashFileError:
+        marked = False
+    if marked:
+        # Already written to the Ledger when it happened; after a restart it
+        # only comes back up, without a second row.
+        _raise_alarm(ALARM_PIN_RESET, None,
+                     "the PIN file was recreated while the vault held keys "
+                     "(not yet dismissed)")
+    else:
+        _ALARMS.discard(ALARM_PIN_RESET)
+
+
+def alarms() -> list[str]:
+    """The alarms that are up now, sorted."""
+    with _SESSION_LOCK:
+        return sorted(_ALARMS)
+
+
+def dismiss_alarm(alarm: str) -> None:
+    """Clear the pin_reset alarm (the others clear when their cause is fixed:
+    retire the file, or re-enter the key). Session required; a Ledger row."""
+    if alarm != ALARM_PIN_RESET:
+        raise ValueError(f"only {ALARM_PIN_RESET} is dismissed by hand")
+    with _SESSION_LOCK:
+        if not _SESSION_OPEN:
+            raise VaultError(ERR_LOCKED)
+        _, _, data = _load_verify()
+        if data.pop("reset_at", None) is not None:
+            _atomic_write_json(_DATA_PATH, data)
+        _ALARMS.discard(ALARM_PIN_RESET)
+        _ledger_event("session", "dismissed", ALARM_PIN_RESET)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  fetch — Cerberus's Kairos worker: lock when the person steps away
+# ─────────────────────────────────────────────────────────────────────────────
+
+def away_reason(now: hypnos.Presence | None, before: hypnos.Presence | None,
+                gap_s: float | None) -> str | None:
+    """Why the session should close, or None. Pure, so the tests pin it.
+    `before` is the previous check's reading; `gap_s` the seconds since it."""
+    if now is not None:
+        if now.windows_locked:
+            return LOCK_WINDOWS
+        if before is not None and now.asleep_s - before.asleep_s > _SLEEP_LOCK_S:
+            return LOCK_SLEEP
+    # A 2 s worker that hasn't run for a minute: the PC slept (or the app was
+    # frozen). A second signal for sleep, in case the asleep counter misses it.
+    if gap_s is not None and gap_s > _GAP_LOCK_S:
+        return LOCK_SLEEP
+    if now is not None and now.idle_s >= IDLE_LOCK_S:
+        return LOCK_IDLE
+    return None
+
+
+def _wall_clock() -> float:
+    """Wall-clock seconds. The gap check uses the wall clock because it keeps
+    counting while the PC sleeps. A seam, so tests can move it without moving
+    the clock logging reads."""
+    return time.time()
+
+
+def fetch() -> dict[str, Any]:
+    """Read presence, lock if the person stepped away, and report the session:
+    {"unlocked": bool, "reason": LOCK_* | None, "alarms": [...]}. Runs on a
+    Kairos worker thread, so the lock lands before any panel redraws."""
+    global _LAST_PRESENCE, _LAST_CHECK, _PRESENCE_FAILED
+    presence: hypnos.Presence | None
+    try:
+        presence = hypnos.presence()
+        _PRESENCE_FAILED = False
+    except (hypnos.HypnosError, OSError) as e:
+        presence = None
+        if not _PRESENCE_FAILED:
+            log.error("cerberus: can't read presence (%s); the idle, Windows-lock "
+                      "and sleep locks are off until it recovers", type(e).__name__)
+            _PRESENCE_FAILED = True
+    now = _wall_clock()
+    with _SESSION_LOCK:
+        gap = now - _LAST_CHECK if _LAST_CHECK is not None else None
+        reason = away_reason(presence, _LAST_PRESENCE, gap)
+        if presence is not None:
+            _LAST_PRESENCE = presence
+        _LAST_CHECK = now
+        if reason is not None and _SESSION_OPEN:
+            _lock_held(reason)
+        _refresh_alarms()
+        return {"unlocked": _SESSION_OPEN, "reason": _LOCK_REASON,
+                "alarms": sorted(_ALARMS)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Ledger — access log. Names and events only, never a value or a PIN.
+#  Vault reads dedupe to one row per key per session; everything else is a row.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _now() -> str:
@@ -427,88 +761,87 @@ def _now() -> str:
 
 
 def _ledger_load() -> list[dict[str, Any]]:
-    """Load the ledger array, degrading to [] on missing/corrupt (logged)."""
+    """The ledger rows, or [] if missing/corrupt (logged)."""
     if not os.path.exists(_LEDGER_PATH):
         return []
     try:
         with open(_LEDGER_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, list) else []
-    except (OSError, json.JSONDecodeError) as e:
-        log.error("cerberus_ledger.json unreadable, treating as empty: %s", e)
+    except (OSError, ValueError) as e:
+        log.error("cerberus_ledger.json unreadable, treating as empty: %s",
+                  type(e).__name__)
         return []
 
 
 def _ledger_write(entries: list[dict[str, Any]]) -> None:
-    # Atomic (§9) so a reader (the panel, on the main thread) never catches a
-    # half-truncated file. Callers hold _LEDGER_LOCK across their whole
-    # load→mutate→write; this is the write half of that critical section.
     _atomic_write_json(_LEDGER_PATH, entries)
 
 
+def _ledger_failed(e: OSError) -> None:
+    log.error("cerberus: couldn't write the Ledger (%s)", type(e).__name__)
+
+
+def _ledger_event(head: str, action: str, target: str = "") -> None:
+    """Append one row. Never raises: the log is best effort, and a full disk
+    must not keep a session open or block a lock."""
+    try:
+        with _LEDGER_LOCK:
+            entries = _ledger_load()
+            entries.append({"id": secrets.token_hex(8), "ts": _now(), "head": head,
+                            "action": action, "target": target, "count": 1})
+            _ledger_write(entries)
+    except OSError as e:
+        _ledger_failed(e)
+
+
 def _ledger_add_read(name: str) -> None:
-    """Record a Vault read, deduped per key per unlock session. The first read
-    of a key this session appends a new entry; repeats bump its read-count on
-    the same entry. A fresh unlock() clears _SESSION_READS, so the next session
-    starts a new entry (R2). Locked: Midas's 5-thread pool reads keys
-    concurrently, so the load→mutate→write (and the _SESSION_READS check-then-
-    set) must be one critical section, or racing threads mint duplicate entries
-    and drop count bumps."""
-    with _LEDGER_LOCK:
-        entries = _ledger_load()
-        eid = _SESSION_READS.get(name)
-        if eid is not None:
-            for e in entries:
-                if e.get("id") == eid:
-                    e["count"] = e.get("count", 1) + 1
-                    e["ts"] = _now()
-                    _ledger_write(entries)
-                    return
-            # The entry vanished (file emptied by a corrupt read before the lock
-            # existed): fall through and create a fresh one.
-        eid = secrets.token_hex(8)
-        entries.append({"id": eid, "ts": _now(), "head": "vault",
-                        "action": "read", "target": name, "count": 1})
-        _SESSION_READS[name] = eid
-        _ledger_write(entries)
+    """A vault read, deduped per key per session: the first read appends a row,
+    repeats bump its count. Under _LEDGER_LOCK, check-then-set included, so
+    Midas's racing threads neither split the row nor lose a count."""
+    try:
+        with _LEDGER_LOCK:
+            entries = _ledger_load()
+            eid = _SESSION_READS.get(name)
+            if eid is not None:
+                for e in entries:
+                    if e.get("id") == eid:
+                        e["count"] = e.get("count", 1) + 1
+                        e["ts"] = _now()
+                        _ledger_write(entries)
+                        return
+            eid = secrets.token_hex(8)
+            entries.append({"id": eid, "ts": _now(), "head": "vault",
+                            "action": "read", "target": name, "count": 1})
+            _SESSION_READS[name] = eid
+            _ledger_write(entries)
+    except OSError as e:
+        _ledger_failed(e)
 
 
 def _ledger_add_write(name: str) -> None:
-    """Record a Vault write. Never deduped (unlike reads) — each vault_set call
-    is a distinct event, whether it's a fresh key or a silent overwrite."""
-    with _LEDGER_LOCK:
-        entries = _ledger_load()
-        entries.append({"id": secrets.token_hex(8), "ts": _now(), "head": "vault",
-                        "action": "write", "target": name, "count": 1})
-        _ledger_write(entries)
+    """A vault write. Never deduped: each one is a distinct, deliberate event."""
+    _ledger_event("vault", "write", name)
 
 
 def ledger_log_custody(filename: str, action: str = "open") -> None:
-    """Record a Custody event at full fidelity — one entry per open/edit, no
-    deduping. `action` is 'open' (we can log the handoff to the OS editor) or
-    'edit' if a caller can distinguish the two."""
-    with _LEDGER_LOCK:
-        entries = _ledger_load()
-        entries.append({"id": secrets.token_hex(8), "ts": _now(), "head": "custody",
-                        "action": action, "target": filename, "count": 1})
-        _ledger_write(entries)
+    """A Custody event, at full fidelity (no dedupe)."""
+    _ledger_event("custody", action, filename)
 
 
 def ledger_entries() -> list[dict[str, Any]]:
-    """All ledger rows, newest-first, for the panel to render."""
+    """All ledger rows, newest first, for the panel."""
     return list(reversed(_ledger_load()))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Custody manifest (R1) — a hand-authored WHITELIST of PIN-gated config files.
-#  File shape: {"config_dir": "<path>", "entries": [{"file","desc"}, ...]}.
-#  The manifest gates visibility: ONLY files it lists appear in Custody. Nothing
-#  is auto-discovered from disk — Custody is the curated set of editable configs,
-#  not a directory dump. To surface a new config, add an entry here.
+#  Custody — a hand-authored WHITELIST of config files, opened only inside
+#  config/. File shape: {"config_dir": "config", "entries": [{"file","desc"}]}.
+#  Nothing is discovered from disk; to surface a config, add an entry.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _manifest_load() -> dict[str, Any]:
-    """Load the manifest, degrading to {} on missing/corrupt (logged)."""
+    """The manifest, or {} if missing/corrupt (logged)."""
     if not os.path.exists(_MANIFEST_PATH):
         log.warning("cerberus_manifest.json missing — Custody list will be empty")
         return {}
@@ -516,109 +849,215 @@ def _manifest_load() -> dict[str, Any]:
         with open(_MANIFEST_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError) as e:
-        log.error("cerberus_manifest.json unreadable, treating as empty: %s", e)
+    except (OSError, ValueError) as e:
+        log.error("cerberus_manifest.json unreadable, treating as empty: %s",
+                  type(e).__name__)
         return {}
 
 
+def _config_root() -> Path:
+    return Path(_CONFIG_DIR).resolve()
+
+
 def manifest_config_dir() -> str | None:
-    """The configured config folder, resolved to an absolute path (relative
-    paths and '.' resolve against the app root). None if unset."""
+    """The manifest's config folder, resolved — or None if it's unset or points
+    outside config/. The manifest is itself editable through Custody, so its
+    own claim about where configs live is checked, not trusted."""
     raw = _manifest_load().get("config_dir")
-    if not raw:
+    if not raw or not isinstance(raw, str):
         return None
     p = Path(raw)
     if not p.is_absolute():
         p = _APP_ROOT / p
-    return str(p.resolve())
+    resolved = p.resolve()
+    if not resolved.is_relative_to(_config_root()):
+        log.warning("cerberus: the manifest's config_dir is outside config/; "
+                    "Custody refuses it")
+        return None
+    return str(resolved)
+
+
+def _listed_files(m: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    for entry in m.get("entries", []):
+        fname = entry.get("file") if isinstance(entry, dict) else None
+        if isinstance(fname, str) and fname and fname not in out:
+            out.append(fname)
+    return out
+
+
+def _custody_path(fname: str) -> str:
+    """The resolved path Custody may open for `fname`, or CustodyError: it must
+    be listed, and resolve (links followed) to an existing .json file inside
+    config/. `startfile` RUNS an .exe, .bat or .lnk, so nothing else passes."""
+    if fname not in _listed_files(_manifest_load()):
+        raise CustodyError(ERR_NOT_LISTED, fname)
+    cfg = manifest_config_dir()
+    if cfg is None:
+        raise CustodyError(ERR_NO_CONFIG_DIR)
+    resolved = (Path(cfg) / fname).resolve()
+    if not resolved.is_relative_to(_config_root()):
+        raise CustodyError(ERR_OUTSIDE_CONFIG, fname)
+    if resolved.suffix.lower() != ".json":
+        raise CustodyError(ERR_NOT_JSON, fname)
+    if not resolved.is_file():
+        raise CustodyError(ERR_MISSING, fname)
+    return str(resolved)
 
 
 def manifest_configs() -> list[dict[str, Any]]:
-    """Custody rows — the manifest whitelist, in manifest order. ONLY files the
-    manifest lists appear; nothing is auto-discovered from disk. A listed file
-    missing from disk still shows (exists=False). Each row: {file, desc, exists}."""
+    """Custody rows, in manifest order: {file, desc, exists, refused}.
+    `refused` is a custody_* slug when the entry could never be opened
+    (outside config/, not .json), else None. A missing file still shows."""
     m = _manifest_load()
-    cfg_dir = manifest_config_dir()
+    descs = {e.get("file"): e.get("desc") for e in m.get("entries", [])
+             if isinstance(e, dict)}
+    rows: list[dict[str, Any]] = []
+    for fname in _listed_files(m):
+        exists, refused = True, None
+        try:
+            _custody_path(fname)
+        except CustodyError as e:
+            exists = False
+            if e.slug != ERR_MISSING:
+                refused = e.slug
+        rows.append({"file": fname,
+                     "desc": descs.get(fname) or "(no description)",
+                     "exists": exists, "refused": refused})
+    return rows
 
-    def _exists(fname: str) -> bool:
-        return cfg_dir is not None and os.path.isfile(os.path.join(cfg_dir, fname))
 
-    rows: dict[str, dict[str, Any]] = {}
-    for entry in m.get("entries", []):
-        fname = entry.get("file") if isinstance(entry, dict) else None
-        if not fname:
-            continue
-        rows[fname] = {
-            "file": fname,
-            "desc": entry.get("desc") or "(no description)",
-            "exists": _exists(fname),
-        }
-
-    return list(rows.values())
+def custody_open(fname: str) -> str:
+    """The path to hand the OS editor for `fname`, after a Ledger 'open' row.
+    Session required. Refusals raise CustodyError and are Ledger rows too."""
+    with _SESSION_LOCK:
+        if not _SESSION_OPEN:
+            raise CustodyError(ERR_LOCKED)
+    try:
+        path = _custody_path(fname)
+    except CustodyError as e:
+        log.warning("cerberus: Custody refused %r (%s)", fname, e.slug)
+        _ledger_event("custody", "refused", fname)
+        raise
+    ledger_log_custody(fname, "open")
+    return path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Setup CLI — the "explicit setup step" for the committed PIN file and the
-#  bootstrapped Vault. Every module has a __main__ (§3.7); here it doubles as
-#  the tool the user runs once to set their PIN and seed secrets.
-#
-#    python cerberus.py setpin <PIN>          — (re)write cerberus_data.json
-#    python cerberus.py set <PIN> <name> <v>  — store a secret in the Vault
-#    python cerberus.py get <PIN> <name>      — decrypt one secret (prints it)
-#    python cerberus.py status                — show gate/vault/ledger state
+#  CLI — secrets only through hidden prompts
 # ─────────────────────────────────────────────────────────────────────────────
 
-def set_pin(pin: str) -> None:
-    """Create or replace cerberus_data.json: a fresh verify-salt + the salted
-    hash of the PIN. This is the one-time setup step, callable from the CLI
-    (`setpin`) OR the Cerberus panel's first-run flow on a fresh clone. Atomic
-    (see _atomic_write_json) so a crash mid-write can't leave a half-file that
-    then fails preflight forever."""
-    salt = secrets.token_bytes(16)
-    payload = {"verify_salt": salt.hex(), "pin_hash": _hash_pin(pin, salt)}
-    _atomic_write_json(_DATA_PATH, payload)
+_USAGE = """\
+usage (from metis_toolbox/, in PowerShell):
+  python cerberus.py status          what's set up; whether each key reads back
+  python cerberus.py set NAME        store a key: asks for the PIN, then the value
+  python cerberus.py setpin          set or change the PIN (no key is touched)"""
+
+_REFUSED = """\
+Refused: Cerberus never takes a key or a PIN on the command line, because your
+shell keeps every command in its history file. Run `python cerberus.py set NAME`
+(or `setpin`) and type or paste at the hidden prompt instead.
+If what you typed was a real key, it is in your shell history now: regenerate
+it at the provider and remove that line from the history file."""
+
+_STATUS_TEXT = {
+    "missing": "no vault yet (it's created by the first key)",
+    "v2": "format 2 (Windows DPAPI, this account)",
+    "v1": "OLD FORMAT (PIN-encrypted, v1): refused — retire it in the CERBERUS tab",
+    "corrupt": "UNREADABLE file: refused — set it aside in the CERBERUS tab",
+    "io_error": "can't be read right now (file in use or permissions)",
+}
 
 
-def _cli_setpin(pin: str) -> None:
-    set_pin(pin)
-    print(f"cerberus_data.json written — PIN set (len {len(pin.strip())}).")
-
-
-def _cli_status() -> None:
+def _cli_status() -> int:
     try:
         preflight()
-        print("gate:   cerberus_data.json OK")
-    except HashFileError as e:
-        print(f"gate:   NOT SET ({e})")
-    v = _vault_load()
-    inited = "yes" if v.get("kdf_salt") else "no (run 'set' to initialize)"
-    print(f"vault:  initialized={inited}  keys={sorted(v.get('entries', {}))}")
-    print(f"ledger: {len(_ledger_load())} entries")
+        print("PIN:     set")
+    except HashFileError:
+        print("PIN:     not set — run `python cerberus.py setpin`")
+    state = vault_status()
+    print(f"vault:   {_STATUS_TEXT.get(state, state)}")
+    if state in ("v2", "missing"):
+        try:
+            health = vault_health()
+        except VaultError as e:
+            print(f"         can't check the keys: {e.slug}")
+            health = {}
+        for name in list(KNOWN_KEYS) + [n for n in health if n not in KNOWN_KEYS]:
+            print(f"  {name:<24} {health.get(name, 'not set')}")
+    print(f"alarms:  {', '.join(alarms()) or 'none'}")
+    print(f"ledger:  {len(_ledger_load())} entries")
     print(f"custody: {len(manifest_configs())} config files listed")
+    return 0
+
+
+def _cli_set(name: str) -> int:
+    try:
+        ok = unlock(getpass.getpass("Cerberus PIN: "))
+    except HashFileError:
+        print("No PIN is set yet — run `python cerberus.py setpin` first.")
+        return 1
+    if not ok:
+        print("Wrong PIN.")
+        return 1
+    try:
+        value = getpass.getpass(f"value for {name} (hidden): ").strip()
+        if not value:
+            print("Empty value — nothing stored.")
+            return 1
+        vault_set(name, value)
+        print(f"stored {name!r}.")
+        return 0
+    except VaultError as e:
+        print(f"not stored: {e.slug}")
+        return 1
+    finally:
+        lock(LOCK_EXIT)
+
+
+def _cli_setpin() -> int:
+    try:
+        preflight()
+        has_pin = True
+    except HashFileError:
+        has_pin = False
+    if has_pin and not verify(getpass.getpass("current PIN: ")):
+        print("Wrong PIN — nothing changed.")
+        return 1
+    new = getpass.getpass("new PIN: ")
+    again = getpass.getpass("new PIN again: ")
+    if not new.strip():
+        print("Empty PIN — nothing changed.")
+        return 1
+    if new != again:
+        print("The two PINs don't match — nothing changed.")
+        return 1
+    set_pin(new)
+    print("PIN set. No key was touched: the PIN decrypts nothing.")
+    if ALARM_PIN_RESET in alarms():
+        print("The vault already held keys, so this was logged as a PIN reset.")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    """The CLI. Returns the exit code: 0 done, 1 failed, 2 refused or usage."""
+    cmd, rest = (argv[0], argv[1:]) if argv else ("status", [])
+    if cmd == "status" and not rest:
+        return _cli_status()
+    if cmd == "set" and len(rest) == 1:
+        return _cli_set(rest[0])
+    if cmd == "setpin" and not rest:
+        return _cli_setpin()
+    if cmd in ("set", "setpin"):
+        print(_REFUSED)
+        return 2
+    if cmd == "get":
+        print("`get` is gone: it printed a key into the terminal. `status` says "
+              "whether each key reads back; the CERBERUS tab can reveal one.")
+        return 2
+    print(_USAGE)
+    return 2
 
 
 if __name__ == "__main__":
-    import sys
-
-    argv = sys.argv[1:]
-    cmd = argv[0] if argv else "status"
-
-    if cmd == "setpin" and len(argv) == 2:
-        _cli_setpin(argv[1])
-    elif cmd == "set" and len(argv) == 4:
-        if unlock(argv[1]):
-            vault_set(argv[2], argv[3])
-            print(f"stored {argv[2]!r} in the vault.")
-        else:
-            print("wrong PIN.")
-    elif cmd == "get" and len(argv) == 3:
-        if unlock(argv[1]):
-            print(vault_get(argv[2]))
-        else:
-            print("wrong PIN.")
-    elif cmd == "status":
-        _cli_status()
-    else:
-        print(__doc__.split("Contract:")[0].strip())
-        print("\nUsage: setpin <pin> | set <pin> <name> <value> | "
-              "get <pin> <name> | status")
+    sys.exit(main(sys.argv[1:]))

@@ -1,7 +1,7 @@
 # Selene
 
-Report the moon's phase, illumination, moonrise, and moonset. Interprets Aura's
-astronomy dict; makes no network call of its own.
+Report the moon's phase, illumination, moonrise, and moonset. Computes them from
+the Settings location and this computer's clock, so they work offline.
 
 - **UI:** Atmospherics card → NOW tab (the Selene sub-widget)
 - **Brain tool:** `get_moon_phase`

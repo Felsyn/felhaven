@@ -12,42 +12,135 @@ package root:
 import os
 import sys
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tools import argus, helios, hypatia, selene, morpheus
+import requests
+
+from tools import argus, aura, helios, hypatia, selene, morpheus
 import pythia
 
 
-class TestHeliosHandle(unittest.TestCase):
-    def test_success_from_aura_astronomy(self):
-        with mock.patch("tools.aura.handle", return_value={
-            "astronomy": {"sunrise": "05:52 AM", "sunset": "08:45 PM"}
-        }):
-            out = helios.handle()
+class _ComputedCase(unittest.TestCase):
+    """Sun and moon are computed from the Settings location and the clock (V0.03
+    audit M3), so these patch Themis and the module's clock seam, and cut the
+    network. Aura's cache starts empty: before M3 both tools read the weather
+    through aura.handle(), and a warm cache would have hidden that they needed
+    the network at all."""
+
+    module = "tools.helios"
+
+    def setUp(self):
+        aura._clear_cache()
+        self.addCleanup(aura._clear_cache)
+        self.net = mock.Mock(side_effect=requests.ConnectionError())
+        self.place(51.4779, 0.0)                      # Greenwich, Themis's default
+        self.at(datetime(2026, 9, 28, 12, tzinfo=timezone.utc))
+        self.clock(twenty_four=False)                 # Themis's default
+        for patcher in (mock.patch("requests.get", self.net),
+                        mock.patch("themis.latitude", lambda: self._lat),
+                        mock.patch("themis.longitude", lambda: self._lon),
+                        mock.patch("themis.clock_24h", lambda: self._24h),
+                        mock.patch(f"{self.module}._now", lambda: self._when,
+                                   create=True)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def place(self, lat, lon):
+        self._lat, self._lon = lat, lon
+
+    def at(self, when):
+        self._when = when
+
+    def clock(self, *, twenty_four):
+        self._24h = twenty_four
+
+
+class TestHeliosHandle(_ComputedCase):
+
+    def test_answers_offline_without_touching_the_network(self):
+        # The finding itself: no network used to mean no sunset.
+        out = helios.handle()
         self.assertNotIn("error", out)
-        self.assertEqual(out["sunrise"], "5:52 AM")
-        self.assertIn("day_length", out)
+        self.net.assert_not_called()
 
-    def test_aura_error_degrades(self):
-        with mock.patch("tools.aura.handle", return_value={"error": "weather_offline"}):
-            self.assertEqual(helios.handle(), {"error": "sun_times_unavailable"})
+    def test_answers_for_the_settings_location_on_todays_date(self):
+        out = helios.handle()
+        self.assertEqual(out["sunrise"], "5:56 AM")   # USNO: 05:56 UT (test_helios)
+        self.assertEqual(out["sunset"], "5:45 PM")
+        self.assertEqual(out, helios.compute(51.4779, 0.0, self._when))
+
+    def test_follows_the_settings_clock(self):
+        self.clock(twenty_four=True)
+        out = helios.handle()
+        self.assertEqual((out["sunrise"], out["sunset"]), ("05:56", "17:45"))
+        self.assertEqual(out, helios.compute(51.4779, 0.0, self._when, clock_24h=True))
+
+    def test_carries_no_as_of(self):
+        # as_of dates a fetched reading (T7). This was computed during the
+        # call, so it is exactly as old as the answer, and there is no
+        # staleness to flag.
+        out = helios.handle()
+        self.assertNotIn("as_of", out)
+        self.assertNotIn("stale", out)
+
+    def test_polar_night_says_so(self):
+        self.place(69.6492, 18.9553)                  # Tromsø
+        self.at(datetime(2026, 12, 15, 12, tzinfo=timezone(timedelta(hours=1))))
+        self.assertEqual(helios.handle(),
+                         {"error": "sun_times_unavailable: the sun does not rise today"})
+
+    def test_a_math_failure_degrades_to_the_slug_and_is_logged(self):
+        with mock.patch("tools.helios.compute", side_effect=ZeroDivisionError()), \
+                self.assertLogs("METIS.helios", "ERROR"):
+            self.assertEqual(helios.handle(),
+                             {"error": "sun_times_unavailable: ZeroDivisionError"})
+
+    def test_the_panel_polls_the_same_answer(self):
+        # Kairos's helios worker calls fetch(); the model calls handle(). One
+        # function, so the Helios panel and get_sun_times cannot disagree.
+        self.assertIs(helios.fetch, helios.handle)
 
 
-class TestSeleneHandle(unittest.TestCase):
-    def test_success_from_aura_astronomy(self):
-        with mock.patch("tools.aura.handle", return_value={
-            "astronomy": {"moon_phase": "Full Moon", "moon_illumination": "100",
-                          "moonrise": "08:45 PM", "moonset": "05:52 AM"}
-        }):
-            out = selene.handle()
-        self.assertEqual(out["phase"], "Full Moon")
-        self.assertEqual(out["illumination"], "100%")
+class TestSeleneHandle(_ComputedCase):
 
-    def test_aura_error_degrades(self):
-        with mock.patch("tools.aura.handle", return_value={"error": "weather_offline"}):
-            self.assertEqual(selene.handle(), {"error": "moon_unavailable"})
+    module = "tools.selene"
+
+    def test_answers_offline_without_touching_the_network(self):
+        # The finding itself: no network used to mean no moon, and Aura's
+        # Open-Meteo fallback never carried one.
+        out = selene.handle()
+        self.assertNotIn("error", out)
+        self.net.assert_not_called()
+
+    def test_answers_for_the_settings_location_now(self):
+        out = selene.handle()
+        # USNO, Greenwich 2026-09-28 (test_selene): Waning Gibbous, 96% at noon.
+        self.assertEqual(out["phase"], "Waning Gibbous")
+        self.assertEqual(out["illumination"], "96%")
+        self.assertEqual(out, selene.compute(51.4779, 0.0, self._when))
+
+    def test_follows_the_settings_clock(self):
+        self.clock(twenty_four=True)
+        out = selene.handle()
+        self.assertEqual(out, selene.compute(51.4779, 0.0, self._when, clock_24h=True))
+        self.assertNotEqual(out, selene.compute(51.4779, 0.0, self._when))
+
+    def test_carries_no_as_of(self):
+        out = selene.handle()
+        self.assertNotIn("as_of", out)
+        self.assertNotIn("stale", out)
+
+    def test_a_math_failure_degrades_to_the_slug_and_is_logged(self):
+        with mock.patch("tools.selene.compute", side_effect=ZeroDivisionError()), \
+                self.assertLogs("METIS.selene", "ERROR"):
+            self.assertEqual(selene.handle(),
+                             {"error": "moon_unavailable: ZeroDivisionError"})
+
+    def test_the_panel_polls_the_same_answer(self):
+        self.assertIs(selene.fetch, selene.handle)
 
 
 class TestArgusHandle(unittest.TestCase):

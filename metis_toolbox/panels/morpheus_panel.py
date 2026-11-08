@@ -96,6 +96,10 @@ from tools import morpheus
 # space is intentional (the bin\ directory).
 _NO_BIN_MSG = ("mpv / yt-dlp not found — drop mpv.exe and yt-dlp.exe in "
                "bin\\ or install to PATH")
+# The program is in bin\, but aegis refused it (tools/aegis.py).
+_UNVERIFIED_MSG = ("mpv or yt-dlp in bin\\ doesn't match its recorded checksum, "
+                   "so Felhaven won't run it. Updated it on purpose? Record it: "
+                   "SETUP.md section 5.")
 
 # Human text per status() error slug, with a raw-slug fallback so an unmapped
 # code is surfaced rather than swallowed (the echo_panel _ERROR_TEXT precedent).
@@ -187,6 +191,7 @@ class MorpheusPanel(tk.Frame):
 
         avail = morpheus.available()
         self._enabled = bool(avail["mpv"] and avail["ytdlp"])
+        self._no_bin_text = _UNVERIFIED_MSG if avail.get("problem") else _NO_BIN_MSG
         # Can mpv actually hear a transport click right now? Binaries being
         # present is not the same question (see the module docstring). Starts
         # False — mpv is not running until something plays.
@@ -347,7 +352,7 @@ class MorpheusPanel(tk.Frame):
             self._build_search(self._search_frame)
         else:
             for frame in (self._playlists_frame, self._search_frame):
-                tk.Label(frame, text=_NO_BIN_MSG, font=FONTS["small_italic"],
+                tk.Label(frame, text=self._no_bin_text, font=FONTS["small_italic"],
                          fg=C["text3"], bg=C["card"], anchor="w",
                          justify="left", wraplength=560).pack(anchor="w", pady=(10, 0))
 

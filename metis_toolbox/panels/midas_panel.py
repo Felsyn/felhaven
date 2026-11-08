@@ -9,9 +9,12 @@ UI-only wrapper — midas.py (the tool) is untouched. The gate calls
 cerberus.unlock() (not verify()) — midas.py reads the Finnhub key from the
 Vault at fetch-time, so the gate must open the same session that vault_get()
 reads from. Since Cerberus's session is module-level, unlocking here also
-unlocks the Cerberus tab (and vice versa) — "one guardian, one session". A
-liveness check in update() re-seals this panel within one tick if that shared
-session gets locked from the Cerberus tab instead of from here.
+unlocks the Cerberus tab (and vice versa) — "one guardian, one session". The
+session can close anywhere — the Cerberus tab, idle, a Windows lock, sleep —
+and session_rider, registered on Kairos's 2 s `cerberus` worker, re-seals this
+panel within one tick of it, with the reason. (The LEDGER tab's edits are what
+the child lock is for, so 2 s, not the 60 s midas tick.) update() keeps its own
+liveness check as a second line.
 
 MidasPanel hosts two tabs:
     PRICES — one row per ticker in midas_watchlist.json, current price + daily %
@@ -41,6 +44,7 @@ from datetime import datetime
 from theme import C, FONTS, Card, PhosphorScroll
 
 import cerberus
+from panels.cerberus_panel import LOCK_REASON_TEXT
 from tools import midas, plutus
 
 
@@ -54,6 +58,20 @@ _ERROR_TEXT = {
     midas.ERR_NO_DATA:      "no data",
     midas.ERR_FETCH_FAILED: "net err",
 }
+
+
+class _SessionRider:
+    """Re-seals the Dynastic Vault on Kairos's `cerberus` worker. A rider, not
+    the panel, because MidasPanel.update() is already taken by `midas` and
+    Kairos passes update() no worker name (the dj_rider precedent)."""
+
+    def __init__(self, panel: "MidasPanel") -> None:
+        self._panel = panel
+
+    def update(self, data) -> None:
+        """cerberus.fetch()'s report. Survives None (§6)."""
+        if isinstance(data, dict) and self._panel._unlocked and not data.get("unlocked"):
+            self._panel._reseal(data.get("reason"))
 
 
 class MidasPanel(Card):
@@ -86,6 +104,7 @@ class MidasPanel(Card):
         self._gate.pack(fill="both", expand=True)
 
         self._content = tk.Frame(self.body, bg=C["card"])
+        self.session_rider = _SessionRider(self)
 
     # ─────────────────────────────────────────────────────────────────────────
     #  Cerberus gate (alarm red on black) — the only new surface; verify() only.
@@ -128,8 +147,8 @@ class MidasPanel(Card):
         except cerberus.HashFileError:
             self._gate_entry.config(state="disabled")
             self._gate_status.config(
-                text="Cerberus has no PIN set — run "
-                     "`python cerberus.py setpin <pin>` first.")
+                text="Cerberus has no PIN yet — set one in the CERBERUS tab "
+                     "(Moderati), then relaunch.")
 
     def _on_gate_submit(self, _event=None) -> None:
         pin = self._gate_entry.get()
@@ -161,15 +180,15 @@ class MidasPanel(Card):
             self.update(self._pending)
             self._pending = None
 
-    def _reseal(self) -> None:
-        """The shared Cerberus session was locked from elsewhere (the Cerberus
-        tab, not this gate). Swap back to the alarm-red gate without touching
-        cerberus.lock() again — it's already locked."""
+    def _reseal(self, reason: str | None = None) -> None:
+        """The shared Cerberus session closed somewhere else (the Cerberus tab,
+        idle, a Windows lock, sleep). Swap back to the alarm-red gate without
+        touching cerberus.lock() again — it's already locked."""
         self._unlocked = False
         self._content.pack_forget()
         self._gate_entry.config(state="normal")
-        self._gate_status.config(
-            text="Sealed by Cerberus elsewhere. Enter the PIN again.")
+        why = LOCK_REASON_TEXT.get(reason or "", "Sealed by Cerberus elsewhere.")
+        self._gate_status.config(text=f"{why} Enter the PIN again.")
         self._gate.pack(fill="both", expand=True)
 
     def _build_content(self) -> None:
@@ -267,7 +286,7 @@ class MidasPanel(Card):
             # The shared Cerberus session was locked elsewhere (the Cerberus
             # tab) — re-seal within one tick rather than showing stale
             # unlocked UI against a session that's actually gone.
-            self._reseal()
+            self._reseal(cerberus.lock_reason())
         if data is None:
             return
         if not self._unlocked:

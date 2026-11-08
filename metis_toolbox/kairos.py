@@ -50,10 +50,19 @@ class Kairos:
 
     # (worker_name, interval_seconds, fetch_fn_dotted_path)
     WORKERS = [
-        ("aether",     3600, "tools.aether.fetch"),
+        ("aether",      300, "tools.aether.fetch"),
         ("aura",       1800, "tools.aura.fetch"),
+        # Computed, not fetched: arithmetic on the clock and Themis, a few ms.
+        # 300 s gets a new day on screen within five minutes; a Settings save
+        # refetches them at once. Off Aura's tick, so an outage can't blank them.
+        ("helios",      300, "tools.helios.fetch"),
+        ("selene",      300, "tools.selene.fetch"),
         ("pheme",       900, "tools.pheme.fetch"),
         ("midas",        60, "tools.midas.fetch"),
+        # Not under tools/ — cerberus.py sits at the app root. Locks the shared
+        # session when the person steps away (Windows lock, sleep, an hour
+        # idle) and reports it, so every gate reseals within one tick.
+        ("cerberus",      2, "cerberus.fetch"),
         ("hephaestus",    5, "tools.hephaestus.fetch"),
         ("argus",         5, "tools.argus.fetch"),
         ("horai",         1, "tools.horai.fetch"),

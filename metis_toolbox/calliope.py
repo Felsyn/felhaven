@@ -16,19 +16,21 @@ Contract:    speak(text) -> None
                  can feed sentences in as an LLM streams them. NEVER raises: a
                  missing model file, a busy audio device, or a synthesis error
                  all degrade to a logged no-op.
-             synthesize(text, *, voice=None) -> np.ndarray | None
+             synthesize(text, *, voice=None, speed=None) -> np.ndarray | None
                  The pure, hardware-free half: text in, 24 kHz float32 PCM out
                  (or None on any failure). This is the hermetic-testable seam —
                  mock _load_model() and no audio device or model file is touched.
                  `voice` names a kokoro voice for THIS call only; None means the
-                 narration voice (see "Voice" below).
+                 narration voice (see "Voice" below). `speed` likewise, for this
+                 call only; None means the configured speed. Live narration
+                 never passes it.
 
 Shared seam:  synthesize(), take_chunk(), save_wav() and SAMPLE_RATE
-              are the public kokoro-audio helpers. Echo (tools/echo.py) reuses
-              them so there is ONE source of truth for how kokoro PCM is chunked
-              and written to a WAV — Echo owns no model instance and no second
-              WAV writer (the same "one source of truth" spirit as the singleton
-              model). Do not re-privatise them.
+              are the public kokoro-audio helpers. Echo (tools/echo.py) and Clio
+              (tools/clio.py) reuse them so there is ONE source of truth for how
+              kokoro PCM is chunked and written to a WAV — neither owns a model
+              instance or a second WAV writer (the same "one source of truth"
+              spirit as the singleton model). Do not re-privatise them.
              prewarm() -> Thread
                  Load the kokoro-onnx model on a background thread at startup so
                  the first spoken line isn't delayed by the one-time model load.
@@ -229,13 +231,16 @@ def _clean_for_speech(text: str) -> str:
     return re.sub(r"\s+", " ", _STRIP_CHARS.sub("", text)).strip()
 
 
-def synthesize(text: str, *, voice: Optional[str] = None) -> Optional[np.ndarray]:
+def synthesize(text: str, *, voice: Optional[str] = None,
+               speed: Optional[float] = None) -> Optional[np.ndarray]:
     """Render `text` to 24 kHz float32 PCM samples, or None on any failure.
     Hardware-free — this is the half the hermetic test exercises.
 
     `voice` overrides the narration voice for THIS call only and is never
     validated here — voices.CATALOG is the gate, and an unknown id degrades to
-    a logged None like any other synthesis failure."""
+    a logged None like any other synthesis failure. `speed` overrides the
+    configured speed for this call only (Clio renders at 1.3 while live
+    narration keeps the config's)."""
     cleaned = _clean_for_speech(text) if text else ""
     if not cleaned:
         return None
@@ -248,7 +253,7 @@ def synthesize(text: str, *, voice: Optional[str] = None) -> Optional[np.ndarray
             audio, _sample_rate = model.create(
                 cleaned,
                 voice=voice or _voice,
-                speed=float(_CONFIG["speed"]),
+                speed=float(_CONFIG["speed"] if speed is None else speed),
                 lang=_CONFIG["lang"],
             )
         log.info(

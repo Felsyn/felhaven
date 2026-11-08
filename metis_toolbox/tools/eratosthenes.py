@@ -47,12 +47,20 @@ Waypoints:   config/artemis_waypoints.json — a list of {"name","lat","lon"}.
 Source:      Census Geocoder onelineaddress endpoint, public domain, no key,
              online only. Addresses only, US only.
 
+On the map:  Every answer, typed, saved or geocoded, is a finite latitude in
+             [-90, 90] and a longitude in [-180, 180], or it is refused: such
+             a waypoint is skipped as malformed, such a geocoder reply is
+             geocode_failed. json reads NaN and Infinity, and the chart
+             needs a real place: Artemis names a cache folder from the pair,
+             and a NaN there raised out of the search instead of a slug
+             (2026-10-05).
+
 Upstream:    panels/artemis_panel.py — the search box.
 Downstream:  none. This module knows nothing about the chart it serves; it
              hands back a pair of numbers and forgets them.
 
-Requires:    stdlib only — json, logging, os, re, urllib.parse,
-             urllib.request.
+Requires:    tools/hermes.py (the bounded network read), and json, logging,
+             os, re (stdlib).
 """
 
 import json
@@ -60,12 +68,12 @@ import logging
 import os
 import re
 import sys
-import urllib.parse
-import urllib.request
 from typing import Any
 
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from tools import hermes
 
 log = logging.getLogger("METIS.eratosthenes")
 
@@ -77,6 +85,9 @@ _WAYPOINTS_PATH = os.path.join(_APP_ROOT, "config", "artemis_waypoints.json")
 _GEOCODER_URL = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
 _BENCHMARK = "Public_AR_Current"
 _HTTP_TIMEOUT = 10
+# Measured 2026-10-01: a one-match answer is 665 B, no match 234 B. The cap is
+# hermes' 64 KiB floor.
+_MAX_BYTES = 64 * 1024
 _USER_AGENT = "Felhaven/1.0 (Artemis chart search)"
 
 # Hemisphere letter -> (is_latitude, sign).
@@ -138,9 +149,15 @@ def parse_coordinates(text: str) -> "tuple[float, float] | None":
     else:
         lat, lon = values[0], values[1]
 
-    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+    if not _on_map(lat, lon):
         return None
     return (lat, lon)
+
+
+def _on_map(lat: float, lon: float) -> bool:
+    """A real latitude and longitude. NaN fails every comparison, so it fails
+    here; so do the infinities and anything past a pole or the date line."""
+    return -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0
 
 
 def _to_degrees(group: list[float]) -> "float | None":
@@ -178,9 +195,10 @@ def waypoints() -> list[dict[str, Any]]:
     out = []
     for entry in raw if isinstance(raw, list) else []:
         try:
-            out.append({"name": str(entry["name"]),
-                        "lat": float(entry["lat"]),
-                        "lon": float(entry["lon"])})
+            lat, lon = float(entry["lat"]), float(entry["lon"])
+            if not _on_map(lat, lon):
+                raise ValueError("not a place on the map")
+            out.append({"name": str(entry["name"]), "lat": lat, "lon": lon})
         except (KeyError, TypeError, ValueError):
             log.warning("Eratosthenes: skipping malformed waypoint %r", entry)
     return out
@@ -201,13 +219,14 @@ def _match_waypoint(text: str) -> "dict[str, Any] | None":
 # ── Geocoder ──────────────────────────────────────────────────────────────────
 
 def _geocode(text: str) -> dict[str, Any]:
-    query = urllib.parse.urlencode({"address": text, "benchmark": _BENCHMARK,
-                                    "format": "json"})
-    request = urllib.request.Request(f"{_GEOCODER_URL}?{query}",
-                                     headers={"User-Agent": _USER_AGENT})
     try:
-        with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT) as resp:
-            payload = json.loads(resp.read().decode("utf-8", "replace"))
+        reply = hermes.get(_GEOCODER_URL,
+                           params={"address": text, "benchmark": _BENCHMARK,
+                                   "format": "json"},
+                           headers={"User-Agent": _USER_AGENT},
+                           cap=_MAX_BYTES, timeout=_HTTP_TIMEOUT)
+        reply.raise_for_status()
+        payload = reply.json()
     except Exception as exc:
         return {"error": f"geocode_failed: {type(exc).__name__}"}
     try:
@@ -218,8 +237,10 @@ def _geocode(text: str) -> dict[str, Any]:
         return {"error": "no_results"}
     best = matches[0]
     try:
-        return {"lat": float(best["coordinates"]["y"]),
-                "lon": float(best["coordinates"]["x"]),
+        lat, lon = float(best["coordinates"]["y"]), float(best["coordinates"]["x"])
+        if not _on_map(lat, lon):
+            raise ValueError("not a place on the map")
+        return {"lat": lat, "lon": lon,
                 "label": str(best.get("matchedAddress", text)),
                 "source": "address"}
     except (KeyError, TypeError, ValueError):

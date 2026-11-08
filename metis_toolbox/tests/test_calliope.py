@@ -184,6 +184,18 @@ class TestSynthesize(_CalliopeBase):
         self.assertEqual(fake.create.call_args.kwargs["voice"], "bm_george")
         self.assertEqual(calliope.narration_voice(), before)
 
+    def test_speed_kwarg_overrides_the_config_for_one_call(self):
+        # Clio's seam: a video renders at its own speed; the next live line
+        # still uses the configured one.
+        pcm = np.zeros(10, dtype=np.float32)
+        fake = _fake_model(pcm)
+        with mock.patch("calliope._load_model", return_value=fake):
+            calliope.synthesize("hello", speed=1.3)
+            self.assertEqual(fake.create.call_args.kwargs["speed"], 1.3)
+            calliope.synthesize("hello")
+        self.assertEqual(fake.create.call_args.kwargs["speed"],
+                         float(calliope._CONFIG["speed"]))
+
     def test_empty_text_is_none_and_loads_nothing(self):
         with mock.patch("calliope._load_model") as lm:
             self.assertIsNone(calliope.synthesize(""))

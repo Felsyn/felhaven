@@ -7,13 +7,15 @@ and restores the root logger's handlers / level / guard attrs, and redirects
 LOG_DIR to a throwaway temp dir. Handlers are closed in tearDown so Windows
 releases the log file before the temp dir is removed.
 
-Covers the module's three promises: the delimited on-disk format Emanon parses,
-idempotency (the guard that stops a second caller doubling every line), and the
-never-crash degrade paths.
+Covers the module's promises: the delimited on-disk format Emanon parses,
+one entry per record (a line break in a message or a traceback can't start an
+entry of its own), idempotency (the guard that stops a second caller doubling
+every line), and the never-crash degrade paths.
 
     python -X utf8 -m unittest tests.test_metis_logging
 """
 
+import io
 import logging
 import logging.handlers
 import os
@@ -27,6 +29,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import metis_logging
+from tools import emanon
 
 
 class MetisLoggingTests(unittest.TestCase):
@@ -87,6 +90,72 @@ class MetisLoggingTests(unittest.TestCase):
         self.assertEqual(level.strip(), "INFO")   # padded to 7 chars in the file
         self.assertEqual(name, "METIS.demo")
         self.assertEqual(message, "did a thing")
+
+    # ── One record, one entry (quoted text can't forge a line) ────────────────
+
+    _FORGED = "2026-10-05 12:00:00 | ERROR   | METIS.cerberus | forged"
+
+    def _quiet_setup(self):
+        """setup_logging with its console handler writing to a buffer, so the
+        hostile lines below stay off the test run's stderr."""
+        with mock.patch.object(metis_logging.sys, "stderr", io.StringIO()):
+            return metis_logging.setup_logging("prog")
+
+    def _entries(self, path):
+        """The log as Emanon reads it: its own tail reader and its own parser."""
+        self._flush()
+        return [e for e in map(emanon._parse_line, emanon._read_tail(path)) if e]
+
+    def _last(self, path):
+        """The newest entry; a failure, not an IndexError, when none parses."""
+        entries = self._entries(path)
+        self.assertTrue(entries, "no line of the log parses as an entry")
+        return entries[-1]
+
+    def _forged(self, path):
+        return sum(e["logger"] == "METIS.cerberus" for e in self._entries(path))
+
+    def test_the_breaks_are_every_character_splitlines_ends_a_line_at(self):
+        # Emanon splits with str.splitlines(), so ask Python which characters
+        # that is, rather than trusting a hand-written list.
+        breaks = {c for c in map(chr, range(0x110000))
+                  if len(("a" + c + "b").splitlines()) == 2}
+        self.assertEqual(set(metis_logging._LINE_BREAKS), breaks)
+
+    def test_a_line_break_in_a_message_cannot_forge_an_entry(self):
+        path = self._quiet_setup()
+        log = logging.getLogger("METIS.demo")
+        for c in metis_logging._LINE_BREAKS:
+            with self.subTest(char=ascii(c)):
+                before = self._forged(path)
+                log.warning("first 200 bytes: junk%s%s", c, self._FORGED)
+                self.assertEqual(self._forged(path), before,
+                                 f"{ascii(c)} in a message started an entry of its own")
+                last = self._last(path)
+                self.assertEqual((last["level"], last["logger"]), ("WARNING", "METIS.demo"))
+                self.assertIn(ascii(c)[1:-1] + self._FORGED, last["message"])
+
+    def test_a_traceback_cannot_forge_an_entry(self):
+        path = self._quiet_setup()
+        try:
+            raise ValueError("bad reply\n" + self._FORGED)
+        except ValueError:
+            logging.getLogger("METIS.demo").exception("tick failed")
+        self.assertEqual(self._forged(path), 0)
+        last = self._last(path)
+        self.assertEqual((last["level"], last["logger"], last["message"]),
+                         ("ERROR", "METIS.demo", "tick failed"))
+        # The traceback keeps its lines; the one quoting the reply can't parse.
+        lines = emanon._read_tail(path)
+        self.assertTrue(any(ln.startswith("Traceback") for ln in lines))
+        quoted = [ln for ln in lines if ln.endswith("forged")]
+        self.assertEqual(len(quoted), 1)
+        self.assertIn(metis_logging._CONTINUATION_DELIM, quoted[0])
+
+    def test_the_entry_line_keeps_the_delimiters_in_its_message(self):
+        path = self._quiet_setup()
+        logging.getLogger("METIS.demo").info("a | b")
+        self.assertEqual(self._last(path)["message"], "a | b")
 
     # ── Idempotency (the whole point of centralizing) ─────────────────────────
 

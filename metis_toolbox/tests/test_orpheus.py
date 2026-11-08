@@ -24,6 +24,11 @@ import numpy as np
 import harmonia
 from tools import orpheus
 
+# ffmpeg is only ever handed absolute paths (orpheus's "ffmpeg paths"), so the
+# fixtures are absolute too; a relative one is refused before ffmpeg runs.
+_IN = os.path.abspath("in.opus")
+_X = os.path.abspath("x.opus")
+
 
 class _FakeProc:
     """Stand-in for subprocess.CompletedProcess (only the fields orpheus reads)."""
@@ -35,13 +40,21 @@ class _FakeProc:
 
 
 class TestAvailable(unittest.TestCase):
+    def _aegis(self, path, problem=None):
+        return mock.patch.object(orpheus.aegis, "resolve",
+                                 return_value=orpheus.aegis.Resolution(path, problem))
+
     def test_reports_resolved_ffmpeg(self):
-        with mock.patch.object(orpheus, "_resolve", return_value="ffmpeg.exe"):
-            self.assertEqual(orpheus.available(), {"ffmpeg": "ffmpeg.exe"})
+        with self._aegis("ffmpeg.exe"):
+            self.assertEqual(orpheus.available(), {"ffmpeg": "ffmpeg.exe", "problem": None})
 
     def test_reports_missing_ffmpeg(self):
-        with mock.patch.object(orpheus, "_resolve", return_value=None):
-            self.assertEqual(orpheus.available(), {"ffmpeg": None})
+        with self._aegis(None):
+            self.assertEqual(orpheus.available(), {"ffmpeg": None, "problem": None})
+
+    def test_reports_a_refused_bin_copy(self):
+        with self._aegis(None, "binary_unverified: ffmpeg.exe does not match its manifest entry"):
+            self.assertEqual(orpheus.available(), {"ffmpeg": None, "problem": "binary_unverified: ffmpeg.exe does not match its manifest entry"})
 
 
 class TestListFiles(unittest.TestCase):
@@ -85,24 +98,34 @@ class TestDecode(unittest.TestCase):
         raw = np.zeros(4, dtype="<f4").tobytes()   # 4 mono frames (_CHANNELS = 1)
         with mock.patch("tools.orpheus.subprocess.run",
                         return_value=_FakeProc(0, stdout=raw)):
-            pcm = orpheus._decode("ffmpeg", "in.opus")
+            pcm = orpheus._decode("ffmpeg", _IN)
         self.assertEqual(pcm.shape, (4, 1))
 
     def test_nonzero_exit_is_none(self):
         with mock.patch("tools.orpheus.subprocess.run",
                         return_value=_FakeProc(1, stderr=b"boom")):
-            self.assertIsNone(orpheus._decode("ffmpeg", "in.opus"))
+            self.assertIsNone(orpheus._decode("ffmpeg", _IN))
 
     def test_empty_output_is_none(self):
         with mock.patch("tools.orpheus.subprocess.run",
                         return_value=_FakeProc(0, stdout=b"")):
-            self.assertIsNone(orpheus._decode("ffmpeg", "in.opus"))
+            self.assertIsNone(orpheus._decode("ffmpeg", _IN))
 
     def test_timeout_is_none(self):
         import subprocess
         with mock.patch("tools.orpheus.subprocess.run",
                         side_effect=subprocess.TimeoutExpired("ffmpeg", 1)):
-            self.assertIsNone(orpheus._decode("ffmpeg", "in.opus"))
+            self.assertIsNone(orpheus._decode("ffmpeg", _IN))
+
+    def test_a_path_that_isnt_absolute_never_reaches_ffmpeg(self):
+        # The fake ffmpeg would SUCCEED, so only the refusal can make this None.
+        raw = np.zeros(4, dtype="<f4").tobytes()
+        for path in ("-x.opus", "concat:a.opus|b.opus", "in.opus"):
+            with self.subTest(path=path), \
+                    mock.patch("tools.orpheus.subprocess.run",
+                               return_value=_FakeProc(0, stdout=raw)) as run:
+                self.assertIsNone(orpheus._decode("ffmpeg", path))
+                run.assert_not_called()
 
 
 class TestPlayFile(unittest.TestCase):
@@ -162,7 +185,7 @@ class TestProbeDuration(unittest.TestCase):
         stderr = b"Input #0, ogg, from 'x.opus':\n  Duration: 00:03:15.23, start: 0, bitrate: 96 kb/s\n"
         with mock.patch("tools.orpheus.subprocess.run",
                         return_value=_FakeProc(1, stderr=stderr)):
-            self.assertAlmostEqual(orpheus._probe_duration("ffmpeg", "x.opus"),
+            self.assertAlmostEqual(orpheus._probe_duration("ffmpeg", _X),
                                    3 * 60 + 15.23, places=2)
 
     def test_nonzero_exit_is_expected_not_a_failure(self):
@@ -170,18 +193,28 @@ class TestProbeDuration(unittest.TestCase):
         stderr = b"Duration: 00:00:05.00, start: 0, bitrate: 64 kb/s\n"
         with mock.patch("tools.orpheus.subprocess.run",
                         return_value=_FakeProc(1, stderr=stderr)):
-            self.assertEqual(orpheus._probe_duration("ffmpeg", "x.opus"), 5.0)
+            self.assertEqual(orpheus._probe_duration("ffmpeg", _X), 5.0)
 
     def test_no_duration_line_is_none(self):
         with mock.patch("tools.orpheus.subprocess.run",
                         return_value=_FakeProc(1, stderr=b"nothing useful here")):
-            self.assertIsNone(orpheus._probe_duration("ffmpeg", "x.opus"))
+            self.assertIsNone(orpheus._probe_duration("ffmpeg", _X))
 
     def test_timeout_is_none(self):
         import subprocess
         with mock.patch("tools.orpheus.subprocess.run",
                         side_effect=subprocess.TimeoutExpired("ffmpeg", 1)):
-            self.assertIsNone(orpheus._probe_duration("ffmpeg", "x.opus"))
+            self.assertIsNone(orpheus._probe_duration("ffmpeg", _X))
+
+    def test_a_path_that_isnt_absolute_never_reaches_ffmpeg(self):
+        # The fake ffmpeg would SUCCEED, so only the refusal can make this None.
+        stderr = b"Duration: 00:00:05.00, start: 0, bitrate: 64 kb/s\n"
+        for path in ("-x.opus", "concat:a.opus|b.opus", "x.opus"):
+            with self.subTest(path=path), \
+                    mock.patch("tools.orpheus.subprocess.run",
+                               return_value=_FakeProc(1, stderr=stderr)) as run:
+                self.assertIsNone(orpheus._probe_duration("ffmpeg", path))
+                run.assert_not_called()
 
 
 class TestFileRows(unittest.TestCase):

@@ -1,6 +1,6 @@
 # Aether
 
-Report whether WiFi and the Anthropic API are reachable.
+Report whether WiFi, the internet and Ollama are reachable.
 
 - **UI:** Moderati card → HEPHAESTUS tab (the connectivity strip)
 - **Brain tool:** `get_connectivity`

@@ -9,7 +9,8 @@ whole panel and shows a simulation notice, since the chart is then showing a
 sky this machine isn't actually under. ConditionsWidget is a small embedded
 sub-widget (bottom-left, under the canvas) that rides the `aura` worker —
 same AetherWidget precedent as Hephaestus's connectivity rows — showing
-cloud-cover-derived "clarity" stars, cloud %, and moon illumination %.
+cloud-cover-derived "clarity" stars and cloud %, plus moon illumination %,
+which rides the `selene` worker through its own `moon_row` rider.
 
 The panel does no astronomy: RA/Dec -> alt/az lives in tools/hypatia.py. The
 only math here is alt/az -> canvas x/y (azimuthal equidistant projection),
@@ -140,6 +141,23 @@ class _ScrollFrame(tk.Frame):
 #  ConditionsWidget — observation conditions, embedded bottom-left
 # ─────────────────────────────────────────────────────────────────────────────
 
+class _MoonRow:
+    """The "moon illum." row's own Kairos rider, fed by the `selene` worker.
+    The rest of ConditionsWidget rides `aura`, and Kairos passes update() no
+    worker name, so one object can't take both feeds (the dj_rider
+    precedent). The label stays inside the widget's rows frame, so the
+    simulated-sky notice still hides it with the others."""
+
+    def __init__(self, label: tk.Label) -> None:
+        self._label = label
+
+    def update(self, info) -> None:
+        """selene.fetch()'s dict, the same one SELENE and get_moon_phase show.
+        An error or None reads "—"."""
+        ok = bool(info) and "error" not in info
+        self._label.config(text=info["illumination"] if ok else "—")
+
+
 class ConditionsWidget(tk.Frame):
     """
     Rides the `aura` worker (AetherWidget precedent — an embedded widget with
@@ -147,6 +165,11 @@ class ConditionsWidget(tk.Frame):
     payload (or None); missing keys / an {"error": ...} dict all degrade to
     "-", never a crash. Collapses to a one-line local-only notice while
     Hypatia is showing a simulated (non-current) sky.
+
+    2026-09-28: the moon row is `moon_row`, fed by the `selene` worker. It used
+    to show wttr.in's illumination from the aura payload, which went blank
+    offline and on Aura's moonless fallback, and could differ from SELENE's
+    (V0.03 audit M3).
     """
 
     _ROWS = ("clarity", "cloud cover", "moon illum.")
@@ -169,6 +192,7 @@ class ConditionsWidget(tk.Frame):
                          bg=C["card"], anchor="e")
             v.pack(side="right")
             self._values[key] = v
+        self.moon_row = _MoonRow(self._values["moon illum."])
 
         self._sim_lbl = tk.Label(
             self, text="local conditions — current location only",
@@ -196,17 +220,16 @@ class ConditionsWidget(tk.Frame):
         self._sim_lbl.pack_forget()
         self._rows_frame.pack(fill="x")
 
+        # Only the weather rows: "moon illum." is moon_row's, fed by Selene.
         data = self._last
         if not data or "error" in data or "cloud_cover_pct" not in data:
-            for v in self._values.values():
-                v.config(text="—")
+            for key in ("clarity", "cloud cover"):
+                self._values[key].config(text="—")
             return
 
         cloud = data.get("cloud_cover_pct", 0)
         self._values["clarity"].config(text=_clarity_stars(cloud))
         self._values["cloud cover"].config(text=f"{cloud}%")
-        moon = (data.get("astronomy") or {}).get("moon_illumination", "")
-        self._values["moon illum."].config(text=f"{moon}%" if moon not in (None, "") else "—")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

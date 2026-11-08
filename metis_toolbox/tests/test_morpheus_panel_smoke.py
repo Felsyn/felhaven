@@ -57,6 +57,22 @@ class TestMorpheusPanelDisabled(unittest.TestCase):
             self.panel.update(data)
             self.root.update_idletasks()
 
+    def test_missing_binaries_say_missing(self):
+        from panels.morpheus_panel import _NO_BIN_MSG
+        self.assertEqual(self.panel._no_bin_text, _NO_BIN_MSG)
+
+    def test_a_refused_binary_says_why_not_missing(self):
+        from panels.morpheus_panel import MorpheusPanel, _UNVERIFIED_MSG
+        morpheus.available = lambda: {"mpv": None, "ytdlp": "yt-dlp.exe",
+                                      "problem": "binary_unverified: mpv.exe does not match"}
+        panel = MorpheusPanel(self.root)
+        try:
+            texts = [w.cget("text") for frame in (panel._playlists_frame, panel._search_frame)
+                     for w in frame.winfo_children() if isinstance(w, tk.Label)]
+            self.assertEqual(texts, [_UNVERIFIED_MSG, _UNVERIFIED_MSG])
+        finally:
+            panel.destroy()
+
     def test_starts_on_playlists_tab(self):
         self.assertEqual(self.panel._active, "playlists")
 

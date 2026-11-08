@@ -2,11 +2,12 @@
 test_hecate.py — the roads layer against captured-real TIGER bytes: the
 MTFCC tier table, normalization (projection + clipping) driven from the
 roads_mini fixture, the load()-never-fetches contract, and ingest with the
-county download mocked at the urllib seam.
+county download mocked at the hermes seam.
 
     python -X utf8 -m unittest tests.test_hecate
 """
 
+import array
 import io
 import os
 import shutil
@@ -19,12 +20,17 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tools import artemis
+from tools import artemis, hermes
 from tools import cadmus
 from tools import hecate
 
 _FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "fixtures", "artemis")
+
+
+def _part(*points):
+    """A Cadmus part (a flat x, y array) from (x, y) points."""
+    return array.array("d", [c for point in points for c in point])
 
 
 def _fixture_pairs():
@@ -38,7 +44,8 @@ def _fixture_pairs():
 def _fixture_center(pairs):
     """A centre in the middle of the fixture's roads, recomputed from the
     data so the clip square actually contains them."""
-    points = [pt for (_, parts), _ in pairs for part in parts for pt in part]
+    points = [pt for (_, parts), _ in pairs for part in parts
+              for pt in cadmus.points(part)]
     xs = [x for x, _ in points]
     ys = [y for _, y in points]
     return ((min(ys) + max(ys)) / 2.0, (min(xs) + max(xs)) / 2.0)
@@ -89,12 +96,12 @@ class TestNormalize(unittest.TestCase):
         self.assertEqual({f["tier"] for f in interstates}, {1})
 
     def test_suppressed_class_is_dropped(self):
-        shape = (3, [[(-80.3, 39.4), (-80.31, 39.41)]])
+        shape = (3, [_part((-80.3, 39.4), (-80.31, 39.41))])
         parking = [(shape, {"MTFCC": "S1780", "FULLNAME": "Lot Rd"})]
         self.assertEqual(hecate.normalize(parking, (39.4, -80.3)), [])
 
     def test_unknown_class_stays_visible(self):
-        shape = (3, [[(-80.3, 39.4), (-80.31, 39.41)]])
+        shape = (3, [_part((-80.3, 39.4), (-80.31, 39.41))])
         odd = [(shape, {"MTFCC": "S9999", "FULLNAME": "Mystery Way"})]
         feats = hecate.normalize(odd, (39.4, -80.3))
         self.assertEqual(len(feats), 1)
@@ -123,28 +130,21 @@ class TestIngestAndLoad(unittest.TestCase):
             zf.writestr("tl_2025_54033_roads.dbf", self._dbf)
         return buf.getvalue()
 
-    class _Resp:
-        def __init__(self, payload):
-            self._payload = payload
-
-        def read(self):
-            return self._payload
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
+    @staticmethod
+    def _Resp(payload):
+        """What hermes.get returns: a finished Reply."""
+        return hermes.Reply(200, {}, payload, "https://census.example.invalid/x.zip")
 
     def test_ingest_writes_then_load_reads(self):
         os.makedirs(artemis.partial_dir(self.area))
         with mock.patch("tools.artemis.counties_for_bbox",
                         return_value=["54033"]), \
-             mock.patch("tools.artemis.urllib.request.urlopen",
+             mock.patch("tools.artemis.hermes.get",
                         return_value=self._Resp(self._county_zip())) as opened:
             hecate.ingest(self.area, self.center, self.box,
                           threading.Event(), lambda msg: None)
         self.assertIn("54033", opened.call_args[0][0])
+        self.assertEqual(opened.call_args.kwargs["cap"], hecate._MAX_BYTES)
         artemis.commit_area(self.area)
 
         features = hecate.load(self.area)
@@ -160,6 +160,21 @@ class TestIngestAndLoad(unittest.TestCase):
                 self.assertAlmostEqual(ge, we, delta=0.25)
                 self.assertAlmostEqual(gn, wn, delta=0.25)
 
+    def test_both_members_are_read_under_their_cap(self):
+        os.makedirs(artemis.partial_dir(self.area))
+        with mock.patch("tools.artemis.counties_for_bbox",
+                        return_value=["54033"]), \
+             mock.patch("tools.artemis.hermes.get",
+                        return_value=self._Resp(self._county_zip())), \
+             mock.patch("tools.artemis.read_member",
+                        wraps=artemis.read_member) as member:
+            hecate.ingest(self.area, self.center, self.box,
+                          threading.Event(), lambda msg: None)
+        self.assertEqual(sorted(c.args[1] for c in member.call_args_list),
+                         ["tl_2025_54033_roads.dbf", "tl_2025_54033_roads.shp"])
+        self.assertEqual({c.args[2] for c in member.call_args_list},
+                         {hecate._MEMBER_MAX_BYTES})
+
     def test_cancel_between_counties(self):
         cancel = threading.Event()
         cancel.set()
@@ -174,15 +189,15 @@ class TestIngestAndLoad(unittest.TestCase):
         os.makedirs(artemis.partial_dir(self.area))
         with mock.patch("tools.artemis.counties_for_bbox",
                         return_value=["54033"]), \
-             mock.patch("tools.artemis.urllib.request.urlopen",
-                        side_effect=OSError("no route")):
+             mock.patch("tools.artemis.hermes.get",
+                        side_effect=hermes.Offline("no route")):
             with self.assertRaises(artemis.IngestError) as ctx:
                 hecate.ingest(self.area, self.center, self.box,
                               threading.Event(), lambda msg: None)
         self.assertIn("download_failed", str(ctx.exception))
 
     def test_load_missing_area_raises_and_never_fetches(self):
-        with mock.patch("tools.artemis.urllib.request.urlopen",
+        with mock.patch("tools.artemis.hermes.get",
                         side_effect=AssertionError("load fetched!")):
             with self.assertRaises(FileNotFoundError):
                 hecate.load("n00p000_e000p000")

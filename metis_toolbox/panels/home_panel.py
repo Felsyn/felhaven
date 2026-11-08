@@ -87,6 +87,15 @@ Verbatim:    Some tool output must be shown EXACTLY — today, a Daedalus
              ends such a turn on is what Vox Response reads aloud
              (CONVENTIONS §12).
 
+Confirm:     A tool that changes files (write_document, edit_document) runs
+             only after an Allow click. pythia.ask() calls on_confirm on the
+             worker thread, which queues the question and waits. The main
+             thread prints the tool, its arguments and the full content
+             (amber header, verbatim-colour content), then shows an
+             Allow/Deny bar above the input row. Deny, Stop, Refresh,
+             closing the window, or _CONFIRM_WAIT_S without an answer all
+             mean no (CONVENTIONS §12, 2026-09-30).
+
 Narration:   Each completed answer gets a "speak aloud" control plus a dim
              meta-line (tokens · wall time · tok/s · tool count, failures in
              red); if Calliope's auto-speak flag (set by Vox Response
@@ -130,6 +139,11 @@ Not Kairos-registered (mostly): the chat itself is event-driven (you press
              sniffing the payload's shape, which would silently depend on
              horai never growing a key of the same name. See DjRider.
 
+             CerberusLamp (panels/cerberus_panel.py) sits first in the same
+             readouts row: dim sealed, amber open, red on a tamper alarm. The
+             LAMP registers itself under Kairos's "cerberus" worker, for the
+             same reason the rider does.
+
 Face:        Hestia's wireframe face is told what Pythia is doing from that
              same 60 ms drain chain — no second timer, the _tick_status trick.
              The mapping is derived, never stored: audible → speaking,
@@ -166,7 +180,7 @@ import threading
 import time
 import tkinter as tk
 from collections import OrderedDict
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import awen
 import calliope
@@ -175,6 +189,7 @@ import pythia
 from panels.queue_panel import QueueBox
 from tools import morpheus
 from theme import C, FONTS, PhosphorScroll, themed_menu, popup_menu
+from panels.cerberus_panel import CerberusLamp
 from panels.hestia_panel import HestiaBar
 from panels.horai_panel import AmmitBadge
 from panels.rite_panel import RiteLog
@@ -194,6 +209,10 @@ _MAX_RITE_TURNS = 20
 # Felhaven is left running for days at a time, so an unattended fault must cost
 # a trickle, not a flood.
 _POLL_FAIL_QUIET = 60.0   # seconds
+# How long a file-change question waits for Allow or Deny before it counts as
+# Deny. Long enough to read a note through; short enough that a question
+# nobody saw doesn't hold the turn open all night.
+_CONFIRM_WAIT_S = 600.0
 
 # A sentence ends at .!? (optionally closed by a quote/bracket) FOLLOWED by
 # whitespace — the trailing space proves the sentence is complete, so "3.5" or
@@ -209,6 +228,26 @@ def _format_wall(ms: int) -> str:
         return f"{secs:.1f}s"
     m, s = divmod(int(round(secs)), 60)
     return f"{m}m {s:02d}s"
+
+
+class _ConfirmReply:
+    """One file-change question's answer, carried from the main thread (the
+    Allow/Deny click) to the worker waiting inside pythia.ask().
+
+    The main thread writes `allowed` and THEN sets `done`; the worker reads
+    `allowed` only once `done` is set, and an Event guarantees that order —
+    the same main→worker crossing the `cancel` Event already makes (§6). The
+    first answer is final, so a late click can't flip a question already
+    answered by Stop or the timeout."""
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.allowed = False
+
+    def answer(self, allowed: bool) -> None:
+        if not self.done.is_set():
+            self.allowed = allowed
+            self.done.set()
 
 
 class DjRider:
@@ -247,7 +286,8 @@ class HomePanel(tk.Frame):
         super().__init__(parent, bg=C["bg"])
 
         # Queue events: ("delta", token, epoch), ("stats", stats_dict, epoch),
-        # ("verbatim", payload, epoch), ("done", full_answer, epoch). See
+        # ("verbatim", payload, epoch), ("confirm", (request, reply), epoch),
+        # ("confirm_expired", reply, epoch), ("done", full_answer, epoch). See
         # module docstring re: epochs.
         self._q: "queue.Queue[tuple[str, Any, int]]" = queue.Queue()
         self._thread: Optional[threading.Thread] = None
@@ -299,6 +339,9 @@ class HomePanel(tk.Frame):
         self._sess_tokens = 0
         self._sess_tools = 0
         self._sess_fails = 0
+        # The file-change question on screen, or None (see _on_confirm). One at
+        # a time: a turn's tool calls run one after another on one worker.
+        self._pending_confirm: Optional[_ConfirmReply] = None
 
         # ── Hestia — title, narration lamp, stop, refresh, session readouts ──
         self._hestia = HestiaBar(self, on_stop=self._on_stop,
@@ -342,6 +385,10 @@ class HomePanel(tk.Frame):
         # Pythia's own words — the palette's one non-map cyan.
         self._log.tag_configure("verbatim_head", foreground=C["verbatim"])
         self._log.tag_configure("verbatim", foreground=C["verbatim"])
+        # A file-change question (see _on_confirm): amber, the colour this
+        # panel already uses for "something needs you", over the exact content
+        # in the verbatim colour, because it IS text that will be written as is.
+        self._log.tag_configure("confirm_head", foreground=C["amber"])
         # Clickable "speak aloud" control appended after each answer.
         self._log.tag_configure("speak", foreground=C["text3"],
                                 font=FONTS["small"])
@@ -364,6 +411,10 @@ class HomePanel(tk.Frame):
         # minimum window this row had only ~20 px to spare (~80 at today's 760).
         readouts = tk.Frame(status_row, bg=C["bg"])
         readouts.pack(side="right")
+        # Cerberus at a glance. felhaven.py registers it on Kairos's `cerberus`
+        # worker; like AmmitBadge it holds no state of this panel's.
+        self.cerberus_lamp = CerberusLamp(readouts, bg=C["bg"])
+        self.cerberus_lamp.pack(side="left")
         self._flux = tk.Label(readouts, text="Scraptoken Flux: 0",
                               font=FONTS["small"], fg=C["text3"], bg=C["bg"])
         self._flux.pack(side="left", padx=(12, 0))
@@ -398,6 +449,17 @@ class HomePanel(tk.Frame):
         self._entry.pack(side="left", fill="x", expand=True, ipady=3)
         self._entry.bind("<Return>", self._on_submit)
         self._entry.bind("<Button-3>", self._show_entry_menu)
+
+        # ── File-change question (hidden until one is asked) ──────────────────
+        # Packed just above the input row only while a question is open. Clicks
+        # only: no key answers it, so an Enter meant for the next question can
+        # never say yes to this one.
+        self._input_row = row
+        self._confirm_bar = tk.Frame(self, bg=C["bg"])
+        tk.Label(self._confirm_bar, text="Pythia asks to change a file. Allow it?",
+                 font=FONTS["small"], fg=C["amber"], bg=C["bg"]).pack(side="left")
+        self._confirm_deny = self._bar_button("DENY", self._on_deny)
+        self._confirm_allow = self._bar_button("ALLOW", self._on_allow)
 
         self._print("Pythia is listening. Ask a question and press Enter.\n",
                     "pythia")
@@ -621,6 +683,7 @@ class HomePanel(tk.Frame):
                 on_event=lambda ev: self._q.put(("stats", ev, ep)),
                 cancel=cxl,
                 on_verbatim=lambda v: self._q.put(("verbatim", v, ep)),
+                on_confirm=lambda r: self._confirm_from_worker(r, ep, cxl),
             )
             self._q.put(("done", answer, ep))
 
@@ -637,12 +700,14 @@ class HomePanel(tk.Frame):
         # no-op when nothing is playing.
         self._cancel.set()
         calliope.stop()
+        self._close_confirm(False, "✗ not allowed\n")   # Stop answers no
 
     def _on_refresh(self) -> None:
         self._hestia.flash_reset()             # one beat, so the click reads
         self._cancel.set()                     # cancel anything in flight
         self._epoch += 1                       # invalidate that thread's late messages
         calliope.stop()
+        self._close_confirm(False, "")         # an open question is a no
         self._log.configure(state="normal")
         self._log.delete("1.0", "end")
         self._log.configure(state="disabled")
@@ -708,6 +773,11 @@ class HomePanel(tk.Frame):
                     self._on_stats(payload)
                 elif kind == "verbatim":
                     self._on_verbatim(payload)
+                elif kind == "confirm":
+                    self._on_confirm(payload)
+                elif kind == "confirm_expired":
+                    if payload is self._pending_confirm:
+                        self._close_confirm(False, "✗ not allowed (no answer)\n\n")
                 else:                           # "done"
                     self._on_done(payload)
             self._tick_status()
@@ -931,6 +1001,101 @@ class HomePanel(tk.Frame):
         self._print(str(payload.get("text", "")), "verbatim")
         self._print("\n\n", "pythia")
 
+    # ── File-change questions (pythia.ask's on_confirm) ───────────────────────
+    # A tool that changes files (pythia._CONFIRM_TOOLS: write_document,
+    # edit_document) runs only after Matthew says yes to its exact arguments:
+    # a web page Pythia read must not be able to talk her into rewriting his
+    # notes. See CONVENTIONS §12, 2026-09-30.
+
+    def _bar_button(self, text: str,
+                    command: "Callable[[tk.Event[Any]], None]") -> tk.Label:
+        """A clickable label on the question bar, with the house hover flip
+        (§7; AmmitAlarmPopup._button). Packed right, so the first made sits
+        rightmost. `command` is bound as a NAMED method, never a lambda, so a
+        test can read which answer each label gives: a swapped pair would make
+        DENY say yes."""
+        lbl = tk.Label(self._confirm_bar, text=text, font=FONTS["small"],
+                       fg=C["text3"], bg=C["bg"], cursor="hand2", padx=8)
+        lbl.pack(side="right")
+        lbl.bind("<Button-1>", command)
+        lbl.bind("<Enter>", lambda _e: lbl.config(fg=C["text1"]))
+        lbl.bind("<Leave>", lambda _e: lbl.config(fg=C["text3"]))
+        return lbl
+
+    def _confirm_from_worker(self, request: dict[str, Any], epoch: int,
+                             cancel: threading.Event) -> bool:
+        """pythia.ask()'s on_confirm. Runs on the WORKER thread, so it touches
+        only the queue: the question goes to the main thread, and the worker
+        waits for the click, a Stop or Refresh (`cancel`), or _CONFIRM_WAIT_S.
+        Anything but an Allow click is a no."""
+        reply = _ConfirmReply()
+        self._q.put(("confirm", (request, reply), epoch))
+        deadline = time.monotonic() + _CONFIRM_WAIT_S
+        while not reply.done.wait(0.1):
+            if cancel.is_set():
+                return False
+            if time.monotonic() >= deadline:
+                self._q.put(("confirm_expired", reply, epoch))
+                return False
+        return reply.allowed
+
+    def _on_confirm(self, payload: "tuple[dict[str, Any], _ConfirmReply]") -> None:
+        """Show a file-change question: which tool, every argument, and the
+        content that would be written, exactly, then the Allow/Deny bar.
+
+        Nothing is trimmed. A preview could hide a line at the end, and the
+        end is where a hidden line would go. The model's output cap (1024
+        tokens) already keeps the content to a few thousand characters."""
+        request, reply = payload
+        self._close_confirm(False, "")           # never two questions open
+        if self._resp_started:                   # the _on_verbatim line break
+            self._print("\n", "pythia")
+            if self._say_turn and self._say_buf.strip():
+                calliope.speak(self._say_buf.strip())
+            self._say_buf = ""
+            self._resp_started = False
+        tool = str(request.get("tool") or "a tool")
+        arguments = request.get("arguments") or {}
+        self._print(f"pythia asks › {tool}\n", "confirm_head")
+        for key, value in arguments.items():
+            if key != "content":
+                self._print(f"   {key}: {value}\n", "confirm_head")
+        if tool == "write_document":
+            self._print("   (replaces the file if it already exists)\n", "confirm_head")
+        content = arguments.get("content")
+        if content:
+            self._print(f"{content}\n", "verbatim")
+        self._pending_confirm = reply
+        self._confirm_bar.pack(fill="x", pady=(2, 2), before=self._input_row)
+        self._set_status("waiting for your OK…")
+
+    def _on_allow(self, _event: "Optional[tk.Event[Any]]" = None) -> None:
+        """The ALLOW click."""
+        self._close_confirm(True, "✓ allowed\n\n")
+
+    def _on_deny(self, _event: "Optional[tk.Event[Any]]" = None) -> None:
+        """The DENY click."""
+        self._close_confirm(False, "✗ not allowed\n\n")
+
+    def _close_confirm(self, allowed: bool, note: str) -> None:
+        """Answer the open question (if any), hide the bar, and say what
+        happened. Every way a question ends comes through here: a click, Stop,
+        Refresh, the timeout, and the turn ending."""
+        reply = self._pending_confirm
+        if reply is None:
+            return
+        self._pending_confirm = None
+        reply.answer(allowed)
+        self._confirm_bar.pack_forget()
+        if note:
+            self._print(note, "meta")
+        # The turn goes on after a click or the timeout, so the line goes back
+        # to what it said; after Stop or Refresh it is ending, and _on_done or
+        # _on_refresh owns the line.
+        if (self._thread is not None and self._thread.is_alive()
+                and not self._cancel.is_set()):
+            self._set_status("consulting the oracle…")
+
     def _on_stats(self, stats: dict[str, Any]) -> None:
         """One stats event per ask() call — cache it for _on_done's meta-line,
         and roll it into the session totals Hestia displays."""
@@ -945,6 +1110,7 @@ class HomePanel(tk.Frame):
         """The answer is complete (or was cancelled): finalize the transcript,
         flush any unspoken tail, and persist the turn — unless it was stopped."""
         self._hestia.set_running(False)
+        self._close_confirm(False, "")         # a turn can't end on an open question
         cancelled = bool(self._last_stats and self._last_stats.get("cancelled"))
 
         if cancelled:

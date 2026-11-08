@@ -290,7 +290,8 @@ class TestAllowlistIsEnforcedAtDispatch(_SeamCase):
         with mock.patch.dict(pythia._DISPATCH,
                              {"play_music": mock.Mock(return_value={"ok": 1})},
                              clear=False):
-            self.assertEqual(pythia._dispatch("play_music", {}, None), {"ok": 1})
+            self.assertEqual(pythia._dispatch("play_music", {"query": "x"}, None),
+                             {"ok": 1})
 
 
 class TestIsBusy(_SeamCase):

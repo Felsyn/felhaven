@@ -34,7 +34,7 @@ Tiers:       The MTFCC -> render-tier table from the Artemis spec, a module
 Source:      TIGER/Line 2025 per-county ROADS zips
              (www2.census.gov/geo/tiger/TIGER2025/ROADS/
              tl_2025_<GEOID>_roads.zip), public domain, over HTTPS via
-             urllib at ingest time only. Counties come from
+             artemis.download (tools/hermes.py) at ingest time only. Counties come from
              artemis.counties_for_bbox. Known accepted weaknesses (spec §7):
              not survey-grade, thin trail coverage outside parks.
 
@@ -43,8 +43,8 @@ Upstream:    tools/artemis.py — ingest_area orchestrates ingest();
 Downstream:  tools/cadmus.py (byte decoding), tools/artemis.py (geometry and
              the FVEC writer).
 
-Requires:    stdlib only — io, logging, os, threading, urllib.request,
-             zipfile.
+Requires:    stdlib only — io, logging, os, threading, zipfile; the
+             download goes through artemis.download.
 """
 
 import io
@@ -65,7 +65,12 @@ log = logging.getLogger("METIS.hecate")
 # ── Config ────────────────────────────────────────────────────────────────────
 
 _ROADS_URL = "https://www2.census.gov/geo/tiger/TIGER2025/ROADS/tl_2025_{geoid}_roads.zip"
-_HTTP_TIMEOUT = 120
+# Caps: 1.5x the largest file in the 2025 vintage, rounded up to a whole MiB.
+# Measured 2026-10-01 across all 3,233 county zips: the largest is 24,080,680 B
+# (county 41019), whose .shp is 37,047,668 B, the largest member seen (largest
+# .dbf: 15,958,881, county 04013). A new vintage means measuring again.
+_MAX_BYTES = 35 * 1024 * 1024
+_MEMBER_MAX_BYTES = 53 * 1024 * 1024
 _VEC_NAME = artemis.VEC_NAMES[artemis.LAYER_ROADS]
 
 # MTFCC -> (tier, style flags). None suppresses the class entirely.
@@ -112,11 +117,11 @@ def _county_features(geoid: str,
     # Shared downloader: retries once, and keeps the 404-vs-failure rule in
     # one place for every layer (see artemis.download).
     raw = artemis.download(_ROADS_URL.format(geoid=geoid),
-                           f"county {geoid} roads")
+                           f"county {geoid} roads", cap=_MAX_BYTES)
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            shp = zf.read(f"tl_2025_{geoid}_roads.shp")
-            dbf = zf.read(f"tl_2025_{geoid}_roads.dbf")
+            shp = artemis.read_member(zf, f"tl_2025_{geoid}_roads.shp", _MEMBER_MAX_BYTES)
+            dbf = artemis.read_member(zf, f"tl_2025_{geoid}_roads.dbf", _MEMBER_MAX_BYTES)
         pairs = cadmus.read_pair(shp, dbf)
     except (KeyError, ValueError, zipfile.BadZipFile) as exc:
         raise artemis.IngestError(
@@ -137,7 +142,8 @@ def normalize(pairs: list[tuple[cadmus.ShapeRecord, dict[str, str]]],
         tier, flags = _TIER_BY_MTFCC.get(mtfcc, _DEFAULT_TIER)
         name = attrs.get("FULLNAME", "")
         for part in parts:
-            local = [artemis.project(y, x, lat0, lon0) for x, y in part]
+            local = [artemis.project(y, x, lat0, lon0)
+                     for x, y in cadmus.points(part)]
             for run in artemis.clip_polyline(local):
                 features.append(artemis.Feature(
                     kind="road", name=name, tier=tier, flags=flags,

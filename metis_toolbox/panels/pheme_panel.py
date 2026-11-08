@@ -167,6 +167,7 @@ def _save_sections(expanded: set[str]) -> None:
 _ERROR_TEXT = {
     "http_error":       "feed returned HTTP",       # detail: the status code
     "feed_timeout":     "feed timed out",
+    "feed_too_large":   "feed is too large to read",
     "network_error":    "network error",
     "invalid_feed_xml": "feed sent unreadable data",
     "fetch_failed":     "feed fetch failed",        # detail: exception class

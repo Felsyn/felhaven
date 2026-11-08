@@ -28,6 +28,7 @@ import tkinter as tk
 from datetime import datetime
 
 import calliope
+import cerberus
 import harmonia
 import pythia
 import scribe
@@ -182,9 +183,22 @@ class FelhavenApp:
         self.kairos.register_panel("aura",       self._views["aura"])
         self.kairos.register_panel("aura",       self._sidebar.row("aura"))
         self.kairos.register_panel("aura",       self._views["hypatia"].conditions)
+        # The sun and moon sub-widgets are registered themselves, not through
+        # WeatherPanel: each is computed on its own worker, so a weather outage
+        # can't blank them. Hypatia's moon row is a RIDER for the same reason
+        # as dj_rider: its widget's update() is already taken by `aura`.
+        self.kairos.register_panel("helios",     self._views["aura"].helios_widget)
+        self.kairos.register_panel("selene",     self._views["aura"].selene_widget)
+        self.kairos.register_panel("selene",     self._views["hypatia"].conditions.moon_row)
         self.kairos.register_panel("hypatia",    self._views["hypatia"])
         self.kairos.register_panel("artemis",    self._views["artemis"])
         self.kairos.register_panel("midas",      self._views["midas"])
+        # Every face of Cerberus's one session follows its worker: the tab
+        # reseals, the Dynastic Vault reseals (a rider: its update() is taken
+        # by `midas`), and Home's lamp shows sealed / open / alarm.
+        self.kairos.register_panel("cerberus",   self._views["moderati"].cerberus)
+        self.kairos.register_panel("cerberus",   self._views["midas"].session_rider)
+        self.kairos.register_panel("cerberus",   self._views["felhaven"].cerberus_lamp)
         self.kairos.register_panel("pheme",      self._views["pheme"])
         # Reach through the Vox Array host to the Morpheus/Orpheus tab bodies —
         # the Moderati precedent (register_panel("hephaestus", …moderati.hephaestus)).
@@ -252,7 +266,10 @@ class FelhavenApp:
     def _on_close(self):
         """Clean shutdown: flush any pending save so a fast close can't drop
         an edit, then stop Kairos's tick before the root is destroyed so a
-        pending after-callback can't fire into a dead window."""
+        pending after-callback can't fire into a dead window. Cerberus locks
+        first: process exit would drop the session anyway, but this way it's
+        a Ledger row, and nothing later in the shutdown can hold it open."""
+        cerberus.lock(cerberus.LOCK_EXIT)
         if self._save_timer:
             self.root.after_cancel(self._save_timer)
             self._flush_save()

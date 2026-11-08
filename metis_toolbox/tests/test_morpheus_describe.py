@@ -108,6 +108,54 @@ class TestTheArgumentsAreNotSearchs(_DescribeCase):
         self.assertEqual(run.call_args.kwargs["timeout"], 20)
 
 
+class TestOnlyAWatchUrlReachesYtDlp(_DescribeCase):
+    """The url is network data (a search row's "url", from yt-dlp's own JSON).
+    yt-dlp builds it from the video id today, but nothing else stops a value
+    starting with "-" from being read as an option. So describe() takes only a
+    watch URL, rebuilds it from the id, and passes "--" before it. Each refused
+    shape must spawn NOTHING: the check belongs before the process, not in
+    yt-dlp's error handling."""
+
+    _REFUSED = (
+        "-J",
+        "--exec=calc.exe",
+        "--version",
+        "",
+        "https://evil.example/watch?v=aaaaaaaaaaa",
+        "https://www.youtube.com.evil.example/watch?v=aaaaaaaaaaa",
+        "http://www.youtube.com/watch?v=aaaaaaaaaaa",
+        "https://www.youtube.com/watch?v=aaaaaaaaaaa&list=PLx",
+        "https://www.youtube.com/watch?v=aaaaaaaaaa",
+        "https://www.youtube.com/watch?v=aaaaaaaaaaaa",
+        "https://www.youtube.com/shorts/aaaaaaaaaaa",
+        "https://youtu.be/aaaaaaaaaaa",
+        "https://www.youtube.com/watch?v=aaaaaaaaaaa\n--exec=calc.exe",
+        "https://www.youtube.com/watch?v=aaaaaaaaaaa\n",   # "$" would pass this
+        " https://www.youtube.com/watch?v=aaaaaaaaaaa",
+    )
+
+    def test_anything_but_a_watch_url_is_refused_before_yt_dlp_runs(self):
+        for url in self._REFUSED:
+            with self.subTest(url=url), \
+                    mock.patch("tools.morpheus.subprocess.run") as run:
+                self.assertEqual(morpheus.describe(url), {"error": "describe_failed"})
+                run.assert_not_called()
+
+    def test_the_url_comes_last_right_after_a_double_dash(self):
+        _, run = self._run()
+        args = run.call_args.args[0]
+        self.assertEqual(args[-2:], ["--", _URL])
+
+    def test_the_url_is_rebuilt_from_its_id(self):
+        """The bare youtube.com host is accepted, and what yt-dlp gets is the
+        canonical form built from the id, not the string that came in."""
+        proc = mock.Mock(returncode=0, stdout=json.dumps(_FAT).encode(), stderr=b"")
+        with mock.patch("tools.morpheus.subprocess.run", return_value=proc) as run:
+            morpheus.describe("https://youtube.com/watch?v=a-b_c1234Z9")
+        self.assertEqual(run.call_args.args[0][-1],
+                         "https://www.youtube.com/watch?v=a-b_c1234Z9")
+
+
 class TestOnlyTheNamedFieldsSurvive(_DescribeCase):
     def test_a_fat_payload_is_reduced_to_the_named_fields(self):
         result, _ = self._run()

@@ -143,7 +143,7 @@ class ThemisPanel(tk.Frame):
 
     def set_refetch(self, fn: Callable[..., None]) -> None:
         """felhaven.py calls this after Kairos exists, passing Kairos.refetch, so
-        a Save nudges the aura/hypatia/horai workers to re-fire promptly."""
+        a Save nudges the location and time workers to re-fire promptly."""
         self._refetch = fn
 
     # ── save ────────────────────────────────────────────────────────────────────
@@ -164,10 +164,10 @@ class ThemisPanel(tk.Frame):
         except themis.SettingsError as e:
             self._status.config(text=f"Not saved — {e}", fg=C["red"])
             return
-        # Nudge the location/time workers so weather, sky, planets, season and
-        # the local chart follow the change on the next tick rather than
-        # waiting out Aura's 30-minute interval.
-        self._refetch("aura", "hypatia", "horai", "artemis")
+        # Nudge the location/time workers so weather, sky, planets, season,
+        # sun, moon and the local chart follow the change on the next tick
+        # rather than waiting out their intervals.
+        self._refetch("aura", "hypatia", "horai", "artemis", "helios", "selene")
         self._status.config(
             text="Saved ✓ — weather, sky, and clock will refresh shortly.",
             fg=C["text1"])

@@ -13,6 +13,7 @@ and drained with panel._poll(), bypassing the worker thread entirely.
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -114,6 +115,19 @@ class TestHomePanelSmoke(unittest.TestCase):
         # History stores the turn's REAL exchange verbatim, not flattened
         # prose — one entry per turn, each a full message list.
         self.assertEqual(panel._history, [turn])
+
+    def test_the_cerberus_lamp_sits_beside_scraptoken_flux(self):
+        from panels.cerberus_panel import CerberusLamp
+        panel = HomePanel(self.root)
+        self.root.update_idletasks()
+        self.assertIsInstance(panel.cerberus_lamp, CerberusLamp)
+        readouts = panel._flux.master
+        self.assertIs(panel.cerberus_lamp.master, readouts)
+        order = readouts.pack_slaves()
+        self.assertEqual(order.index(panel.cerberus_lamp) + 1, order.index(panel._flux))
+        panel.cerberus_lamp.update({"unlocked": True, "reason": None, "alarms": []})
+        self.assertEqual(panel.cerberus_lamp.state, "open")
+        panel.destroy()
 
     def test_persisted_turn_keeps_tool_calls_and_tool_results_verbatim(self):
         # The whole point of storing turn_messages instead of flattened prose:
@@ -262,6 +276,182 @@ class TestHomePanelSmoke(unittest.TestCase):
         self.root.update_idletasks()
 
         self.assertNotIn("ghost text", self._transcript_text(panel))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  File-change questions — pythia.ask's on_confirm (CONVENTIONS §12)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFileChangeQuestions(unittest.TestCase):
+    """A write or edit runs only on an Allow click; every other ending is no."""
+
+    _REQUEST = {"tool": "write_document",
+                "arguments": {"filename": "notes.md", "content": "# Hello\nworld"}}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tk.Tk()
+        cls.root.withdraw()
+        theme._init_fonts(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+
+    def _panel(self) -> HomePanel:
+        panel = HomePanel(self.root)
+        self.addCleanup(panel.destroy)
+        self.root.update_idletasks()
+        return panel
+
+    def _ask(self, panel: HomePanel, request=None) -> "home_panel._ConfirmReply":
+        """Queue a question the way the worker does, and drain it. A question
+        only ever arrives mid-turn, so a live worker is faked: with none,
+        _tick_status rightly takes the status line back."""
+        panel._thread = mock.Mock(**{"is_alive.return_value": True})
+        reply = home_panel._ConfirmReply()
+        panel._q.put(("confirm", (request or self._REQUEST, reply), panel._epoch))
+        panel._poll()
+        self.root.update_idletasks()
+        return reply
+
+    def _text(self, panel: HomePanel) -> str:
+        return panel._log.get("1.0", "end")
+
+    def _bar_shown(self, panel: HomePanel) -> bool:
+        return panel._confirm_bar.winfo_manager() == "pack"
+
+    def test_the_question_shows_the_tool_every_argument_and_the_whole_content(self):
+        panel = self._panel()
+        self._ask(panel)
+        text = self._text(panel)
+        self.assertIn("pythia asks › write_document", text)
+        self.assertIn("filename: notes.md", text)
+        self.assertIn("replaces the file if it already exists", text)
+        self.assertIn("# Hello\nworld", text)
+        self.assertTrue(self._bar_shown(panel))
+        self.assertEqual(panel._status.cget("text"), "waiting for your OK…")
+
+    def test_each_label_is_bound_to_its_own_answer(self):
+        # A withdrawn root is never mapped and Tk drops generated clicks on
+        # unmapped windows, so the tests below call the handlers directly.
+        # This one proves which handler each label runs: tkinter names a
+        # bound method in the binding, and a swapped pair would make DENY
+        # say yes.
+        panel = self._panel()
+        self.assertIn("_on_allow", panel._confirm_allow.bind("<Button-1>"))
+        self.assertIn("_on_deny", panel._confirm_deny.bind("<Button-1>"))
+
+    def test_allow_says_yes_and_hides_the_bar(self):
+        panel = self._panel()
+        reply = self._ask(panel)
+        panel._on_allow()
+        self.assertTrue(reply.done.is_set())
+        self.assertTrue(reply.allowed)
+        self.assertFalse(self._bar_shown(panel))
+        self.assertIn("✓ allowed", self._text(panel))
+        self.assertEqual(panel._status.cget("text"), "consulting the oracle…")
+
+    def test_deny_says_no(self):
+        panel = self._panel()
+        reply = self._ask(panel)
+        panel._on_deny()
+        self.assertTrue(reply.done.is_set())
+        self.assertFalse(reply.allowed)
+        self.assertFalse(self._bar_shown(panel))
+        self.assertIn("✗ not allowed", self._text(panel))
+
+    def test_stop_says_no(self):
+        panel = self._panel()
+        reply = self._ask(panel)
+        with mock.patch("panels.home_panel.calliope.stop"):
+            panel._on_stop()
+        self.assertTrue(reply.done.is_set())
+        self.assertFalse(reply.allowed)
+        self.assertFalse(self._bar_shown(panel))
+
+    def test_refresh_says_no(self):
+        panel = self._panel()
+        reply = self._ask(panel)
+        panel._on_refresh()
+        self.assertTrue(reply.done.is_set())
+        self.assertFalse(reply.allowed)
+        self.assertFalse(self._bar_shown(panel))
+
+    def test_an_expired_question_closes_as_no(self):
+        panel = self._panel()
+        reply = self._ask(panel)
+        panel._q.put(("confirm_expired", home_panel._ConfirmReply(), panel._epoch))
+        panel._poll()
+        self.assertTrue(self._bar_shown(panel))      # someone else's expiry
+        panel._q.put(("confirm_expired", reply, panel._epoch))
+        panel._poll()
+        self.assertFalse(self._bar_shown(panel))
+        self.assertIn("no answer", self._text(panel))
+
+    def test_a_second_question_answers_the_first_no(self):
+        panel = self._panel()
+        first = self._ask(panel)
+        second = self._ask(panel)
+        self.assertTrue(first.done.is_set())
+        self.assertFalse(first.allowed)
+        self.assertIs(panel._pending_confirm, second)
+
+    def test_the_first_answer_is_final(self):
+        reply = home_panel._ConfirmReply()
+        reply.answer(False)                          # Stop got there first
+        reply.answer(True)                           # a late click
+        self.assertFalse(reply.allowed)
+
+    def test_the_worker_waits_for_the_click(self):
+        panel = self._panel()
+        cancel = threading.Event()
+        result: list = []
+        worker = threading.Thread(target=lambda: result.append(
+            panel._confirm_from_worker(self._REQUEST, panel._epoch, cancel)))
+        worker.start()
+        deadline = time.monotonic() + 5
+        while panel._pending_confirm is None and time.monotonic() < deadline:
+            panel._poll()
+            time.sleep(0.01)
+        self.assertTrue(worker.is_alive())            # still waiting on us
+        panel._on_allow()
+        worker.join(5)
+        self.assertEqual(result, [True])
+
+    def test_the_worker_gives_up_on_cancel(self):
+        # Cancel must END the wait, not merely lose to the timeout: the timeout
+        # also answers no, so the proof is that no expiry was ever queued.
+        panel = self._panel()
+        cancel = threading.Event()
+        cancel.set()
+        with mock.patch.object(home_panel, "_CONFIRM_WAIT_S", 0.5):
+            answer = panel._confirm_from_worker(self._REQUEST, panel._epoch, cancel)
+        self.assertFalse(answer)
+        kinds = []
+        while not panel._q.empty():
+            kinds.append(panel._q.get_nowait()[0])
+        self.assertEqual(kinds, ["confirm"])
+
+    def test_the_worker_gives_up_after_the_wait_and_says_so(self):
+        panel = self._panel()
+        with mock.patch.object(home_panel, "_CONFIRM_WAIT_S", 0.05):
+            answer = panel._confirm_from_worker(self._REQUEST, panel._epoch,
+                                                threading.Event())
+        self.assertFalse(answer)
+        kinds = []
+        while not panel._q.empty():
+            kinds.append(panel._q.get_nowait()[0])
+        self.assertEqual(kinds, ["confirm", "confirm_expired"])
+
+    def test_every_chat_turn_can_ask(self):
+        panel = self._panel()
+        with mock.patch("panels.home_panel.pythia.ask", return_value="ok") as ask, \
+                mock.patch("panels.home_panel.calliope.stop"):
+            panel._entry.insert(0, "save a note")
+            panel._on_submit()
+            panel._thread.join(5)
+        self.assertTrue(callable(ask.call_args.kwargs.get("on_confirm")))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -8,8 +8,8 @@ template — no Xvfb on Windows). No exception raised == pass.
 Covers: None (stale), a real fetch() payload, a selection toggle (+
 deselect), a planet click (+ mutual exclusion with constellation selection,
 + surviving a refresh tick), a preset switch to north_pole (simulation
-path), and conditions.update() with a captured-real aura fixture and an
-{"error": ...} dict.
+path), conditions.update() with a captured-real aura fixture and an
+{"error": ...} dict, and the moon row, which rides Selene rather than Aura.
 
     python -X utf8 -m unittest tests.test_hypatia_panel_smoke
 """
@@ -17,17 +17,22 @@ path), and conditions.update() with a captured-real aura fixture and an
 import os
 import sys
 import unittest
+from datetime import datetime, timezone
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import tkinter as tk
 
 import theme
-from tools import aura, hypatia
+from tools import aura, hypatia, selene
 from tests._fixtures import load_real_j1
 
 REAL_HYPATIA_DATA = hypatia.fetch()
 REAL_AURA_DATA = aura._build(load_real_j1())
+# What Kairos's selene worker delivers (Greenwich, a day test_selene pins).
+MOON = selene.compute(51.4779, 0.0, datetime(2026, 9, 28, 12, tzinfo=timezone.utc))
+_WEATHER_ROWS = ("clarity", "cloud cover")
 
 
 class TestHypatiaPanelSmoke(unittest.TestCase):
@@ -120,6 +125,17 @@ class TestHypatiaPanelSmoke(unittest.TestCase):
         self.root.update_idletasks()
         self.assertFalse(self.panel.conditions._simulated)
 
+    def test_preset_click_on_an_empty_catalog_shows_stale(self):
+        # A broken install (no star catalog): the click degrades like a failed
+        # Kairos fetch instead of raising out of the Tk callback.
+        self.panel.update(REAL_HYPATIA_DATA)
+        self.root.update_idletasks()
+        with mock.patch.object(hypatia, "_STARS", {}), \
+                self.assertLogs("METIS.hypatia", "WARNING"):
+            self.panel._on_preset_click("equator")
+        self.root.update_idletasks()
+        self.assertEqual(self.panel._status_lbl.cget("text"), "stale")
+
     def test_conditions_widget_real_and_error(self):
         self.panel.conditions.update(REAL_AURA_DATA)
         self.root.update_idletasks()
@@ -127,13 +143,31 @@ class TestHypatiaPanelSmoke(unittest.TestCase):
 
         self.panel.conditions.update({"error": "weather_offline"})
         self.root.update_idletasks()
-        for v in self.panel.conditions._values.values():
-            self.assertEqual(v.cget("text"), "—")
+        for key in _WEATHER_ROWS:
+            self.assertEqual(self.panel.conditions._values[key].cget("text"), "—")
 
         self.panel.conditions.update(None)
         self.root.update_idletasks()
-        for v in self.panel.conditions._values.values():
-            self.assertEqual(v.cget("text"), "—")
+        for key in _WEATHER_ROWS:
+            self.assertEqual(self.panel.conditions._values[key].cget("text"), "—")
+
+    def test_the_moon_row_rides_selene_not_the_weather(self):
+        # M3: this row showed wttr.in's number, so it went blank offline and
+        # on Aura's moonless fallback, and could differ from SELENE's. It is
+        # Selene's answer now, and a weather outage leaves it alone.
+        c = self.panel.conditions
+        c.moon_row.update(MOON)
+        c.update(REAL_AURA_DATA)
+        c.update({"error": "weather_offline"})
+        self.root.update_idletasks()
+        self.assertEqual(c._values["moon illum."].cget("text"), MOON["illumination"])
+
+    def test_a_moon_error_reads_dash(self):
+        c = self.panel.conditions
+        c.moon_row.update(MOON)
+        c.moon_row.update({"error": "moon_unavailable: ValueError"})
+        self.root.update_idletasks()
+        self.assertEqual(c._values["moon illum."].cget("text"), "—")
 
 
 if __name__ == "__main__":

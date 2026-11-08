@@ -20,7 +20,8 @@ Contract:    Exposes TOOL_DEFINITION, handle(), and fetch().
                  for its id only and cannot poison its siblings. Per-feed
                  identifiers (§2 slugs):
                    http_error: <status>       server answered with an error
-                   feed_timeout               no answer within _HTTP_TIMEOUT
+                   feed_timeout               no answer within its deadline
+                   feed_too_large             bigger than _MAX_BYTES
                    network_error              connection-level failure
                    invalid_feed_xml           response was not parseable XML
                    fetch_failed: <ClassName>  anything else — class name only,
@@ -34,8 +35,14 @@ Contract:    Exposes TOOL_DEFINITION, handle(), and fetch().
                    unknown_feed: <id>         `feed` matches no configured id
                    all_feeds_failed           every source errored this call
                    news_failed: <ClassName>   the never-raises safety net
-                 {"stories": []} therefore always means the feeds answered
-                 and were empty — never a masked failure.
+                 An empty `stories` list therefore always means the feeds
+                 answered and were empty — never a masked failure.
+
+                 It answers from the last good fan-out while that is younger
+                 than CACHE_TTL (the Kairos poll interval), dated with `as_of`,
+                 plus `stale: True` when a failed refresh fell back to it. See
+                 the "Freshness" section. fetch() always fans out, and its
+                 shape is unchanged.
 
              Story shape:
                  {"title": str, "url": str, "author": str, "date": str,
@@ -77,8 +84,8 @@ Scope:       Feed data and read state. Read state sits here rather than in a
              FONTS names the source in its section header.
 
 Source:      The feeds configured in config/pheme_rumormill.json (7 as shipped:
-             tech, world, and local news), fetched over HTTP with a per-feed
-             timeout.
+             tech, world, and local news), each read through tools/hermes.py:
+             https only, a byte cap, and a deadline for the whole request.
 
 Upstream:    kairos.py — the "pheme" worker polls fetch() every 900 s.
              pythia.py — exposes handle() to the LLM via TOOL_DEFINITION.
@@ -86,7 +93,7 @@ Upstream:    kairos.py — the "pheme" worker polls fetch() every 900 s.
 Downstream:  panels/pheme_panel.py (display surface; maps the slugs above to
              human text in its _ERROR_TEXT dict)
 
-Requires:    requests (already in Felhaven stack)
+Requires:    tools/hermes.py (the bounded network read)
              concurrent.futures, json, html, hashlib, tempfile, collections,
              datetime, urllib.parse, xml.etree (stdlib)
 
@@ -97,23 +104,36 @@ V0.02:       Audited 2026-07-23 — error identifiers normalized to §2 slugs
              Extended 2026-08-02 for Scrapstream — the parsed datetime is kept
              as `ts` instead of being discarded at _short_date, and read state
              moved in. handle()'s output shape is unchanged.
+             Extended 2026-09-28 (V0.03 audit T7): handle() answers from the
+             last good fan-out, dated with `as_of`, instead of fetching again
+             on every question. The story shape is unchanged.
 """
 
+import copy
 import hashlib
 import html
 import json
 import logging
 import os
+import sys
 import tempfile
+import threading
+import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import zip_longest
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from typing import Any
 from xml.etree import ElementTree as ET
 
-import requests
+# Only a bare `python tools/pheme.py` needs the app root added before the
+# tools/ import (the aura placement); everything else already has it.
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from tools import hermes
 
 log = logging.getLogger("METIS.pheme")
 
@@ -131,7 +151,12 @@ _READ_MAX  = 2000      # seen-set cap; oldest evicted first
 
 # Browser-plausible RSS-reader User-Agent so picky edges (e.g. TownNews) don't 403.
 _USER_AGENT   = "Mozilla/5.0 (compatible; Felhaven/1.0 RSS reader)"
-_HTTP_TIMEOUT = 6      # per-feed network timeout, seconds
+_HTTP_TIMEOUT = 6      # per socket operation, seconds; the whole request: 12 s
+# Per-feed byte cap (hermes rule: 4x the largest measured body, rounded up to a
+# power of two). Measured 2026-10-01, the 7 shipped feeds: largest 244,346 B
+# (theregister), then 141,717 (theverge) and 77,457 (arstechnica); the rest
+# under 27 KB. Feeds are user-editable, so a new one may need this raised.
+_MAX_BYTES = 1024 * 1024
 _MAX_STORIES  = 10     # cap per feed (panel) and on the flattened Brain list
 
 # XML namespaces. Atom puts every element in its own namespace; RSS borrows
@@ -356,9 +381,10 @@ def _fetch_feed(feed: dict[str, Any]) -> dict[str, Any]:
     Identifiers are the §2 slugs listed in the header docstring.
     """
     try:
-        resp = requests.get(
+        resp = hermes.get(
             feed["url"],
             headers={"User-Agent": _USER_AGENT},
+            cap=_MAX_BYTES,
             timeout=_HTTP_TIMEOUT,
         )
         resp.raise_for_status()
@@ -371,19 +397,22 @@ def _fetch_feed(feed: dict[str, Any]) -> dict[str, Any]:
 
         return {"stories": stories[:_MAX_STORIES]}
 
-    # Order matters: HTTPError and Timeout both subclass RequestException, and
-    # ParseError must be named before the bare Exception net.
-    except requests.HTTPError as e:
+    # Order matters: HTTPStatus, Timeout and TooLarge all subclass NetError,
+    # and ParseError must be named before the bare Exception net.
+    except hermes.HTTPStatus as e:
         # Surface the status code so the panel can show "HTTP 404".
-        status = e.response.status_code if e.response is not None else "?"
-        log.warning(f"Pheme: feed {feed.get('id')} HTTP {status}")
-        return {"error": f"http_error: {status}"}
-    except requests.Timeout:
+        log.warning(f"Pheme: feed {feed.get('id')} HTTP {e.status}")
+        return {"error": f"http_error: {e.status}"}
+    except hermes.Timeout:
         log.warning(f"Pheme: feed {feed.get('id')} timed out")
         return {"error": "feed_timeout"}
-    except requests.RequestException as e:
-        # The full message stays in the log (not the LLM surface, §2): it
-        # names which network layer refused, which the slug deliberately hides.
+    except hermes.TooLarge:
+        log.warning(f"Pheme: feed {feed.get('id')} is over the {_MAX_BYTES}-byte cap")
+        return {"error": "feed_too_large"}
+    except hermes.NetError as e:
+        # The message stays in the log (not the LLM surface, §2): it names
+        # which layer refused, which the slug deliberately hides. hermes never
+        # puts the URL in it.
         log.warning(f"Pheme: feed {feed.get('id')} network failure: {e}")
         return {"error": "network_error"}
     except ET.ParseError as e:
@@ -553,6 +582,104 @@ def _save_read() -> None:
 _load_read()
 
 
+# ── Freshness (V0.03 audit T7) ────────────────────────────────────────────────
+# tools/aura.py's "Freshness" section is the reference for this pattern, and
+# for why the lock is held across the fan-out; it isn't repeated here. The
+# fan-out is bounded: the feeds run in parallel, each ending at its hermes
+# deadline (12 s), so the lock is held about that long at the very worst. Kairos
+# polls fetch() every 900 s, and handle() answers from the last good fan-out
+# instead of fetching again, dated with `as_of`. Two things differ from Aura:
+#
+#   - The key is the feed config itself, so an edit to pheme_rumormill.json is
+#     a new key and never answers from the old feeds' stories.
+#   - A fan-out is good when at least ONE feed answered. A partial snapshot is
+#     what the panel shows too; an all-failed one is a failure, and never
+#     replaces the last good snapshot.
+
+CACHE_TTL = 900             # s. Kairos's pheme interval, so handle() normally reuses the poll
+_RETRY_AFTER = 60           # s. A failed refresh isn't retried sooner: one turn, one attempt
+_STALE_MAX = 2 * CACHE_TTL  # s. The oldest snapshot still served, marked stale, when a refresh fails
+
+_Key = tuple[tuple[str, str, str], ...]     # (id, url, format) per configured feed
+
+
+@dataclass(frozen=True)
+class _Snapshot:
+    key: _Key
+    results: dict[str, Any]   # fetch()'s per-feed dict; the cache's own copy
+    at: float                 # time.monotonic()
+    as_of: str                # naive local ISO, pythia._now()'s convention
+
+
+@dataclass(frozen=True)
+class _Failure:
+    key: _Key
+    at: float                 # time.monotonic()
+
+
+_lock = threading.Lock()
+_snapshot: _Snapshot | None = None
+_failure: _Failure | None = None
+
+
+def _now() -> datetime:
+    """Injectable clock seam for `as_of`. Naive local time, as aura._now()."""
+    return datetime.now()
+
+
+def _config_key(feeds: list[dict[str, Any]]) -> _Key:
+    """Everything that shapes a fan-out: which feeds, where, in what format."""
+    return tuple((str(f.get("id", "")), str(f.get("url", "")),
+                  str(f.get("format", ""))) for f in feeds)
+
+
+def _any_answered(results: dict[str, Any]) -> bool:
+    """A fan-out worth keeping: at least one feed answered. (An empty config
+    has nothing to fail, so its empty snapshot counts.)"""
+    return not results or any("error" not in r for r in results.values())
+
+
+def _remember(key: _Key, results: dict[str, Any]) -> _Snapshot:
+    """Store a good fan-out and clear any failure. Caller holds _lock."""
+    global _snapshot, _failure
+    _snapshot = _Snapshot(key, copy.deepcopy(results), time.monotonic(),
+                          _now().isoformat(timespec="seconds"))
+    _failure = None
+    return _snapshot
+
+
+def _current(feeds: list[dict[str, Any]]) -> tuple[dict[str, Any], str, bool] | None:
+    """The per-feed results handle() answers from, as (results, as_of, stale),
+    or None when nothing usable is left. Fans out only when the cache is stale
+    or empty and no refresh failed inside _RETRY_AFTER. The results are a copy,
+    since handle() reads them after the lock is released."""
+    global _failure
+    key = _config_key(feeds)
+    with _lock:
+        now = time.monotonic()
+        last = _snapshot if _snapshot is not None and _snapshot.key == key else None
+        if last is not None and now - last.at < CACHE_TTL:
+            return copy.deepcopy(last.results), last.as_of, False
+        failed = _failure if _failure is not None and _failure.key == key else None
+        if failed is None or now - failed.at >= _RETRY_AFTER:
+            results = _fetch_all(feeds)
+            if _any_answered(results):
+                # `results` is the fan-out's own dict; the cache kept a copy.
+                return results, _remember(key, results).as_of, False
+            _failure = _Failure(key, time.monotonic())
+        if last is not None and now - last.at < _STALE_MAX:
+            return copy.deepcopy(last.results), last.as_of, True
+        return None
+
+
+def _clear_cache() -> None:
+    """Forget every snapshot and failure. For tests, so none leaks between them."""
+    global _snapshot, _failure
+    with _lock:
+        _snapshot = None
+        _failure = None
+
+
 # ── Contract ──────────────────────────────────────────────────────────────────
 
 def _feed_ids() -> list[str]:
@@ -598,9 +725,13 @@ TOOL_DEFINITION = {
 def handle(feed: str | None = None) -> dict[str, Any]:
     """
     Brain entry point — never raises. Returns a flat {"stories": [...]} capped
-    at _MAX_STORIES; `feed` narrows to a single source, omit for a mix of all.
-    Failures are the §2 errors in the header docstring, so an outage never
-    masquerades as a quiet news day.
+    at _MAX_STORIES, dated with `as_of`; `feed` narrows to a single source,
+    omit for a mix of all. Failures are the §2 errors in the header docstring,
+    so an outage never masquerades as a quiet news day.
+
+    Answers from the last good fan-out while it is younger than CACHE_TTL (see
+    "Freshness"). A refresh always fans out to every feed, even for one `feed`,
+    because the snapshot is shared by every question and by the panel's poll.
     """
     try:
         feeds = _load_config()
@@ -609,20 +740,29 @@ def handle(feed: str | None = None) -> dict[str, Any]:
                   f"{type(e).__name__}: {e}")
         return {"error": "config_unreadable"}
     try:
+        selected = feeds
         if feed:
-            feeds = [f for f in feeds if f["id"] == feed]
-            if not feeds:
+            selected = [f for f in feeds if f["id"] == feed]
+            if not selected:
                 return {"error": f"unknown_feed: {feed}"}
-        results = _fetch_all(feeds)
-        if feeds and all("error" in results[f["id"]] for f in feeds):
+        current = _current(feeds)
+        if current is None:
+            return {"error": "all_feeds_failed"}
+        results, as_of, stale = current
+        if selected and all("error" in results[f["id"]] for f in selected):
             return {"error": "all_feeds_failed"}
         # Pull per-feed lists in config order; skip feeds that errored.
-        per_feed = [results[f["id"]].get("stories", []) for f in feeds]
+        per_feed = [results[f["id"]].get("stories", []) for f in selected]
         merged = _interleave(per_feed)[:_MAX_STORIES]
         # `ts` is the panel's merge key, not part of this contract — strip it so
         # the Brain's story shape is exactly what it was before Scrapstream.
-        return {"stories": [{k: v for k, v in s.items() if k != "ts"}
-                            for s in merged]}
+        answer: dict[str, Any] = {
+            "stories": [{k: v for k, v in s.items() if k != "ts"} for s in merged],
+            "as_of": as_of,
+        }
+        if stale:
+            answer["stale"] = True
+        return answer
     except Exception as e:
         # Nothing in the fan-out is expected to raise (_fetch_feed never
         # does); this net is the never-raises contract, not a code path.
@@ -635,9 +775,18 @@ def fetch() -> dict[str, Any]:
     Kairos entry point — fans every feed out concurrently and tags each result
     by feed id. Raises only if the config itself is unreadable, so Kairos
     delivers None to the panel; a single dead feed yields {"error":…} instead.
+
+    Always fans out, even when the cache is fresh: this poll IS the refresh.
+    A fan-out where any feed answered is stored for handle(); an all-failed
+    one still reaches the panel, but leaves the last good snapshot in place.
     """
     feeds = _load_config()
-    return {"feeds": _fetch_all(feeds)}
+    key = _config_key(feeds)
+    with _lock:
+        results = _fetch_all(feeds)
+        if _any_answered(results):
+            _remember(key, results)
+    return {"feeds": results}
 
 
 # ── Standalone test ───────────────────────────────────────────────────────────

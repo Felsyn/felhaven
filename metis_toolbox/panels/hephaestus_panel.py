@@ -45,14 +45,26 @@ class BarMeter(tk.Frame):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  AetherWidget — WiFi + Anthropic's status, embedded in VitalsPanel
+#  AetherWidget — WiFi, internet and Ollama, embedded in VitalsPanel
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Dot colour per state, one map per row. Red is reserved for a KNOWN-bad link;
+# "unknown" (and any state not listed) stays dim, so a wired machine or a probe
+# that could not decide never reads as an alarm. A captive portal is amber.
+_WIFI_DOTS     = {"connected": "green", "disconnected": "red"}
+_INTERNET_DOTS = {"online": "green", "limited": "amber", "offline": "red"}
+_OLLAMA_DOTS   = {"online": "green", "offline": "red"}
+
 
 class AetherWidget(tk.Frame):
     """
     Connectivity status embedded inside VitalsPanel.
-    Two rows: WiFi state and Anthropic's status, each with a colored dot.
+    Three rows — WiFi, Internet, Ollama — each with a colored dot.
     Receives data from Kairos via update() — registered as its own panel.
+
+    2026-09-27: the second row was "Anthropic's Status" (the retired
+            Claude-API brain's Statuspage); Aether now probes the internet and
+            the local Ollama instead — see tools/aether.py.
 
     V0.02:  Audited 2026-07-24 — first tests (tests/test_aether_widget_smoke.py);
             the "own panel" / "every hour" claims verified against felhaven.py:156
@@ -71,11 +83,12 @@ class AetherWidget(tk.Frame):
         tk.Label(self, text="AETHER — CONNECTIVITY", font=FONTS["card_header"],
                  fg=C["text3"], bg=C["card"], anchor="w").pack(fill="x")
 
-        self._wifi_dot, self._wifi_lbl = self._build_row("WiFi")
-        self._api_dot,  self._api_lbl  = self._build_row("Anthropic's Status")
+        self._wifi_dot,     self._wifi_lbl     = self._build_row("WiFi")
+        self._internet_dot, self._internet_lbl = self._build_row("Internet")
+        self._ollama_dot,   self._ollama_lbl   = self._build_row("Ollama")
 
-        self._draw_dot(self._wifi_dot, C["text3"])
-        self._draw_dot(self._api_dot,  C["text3"])
+        for dot in (self._wifi_dot, self._internet_dot, self._ollama_dot):
+            self._draw_dot(dot, C["text3"])
 
     def _build_row(self, label_text: str):
         row = tk.Frame(self, bg=C["card"])
@@ -93,35 +106,28 @@ class AetherWidget(tk.Frame):
         canvas.delete("all")
         canvas.create_oval(1, 1, 7, 7, fill=color, outline="")
 
+    def _show(self, dot: tk.Canvas, lbl: tk.Label, state: str,
+              dots: dict) -> None:
+        """One row: the dot from its map (dim when unlisted), the state as text,
+        dimmed too when the probe could not decide."""
+        self._draw_dot(dot, C[dots.get(state, "text3")])
+        lbl.config(text=state, fg=C["text3"] if state == "unknown" else C["text1"])
+
     def update(self, data) -> None:
-        """Called by Kairos every hour on the main thread."""
+        """Called by Kairos every 300 s on the main thread."""
+        rows = ((self._wifi_dot, self._wifi_lbl),
+                (self._internet_dot, self._internet_lbl),
+                (self._ollama_dot, self._ollama_lbl))
         if data is None:
-            self._draw_dot(self._wifi_dot, C["text3"])
-            self._draw_dot(self._api_dot,  C["text3"])
-            self._wifi_lbl.config(text="—")
-            self._api_lbl.config(text="—")
+            for dot, lbl in rows:
+                self._draw_dot(dot, C["text3"])
+                lbl.config(text="—")
             return
-
-        # Tri-state: red is reserved for a KNOWN-bad link; "unknown" (no adapter,
-        # netsh probe failed) stays dim so a wired machine doesn't read as an alarm.
-        wifi = data["wifi"]
-        wifi_dot = {
-            "connected":    C["green"],
-            "disconnected": C["red"],
-        }.get(wifi, C["text3"])
-        self._draw_dot(self._wifi_dot, wifi_dot)
-        self._wifi_lbl.config(
-            text=wifi, fg=C["text3"] if wifi == "unknown" else C["text1"])
-
-        api_status = data["api_status"]
-        color_map = {
-            "operational": C["green"],
-            "degraded":    C["amber"],
-            "down":        C["red"],
-            "unknown":     C["text3"],
-        }
-        self._draw_dot(self._api_dot, color_map.get(api_status, C["text3"]))
-        self._api_lbl.config(text=api_status)
+        self._show(self._wifi_dot, self._wifi_lbl, data["wifi"], _WIFI_DOTS)
+        self._show(self._internet_dot, self._internet_lbl, data["internet"],
+                   _INTERNET_DOTS)
+        self._show(self._ollama_dot, self._ollama_lbl, data["ollama"],
+                   _OLLAMA_DOTS)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

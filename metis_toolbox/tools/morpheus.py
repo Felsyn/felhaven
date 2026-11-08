@@ -61,12 +61,15 @@ Source:      Two external binaries, zero new pip packages, stdlib-only Python.
                            named pipe. mpv invokes yt-dlp internally to resolve
                            YouTube URLs.
                - yt-dlp  : keyless YouTube search (ytsearch:).
-             Resolution order (anchored to the app root, midas precedent):
+             Resolution (tools/aegis.py, anchored to the app root):
                1. <app root>/bin/mpv.exe and <app root>/bin/yt-dlp.exe
-                  (flash-drive-portable)
-               2. shutil.which("mpv") / shutil.which("yt-dlp") (on PATH)
-             If either is missing, available() reports it and the panel shows a
-             placeholder — we never crash and never raise at import time.
+                  (flash-drive-portable), each only if it matches its entry
+                  in config/bin_manifest.json; a mismatch is refused and
+                  does NOT fall back to step 2
+               2. mpv / yt-dlp on PATH, unverified (warned once)
+             If either is missing or refused, available() reports it and the
+             panel shows a placeholder — we never crash and never raise at
+             import time.
 
 Playlists:   config/morpheus_playlists.json under the app root (config-over-code,
              same pattern as pheme_rumormill.json). Adding a playlist is a JSON
@@ -366,10 +369,18 @@ model, through the same one writer.
 import json
 import logging
 import os
-import shutil
+import re
 import subprocess
+import sys
 import time
 from typing import Any
+
+# Only a bare `python tools/morpheus.py` needs the app root added before the
+# tools/ import (the aura placement); everything else already has it.
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from tools import aegis
 
 log = logging.getLogger("METIS.morpheus")
 
@@ -377,7 +388,6 @@ log = logging.getLogger("METIS.morpheus")
 # App root = one dir up from tools/ (next to felhaven.py). The bin/ dir and the
 # playlist config both live here. Anchored to __file__, so cwd never matters.
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_BIN_DIR = os.path.join(_APP_ROOT, "bin")
 _PLAYLISTS_PATH = os.path.join(_APP_ROOT, "config", "morpheus_playlists.json")
 
 # Where mpv saves playback positions for resume. Explicit because --no-config
@@ -537,20 +547,21 @@ _last_status: dict[str, Any] = {"running": False}
 # ── Binary resolution ─────────────────────────────────────────────────────────
 
 def _resolve(name: str) -> "str | None":
-    """bin/<name>.exe wins over PATH so the portable copy beats a stale install."""
-    local = os.path.join(_BIN_DIR, f"{name}.exe")
-    if os.path.isfile(local):
-        return local
-    return shutil.which(name)
+    """The program to run, vouched for by tools/aegis.py: bin/<name>.exe if it
+    matches its manifest entry, else a copy on PATH (unverified, warned once).
+    A bin/ copy that doesn't match is refused (None), never swapped for PATH's."""
+    return aegis.resolve(name).path
 
 
 def available() -> dict[str, Any]:
     """
     Report which binaries we can find. The panel reads this once at build time:
     if either is None it shows a placeholder and disables the controls.
-    Returns {"mpv": path_or_None, "ytdlp": path_or_None}.
+    Returns {"mpv": path_or_None, "ytdlp": path_or_None, "problem": None, or
+    aegis's slug when a bin/ copy of either was refused}.
     """
-    return {"mpv": _resolve("mpv"), "ytdlp": _resolve("yt-dlp")}
+    return {"mpv": _resolve("mpv"), "ytdlp": _resolve("yt-dlp"),
+            "problem": aegis.resolve("mpv").problem or aegis.resolve("yt-dlp").problem}
 
 
 # ── mpv lifecycle ─────────────────────────────────────────────────────────────
@@ -917,8 +928,19 @@ def play(url: str, *, from_start: bool = False) -> None:
     finds out whether this actually landed (see "Load failures").
 
     Caps mpv's scratch log on the way in — this is the only call that grows it
-    (see _recycle_if_log_is_huge)."""
+    (see _recycle_if_log_is_huge).
+
+    Takes only an http:// or https:// URL; anything else is refused (logged)
+    before mpv starts. mpv's loadfile also opens a local path, and its own
+    edl://, lavfi:// and av:// sources. Every caller hands it a search row's
+    URL (built by yt-dlp from the video id) or a saved playlist (checked by the
+    panel's add form), but the playlists file is hand-editable, so the check
+    lives here, at the program boundary, like describe()'s (CONVENTIONS §12,
+    2026-10-03). Case-sensitive, so anything unexpected fails closed."""
     global _last_url, _pending_load, _load_error
+    if not (isinstance(url, str) and url.startswith(("http://", "https://"))):
+        log.warning("play: refused a URL that is not http(s)")
+        return
     _recycle_if_log_is_huge()          # before _ensure_mpv, so it respawns clean
     if not _ensure_mpv():
         return
@@ -1292,6 +1314,14 @@ def search(query: str, limit: int = 10) -> list[dict[str, Any]]:
 _DESCRIBE_FIELDS = ("title", "channel", "duration", "categories",
                     "track", "artist", "album")
 
+# The only URL describe() hands to yt-dlp: one YouTube watch page, by its
+# 11-character id. The url comes from yt-dlp's own search JSON, which builds it
+# from the id today, so nothing we know of can make it start with "-". But it
+# is still network data in an argument slot, so it is checked here and rebuilt
+# from the id, and "--" goes before it (CONVENTIONS §12, 2026-10-01).
+# Used with fullmatch(), not "^...$": "$" also matches before a final newline.
+_WATCH_URL = re.compile(r"https://(?:www\.)?youtube\.com/watch\?v=([A-Za-z0-9_-]{11})")
+
 
 def describe(url: str) -> dict[str, Any]:
     """One FULL yt-dlp extraction for a single video. BLOCKS for seconds.
@@ -1311,13 +1341,23 @@ def describe(url: str) -> dict[str, Any]:
     Returns the _DESCRIBE_FIELDS it could read, or {"error": "describe_failed"}
     on any failure — a bare slug (§2), never yt-dlp's stderr, which carries
     signed URLs. Never raises.
+
+    Takes only a youtube.com watch URL (_WATCH_URL). Anything else is refused
+    before yt-dlp runs, and what does run is the URL rebuilt from its id,
+    after "--", so yt-dlp can never read it as an option.
     """
+    found = _WATCH_URL.fullmatch(url)
+    if found is None:
+        log.warning("describe: refused a URL that is not a YouTube watch URL")
+        return {"error": "describe_failed"}
+    watch = f"https://www.youtube.com/watch?v={found.group(1)}"
+
     ytdlp = _resolve("yt-dlp")
     if not ytdlp:
         log.warning("describe: yt-dlp not found")
         return {"error": "describe_failed"}
 
-    args = [ytdlp, url, "-J", "--no-playlist", "--no-warnings"]
+    args = [ytdlp, "-J", "--no-playlist", "--no-warnings", "--", watch]
     try:
         proc = subprocess.run(args, capture_output=True, timeout=20,
                               creationflags=_NO_WINDOW)

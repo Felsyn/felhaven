@@ -13,37 +13,49 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# CI runs the environment Felhaven runs: a venv built from the hashed lock, on
+# the Python the lock was compiled for (CONVENTIONS §11). A different minor
+# version fails tests/test_environment_lock.py. Actions are pinned to commit
+# SHAs with the release tag in a comment (tests/test_ci_pins.py, §12).
+env:
+  PYTHON_VERSION: "3.13"
+
 jobs:
   tests:
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.13"]
     env:
       PYTHONUTF8: "1"
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          python-version: ${{ matrix.python-version }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
           cache-dependency-path: metis_toolbox/requirements.txt
-      - run: pip install -r requirements.txt
+      - run: python -m venv .venv
         working-directory: metis_toolbox
-      - run: python -X utf8 -m unittest discover -s tests -p "test_*.py"
+      # Quoted: in plain YAML, the ": " after ":all" would start a mapping.
+      - run: '.\.venv\Scripts\python.exe -m pip install --require-hashes --only-binary=:all: -r requirements.txt'
+        working-directory: metis_toolbox
+      - run: .\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -p "test_*.py"
         working-directory: metis_toolbox
 
   mypy:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          python-version: "3.13"
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          cache-dependency-path: metis_toolbox/requirements.txt
-      - run: pip install -r requirements.txt mypy==2.1.0 types-requests==2.33.0.20260518 types-psutil==7.2.2.20260518
+          cache-dependency-path: metis_toolbox/requirements*.txt
+      - run: python -m venv .venv
         working-directory: metis_toolbox
-      - run: mypy --strict --explicit-package-bases tools/
+      - run: '.\.venv\Scripts\python.exe -m pip install --require-hashes --only-binary=:all: -r requirements.txt -r requirements-dev.txt'
+        working-directory: metis_toolbox
+      - run: .\.venv\Scripts\python.exe -m mypy --strict --explicit-package-bases tools/
         working-directory: metis_toolbox

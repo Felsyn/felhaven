@@ -1,7 +1,7 @@
 """
 test_pheme.py — unit tests for tools/pheme.py (RSS/Atom news aggregator).
 
-Hermetic: the single network seam (pheme.requests.get) and the config seam
+Hermetic: the single network seam (pheme.hermes.get) and the config seam
 (pheme._load_config / pheme._CONFIG_PATH) are mocked, so no test touches the
 network or the shipped pheme_rumormill.json. Run from the package root:
 
@@ -24,6 +24,8 @@ Covers:
      and fetch()'s raise-only-on-unreadable-config contract.
   5. The Scrapstream additions — `ts` (the UTC sort key kept alongside the
      display date), read_key's normalization, and the read-state file.
+  7. Freshness (V0.03 audit T7) — handle() answers from the last good
+     fan-out, dated with `as_of`; counted at the _fetch_feed seam.
 """
 
 import json
@@ -31,16 +33,17 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import requests
-
-from tools import pheme
+from tools import hermes, pheme
+from tests._loopback import Loopback, drip, read_head
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -147,14 +150,14 @@ _FALLBACK_ATOM = """<feed xmlns="http://www.w3.org/2005/Atom">
 
 
 def _resp(content: bytes, status: "int | None" = None):
-    """Stand-in for requests.get's return: .content + .raise_for_status()."""
+    """Stand-in for hermes.get's Reply: .content + .raise_for_status()."""
     r = mock.Mock()
     r.content = content
     if status is None:
         r.raise_for_status.return_value = None
     else:
         r.status_code = status
-        r.raise_for_status.side_effect = requests.HTTPError(response=r)
+        r.raise_for_status.side_effect = hermes.HTTPStatus(status)
     return r
 
 
@@ -293,33 +296,36 @@ class TestParseAtom(unittest.TestCase):
 
 class TestFetchFeedErrors(unittest.TestCase):
     def test_http_failure_carries_the_status_as_detail(self):
-        with mock.patch.object(pheme.requests, "get",
+        with mock.patch.object(pheme.hermes, "get",
                                return_value=_resp(b"", status=404)):
             self.assertEqual(pheme._fetch_feed(_FEED),
                              {"error": "http_error: 404"})
 
-    def test_http_failure_without_a_response_object(self):
-        err = requests.HTTPError()          # e.response is None
-        r = mock.Mock()
-        r.raise_for_status.side_effect = err
-        with mock.patch.object(pheme.requests, "get", return_value=r):
+    def test_a_feed_over_the_cap_says_so(self):
+        with mock.patch.object(pheme.hermes, "get",
+                               side_effect=hermes.TooLarge("over the cap")):
             self.assertEqual(pheme._fetch_feed(_FEED),
-                             {"error": "http_error: ?"})
+                             {"error": "feed_too_large"})
+
+    def test_every_fetch_is_capped(self):
+        with mock.patch.object(pheme.hermes, "get", return_value=_resp(b"<rss/>")) as get:
+            pheme._fetch_feed(_FEED)
+        self.assertEqual(get.call_args.kwargs["cap"], pheme._MAX_BYTES)
 
     def test_timeout(self):
-        with mock.patch.object(pheme.requests, "get",
-                               side_effect=requests.Timeout("6s elapsed")):
+        with mock.patch.object(pheme.hermes, "get",
+                               side_effect=hermes.Timeout("6s elapsed")):
             self.assertEqual(pheme._fetch_feed(_FEED),
                              {"error": "feed_timeout"})
 
     def test_connection_failure(self):
-        with mock.patch.object(pheme.requests, "get",
-                               side_effect=requests.ConnectionError("refused")):
+        with mock.patch.object(pheme.hermes, "get",
+                               side_effect=hermes.Offline("refused")):
             self.assertEqual(pheme._fetch_feed(_FEED),
                              {"error": "network_error"})
 
     def test_unparseable_xml(self):
-        with mock.patch.object(pheme.requests, "get",
+        with mock.patch.object(pheme.hermes, "get",
                                return_value=_resp(b"<html>not a feed")):
             self.assertEqual(pheme._fetch_feed(_FEED),
                              {"error": "invalid_feed_xml"})
@@ -328,7 +334,7 @@ class TestFetchFeedErrors(unittest.TestCase):
         # A config row without "url" — the KeyError message would be fine, but
         # the rule is uniform: class name only (§2), because the same handler
         # catches exceptions whose messages carry paths and URLs.
-        with mock.patch.object(pheme.requests, "get",
+        with mock.patch.object(pheme.hermes, "get",
                                side_effect=AssertionError("must not be called")):
             self.assertEqual(pheme._fetch_feed({"id": "bad"}),
                              {"error": "fetch_failed: KeyError"})
@@ -340,13 +346,13 @@ class TestFetchFeedSuccess(unittest.TestCase):
             f"<item><title>t{n}</title><link>https://e.com/{n}</link></item>"
             for n in range(pheme._MAX_STORIES + 2))
         xml = f"<rss><channel>{items}</channel></rss>".encode()
-        with mock.patch.object(pheme.requests, "get", return_value=_resp(xml)):
+        with mock.patch.object(pheme.hermes, "get", return_value=_resp(xml)):
             result = pheme._fetch_feed(_FEED)
         self.assertNotIn("error", result)
         self.assertEqual(len(result["stories"]), pheme._MAX_STORIES)
 
     def test_the_format_field_selects_the_atom_parser(self):
-        with mock.patch.object(pheme.requests, "get",
+        with mock.patch.object(pheme.hermes, "get",
                                return_value=_resp(_VERGE_ATOM.encode())):
             result = pheme._fetch_feed({**_FEED, "format": "atom"})
         self.assertEqual(len(result["stories"]), 1)
@@ -386,7 +392,17 @@ _TWO_FEEDS = [{"id": "a", "url": "u", "format": "rss"},
               {"id": "b", "url": "u", "format": "rss"}]
 
 
-class TestHandle(unittest.TestCase):
+class _FreshCache(unittest.TestCase):
+    """handle() answers from Pheme's cache and remembers a failure (T7, §7
+    below). The same config is the same cache key, so without this one test's
+    stories — or its failure — would answer the next test's handle()."""
+
+    def setUp(self):
+        pheme._clear_cache()
+        self.addCleanup(pheme._clear_cache)
+
+
+class TestHandle(_FreshCache):
     def test_stories_are_interleaved_across_feeds_in_config_order(self):
         with mock.patch.object(pheme, "_load_config", return_value=_TWO_FEEDS), \
              mock.patch.object(pheme, "_fetch_feed", _fake_fetch_feed):
@@ -434,14 +450,17 @@ class TestHandle(unittest.TestCase):
             self.assertEqual(pheme.handle(), {"error": "all_feeds_failed"})
 
     def test_healthy_feeds_with_zero_items_is_not_an_error(self):
-        # The one case that legitimately stays {"stories": []}.
+        # The one case that legitimately has no stories. It was an exact
+        # {"stories": []} until the answer gained `as_of` (T7).
         with mock.patch.object(pheme, "_load_config", return_value=_TWO_FEEDS), \
              mock.patch.object(pheme, "_fetch_feed",
                                lambda f: {"stories": []}):
-            self.assertEqual(pheme.handle(), {"stories": []})
+            result = pheme.handle()
+        self.assertNotIn("error", result)
+        self.assertEqual(result["stories"], [])
 
 
-class TestFetch(unittest.TestCase):
+class TestFetch(_FreshCache):
     def test_raises_when_the_config_is_unreadable(self):
         # The documented contract: Kairos gets the raise and delivers None.
         missing = os.path.join(os.path.dirname(pheme._CONFIG_PATH),
@@ -515,7 +534,7 @@ class TestTimestamp(unittest.TestCase):
         self.assertEqual(pheme._timestamp(raw), "2026-07-23T01:00:00Z")
 
 
-class TestStoriesCarryTheSortKey(unittest.TestCase):
+class TestStoriesCarryTheSortKey(_FreshCache):
     def test_rss_parser_fills_ts(self):
         from xml.etree import ElementTree as ET
         stories = pheme._parse_rss(ET.fromstring(_BBC_RSS))
@@ -707,6 +726,279 @@ class TestReadStateDegrades(_ReadStateTestCase):
                                side_effect=OSError("read-only")):
             pheme.mark_read("https://a.com/1")      # must not raise
         self.assertIn(pheme.read_key("https://a.com/1"), pheme.read_keys())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  7. Freshness (V0.03 audit T7) — the last good fan-out answers the Brain
+# ─────────────────────────────────────────────────────────────────────────────
+
+_T0 = 1000.0                            # arbitrary monotonic origin, patched clock
+_WALL_T0 = datetime(2026, 9, 28, 9, 0)  # the wall clock at _T0
+
+
+class _Feeds:
+    """A counting _fetch_feed stand-in with a switch. `fetched` lists every
+    feed id asked for, so a test counts fan-outs rather than handle() calls;
+    `dead` is the offline laptop — every feed fails at once."""
+
+    def __init__(self):
+        self.fetched = []
+        self.dead = False
+
+    def __call__(self, feed):
+        self.fetched.append(feed["id"])
+        if self.dead:
+            return {"error": "network_error"}
+        return _fake_fetch_feed(feed)
+
+
+class _CacheCase(_FreshCache):
+    """Patched config, counted feeds, and both clocks: the monotonic one that
+    ages the cache and the wall clock behind `as_of`, moved in step."""
+
+    def setUp(self):
+        super().setUp()
+        self.feeds = _Feeds()
+        self.config = mock.Mock(return_value=_TWO_FEEDS)
+        self.clock = mock.Mock()
+        self.clock.monotonic.return_value = _T0
+        wall = mock.Mock(side_effect=lambda: _WALL_T0 + timedelta(
+            seconds=self.clock.monotonic() - _T0))
+        for name, new in (("_load_config", self.config), ("_fetch_feed", self.feeds),
+                          ("time", self.clock), ("_now", wall)):
+            patcher = mock.patch.object(pheme, name, new)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def at(self, t):
+        self.clock.monotonic.return_value = t
+
+    def _three_questions(self):
+        return [pheme.handle(), pheme.handle(feed="a"), pheme.handle(feed="b")]
+
+
+class TestNewsOneFetch(_CacheCase):
+
+    def test_three_questions_make_one_fan_out(self):
+        answers = self._three_questions()
+        for out in answers:
+            self.assertNotIn("error", out)
+        self.assertEqual(sorted(self.feeds.fetched), ["a", "b"])  # each feed once
+        self.assertEqual(len({out.get("as_of") for out in answers}), 1)
+
+    def test_offline_the_questions_make_one_attempt(self):
+        self.feeds.dead = True
+        answers = self._three_questions()
+        self.assertEqual([out.get("error") for out in answers],
+                         ["all_feeds_failed"] * 3)
+        self.assertEqual(sorted(self.feeds.fetched), ["a", "b"])
+
+    def test_after_a_kairos_poll_the_questions_make_no_fetch(self):
+        pheme.fetch()
+        self._three_questions()
+        self.assertEqual(len(self.feeds.fetched), 2)   # the poll's, nothing more
+
+    def test_an_unknown_feed_costs_no_fetch(self):
+        # Answerable from the config alone, so it must not touch the network.
+        self.assertEqual(pheme.handle(feed="nope"), {"error": "unknown_feed: nope"})
+        self.assertEqual(self.feeds.fetched, [])
+
+
+class TestNewsTTL(_CacheCase):
+
+    def test_a_snapshot_inside_the_ttl_is_reused(self):
+        pheme.handle()
+        self.at(_T0 + pheme.CACHE_TTL - 1)
+        pheme.handle()
+        self.assertEqual(len(self.feeds.fetched), 2)
+
+    def test_a_snapshot_at_the_ttl_is_refetched(self):
+        pheme.handle()
+        self.at(_T0 + pheme.CACHE_TTL)
+        pheme.handle()
+        self.assertEqual(len(self.feeds.fetched), 4)
+
+    def test_a_fresh_answer_is_not_marked_stale(self):
+        # Both fresh paths: the answer that fetched, and the one the cache served.
+        self.assertNotIn("stale", pheme.handle())
+        self.at(_T0 + 1)
+        self.assertNotIn("stale", pheme.handle())
+        self.assertEqual(len(self.feeds.fetched), 2)
+
+    def test_as_of_is_the_fetch_time_in_naive_local_iso(self):
+        stamp = pheme.handle()["as_of"]
+        self.assertEqual(stamp, "2026-09-28T09:00:00")
+        self.assertIsNone(datetime.fromisoformat(stamp).tzinfo)
+
+    def test_errors_carry_no_as_of(self):
+        self.feeds.dead = True
+        self.assertNotIn("as_of", pheme.handle())
+
+
+class TestNewsKey(_CacheCase):
+
+    def test_a_config_edit_refetches(self):
+        pheme.handle()
+        self.config.return_value = _TWO_FEEDS + [{"id": "c", "url": "u", "format": "rss"}]
+        out = pheme.handle()
+        self.assertEqual(len(self.feeds.fetched), 5)   # 2, then all 3 again
+        self.assertIn("c0", [s["title"] for s in out.get("stories", [])])
+
+    def test_a_failed_refresh_never_serves_another_configs_stories(self):
+        pheme.handle()
+        self.feeds.dead = True
+        self.config.return_value = [{"id": "a", "url": "elsewhere", "format": "rss"}]
+        self.assertEqual(pheme.handle(), {"error": "all_feeds_failed"})
+
+
+class TestNewsStaleOnError(_CacheCase):
+
+    def test_a_failed_refresh_serves_the_last_stories_marked_stale(self):
+        first = pheme.handle()
+        self.at(_T0 + pheme.CACHE_TTL + 1)
+        self.feeds.dead = True
+        out = pheme.handle()
+        self.assertNotIn("error", out)
+        self.assertIs(out.get("stale"), True)
+        self.assertEqual(out["stories"], first["stories"])
+        # as_of says when the stories were FETCHED; the failed attempt must not
+        # move it (it would read 09:15:01 if it did).
+        self.assertEqual(out["as_of"], "2026-09-28T09:00:00")
+
+    def test_a_snapshot_past_stale_max_is_not_served(self):
+        pheme.handle()
+        self.at(_T0 + pheme._STALE_MAX)
+        self.feeds.dead = True
+        self.assertEqual(pheme.handle(), {"error": "all_feeds_failed"})
+
+    def test_a_recent_failure_is_not_retried(self):
+        self.feeds.dead = True
+        pheme.handle()
+        self.at(_T0 + pheme._RETRY_AFTER - 1)
+        self.assertEqual(pheme.handle(), {"error": "all_feeds_failed"})
+        self.assertEqual(len(self.feeds.fetched), 2)   # still just the one attempt
+
+    def test_a_failure_is_retried_once_the_window_passes(self):
+        self.feeds.dead = True
+        pheme.handle()
+        self.at(_T0 + pheme._RETRY_AFTER)
+        self.feeds.dead = False
+        self.assertNotIn("error", pheme.handle())
+
+
+class TestNewsFetch(_CacheCase):
+
+    def test_fetch_fans_out_even_when_the_cache_is_fresh(self):
+        # fetch() IS the refresh: Kairos's poll must never answer from the cache.
+        pheme.handle()
+        pheme.fetch()
+        self.assertEqual(len(self.feeds.fetched), 4)
+
+    def test_an_all_failed_poll_keeps_the_last_snapshot(self):
+        # The panel still gets every feed's error; the Brain keeps the last
+        # stories that actually arrived instead of losing them to an outage.
+        pheme.fetch()
+        self.feeds.dead = True
+        polled = pheme.fetch()
+        self.assertEqual(polled["feeds"]["a"], {"error": "network_error"})
+        self.at(_T0 + 5)
+        out = pheme.handle()
+        self.assertNotIn("error", out)
+        self.assertNotIn("stale", out)               # still inside the TTL
+
+    def test_fetch_output_is_unchanged_for_the_panel(self):
+        self.assertEqual(set(pheme.fetch()), {"feeds"})
+
+    def test_the_cache_never_shares_its_dict(self):
+        # §6: the panel gets fetch()'s dict on the main thread; the cache must
+        # hold its own copy, or Pythia's thread would share it.
+        polled = pheme.fetch()
+        polled["feeds"]["a"]["stories"][0]["title"] = "tampered"
+        titles = [s["title"] for s in pheme.handle(feed="a")["stories"]]
+        self.assertNotIn("tampered", titles)
+
+
+class TestNewsSingleFlight(_FreshCache):
+    """A handle() arriving while Kairos's fan-out is in flight waits for it
+    rather than fanning out a second time."""
+
+    def test_a_question_during_a_kairos_poll_waits_for_it(self):
+        calls = []
+        first_inside = threading.Event()
+        release = threading.Event()
+        second_inside = threading.Event()
+
+        def slow_feed(feed):
+            calls.append(feed["id"])
+            if len(calls) == 1:
+                first_inside.set()
+                release.wait(5)
+            else:
+                second_inside.set()
+            return _fake_fetch_feed(feed)
+
+        one_feed = [{"id": "a", "url": "u", "format": "rss"}]
+        answer = {}
+        with mock.patch.object(pheme, "_load_config", return_value=one_feed), \
+             mock.patch.object(pheme, "_fetch_feed", slow_feed):
+            kairos = threading.Thread(target=pheme.fetch, daemon=True)
+            kairos.start()
+            self.assertTrue(first_inside.wait(5), "fetch() never reached a feed")
+            pythia_side = threading.Thread(
+                target=lambda: answer.update(out=pheme.handle()), daemon=True)
+            pythia_side.start()
+            fanned_out_twice = second_inside.wait(0.5)
+            release.set()
+            kairos.join(5)
+            pythia_side.join(5)
+
+        self.assertFalse(fanned_out_twice, "handle() fetched while fetch() was in flight")
+        self.assertEqual(calls, ["a"])
+        self.assertNotIn("error", answer["out"])
+
+
+class TestNewsLockHasAnEnd(_FreshCache):
+    """The single flight above is safe only because each feed's read is
+    bounded. Here a real loopback "feed" sends its status line, then a header
+    one byte every 0.1 s: a 0.3 s per-operation timeout never trips on that,
+    and before hermes nothing else would have ended it. Now it ends at the
+    feed's deadline, the healthy feed beside it is unharmed, and the cache
+    lock is free again. (Plain http: hermes is allowed it for this test only,
+    because a TLS server would need a certificate.)"""
+
+    def test_a_dripping_feed_ends_at_its_deadline_and_frees_the_lock(self):
+        def script(conn, stop):
+            head = read_head(conn)
+            if head.startswith(b"GET /good"):
+                body = b"<rss><channel><item><title>t</title></item></channel></rss>"
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+                return
+            conn.sendall(b"HTTP/1.1 200 OK\r\nX-Slow: ")
+            drip(conn, stop, b"x" * 40, 0.1)
+
+        real_get = hermes.get
+        with Loopback(script) as srv:
+            feeds = [{"id": "slow", "url": srv.url("/slow"), "format": "rss"},
+                     {"id": "good", "url": srv.url("/good"), "format": "rss"}]
+            # timeout 0.3 s and a 64 KiB cap make deadline_for() 0.66 s.
+            with mock.patch.object(pheme, "_load_config", return_value=feeds), \
+                    mock.patch.object(pheme, "_HTTP_TIMEOUT", 0.3), \
+                    mock.patch.object(pheme, "_MAX_BYTES", 65536), \
+                    mock.patch.object(pheme.hermes, "get",
+                                      lambda *a, **k: real_get(*a, allow_http=True, **k)), \
+                    self.assertLogs("METIS.hermes", "WARNING") as logs:
+                t0 = time.monotonic()
+                out = pheme.fetch()
+                elapsed = time.monotonic() - t0
+                free = pheme._lock.acquire(blocking=False)
+                if free:
+                    pheme._lock.release()
+
+        self.assertEqual(out["feeds"]["slow"], {"error": "feed_timeout"})
+        self.assertNotIn("error", out["feeds"]["good"])
+        self.assertTrue(any("deadline" in line for line in logs.output))
+        self.assertLess(elapsed, 0.66 + 1.5)       # one deadline (parallel), CI slack
+        self.assertTrue(free, "the cache lock was still held after fetch() returned")
 
 
 if __name__ == "__main__":

@@ -162,6 +162,14 @@ class TestArtemisPanelSmoke(unittest.TestCase):
         self.assertIn("no OpenTopography key",
                       self.panel._status_lbl.cget("text"))
 
+    def test_terrain_over_its_cap_says_so(self):
+        """Demeter's grid has a computed byte cap; a refusal reads as what it
+        is, not as a failed download."""
+        self._build_area(layers=("roads", "water"), skipped="too_large")
+        self._show(layers=("roads", "water"))
+        self.assertIn("far larger than expected",
+                      self.panel._status_lbl.cget("text"))
+
     def test_damaged_layer_does_not_lose_the_others(self):
         area = self._build_area()
         with open(os.path.join(artemis.area_dir(area), "water.vec"), "wb") as fh:
