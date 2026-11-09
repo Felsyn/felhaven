@@ -8,19 +8,24 @@ Job:         Vouch for the programs in bin/ before Felhaven runs them.
              config/bin_manifest.json, beside where it came from. Named for
              the aegis, the shield that guarded what was behind it.
 
+             The manifest describes THIS machine's bin/, so like bin/ it is
+             gitignored: each machine records its own programs with `record`,
+             and a fresh clone has none. Which programs Felhaven uses is a
+             fact about the code, so that list is PROGRAMS, here.
+
 Contract:    Plain functions, not a brain tool:
                • resolve(name) -> Resolution(path, problem). The one way
                  Morpheus, Echo and Orpheus find mpv, yt-dlp and ffmpeg:
                    bin/<name>.exe present and matching   -> (path, None)
                    bin/<name>.exe present, NOT matching,
-                     or with no manifest entry           -> (None, "binary_unverified: ...")
+                     or not recorded yet                 -> (None, "binary_unverified: ...")
                    not in bin/, found on PATH            -> (path, None), unverified
                    nowhere                               -> (None, None)
                  A bin/ copy that fails is REFUSED and never falls through to
                  PATH: otherwise breaking the bin/ copy would be a way to
                  swap in whatever PATH holds. Never raises.
                • CLI (python -m tools.aegis ...):
-                   verify                 check every manifest entry now
+                   verify                 check each of PROGRAMS in bin/ now
                    record yt-dlp          after `bin\\yt-dlp.exe -U`: hash it,
                                           check it against the LATEST release's
                                           published SHA2-256SUMS before it ever
@@ -43,10 +48,15 @@ Decisions:   (owner, 2026-10-01; reasons in CONVENTIONS §12)
                • Hashing happens once per program per process (cached by
                  path, size and mtime), not on every launch of it. Measured
                  2026-10-01: all three, 237.7 MB, hash in 1.28 s.
+             (owner, 2026-11-09)
+               • The manifest is per machine, not committed: a committed one
+                 held one machine's hashes, so every other machine's newer
+                 yt-dlp was refused, and recording it edited a tracked file.
 
 Upstream:    tools/morpheus.py, tools/echo.py, tools/orpheus.py (resolve);
              the owner, at a terminal (the CLI).
-Downstream:  config/bin_manifest.json (read; written only by `record`),
+Downstream:  config/bin_manifest.json (per machine, gitignored; read;
+             written only by `record`),
              tools/hermes.py (the published SHA2-256SUMS, `record` only).
 
 Requires:    stdlib only — argparse, datetime, hashlib, json, logging, os,
@@ -81,9 +91,16 @@ BIN_DIR = os.path.join(_APP_ROOT, "bin")
 MANIFEST_PATH = os.path.join(_APP_ROOT, "config", "bin_manifest.json")
 
 ERR_UNVERIFIED = "binary_unverified"
+# The programs Felhaven asks for (tests/test_bin_manifest.py holds the code
+# to exactly this list). `record` refuses any other name.
+PROGRAMS = ("ffmpeg", "mpv", "yt-dlp")
 _FIELDS = ("file", "version", "source_url", "published_sha256", "published_for",
            "checksum_source", "sha256", "recorded")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+_ABOUT = ("This machine's record of the programs in bin/: where each came from and "
+          "the sha256 Felhaven checks before running it (tools/aegis.py). Per machine "
+          "and gitignored, like bin/. Written by `python -m tools.aegis record`, not "
+          "by hand; see SETUP.md section 5.")
 
 # yt-dlp's own release layout: the exe and its published checksum file.
 _YTDLP_RELEASE = "https://github.com/yt-dlp/yt-dlp/releases/download/{version}/"
@@ -137,6 +154,9 @@ def _check(name: str, path: str) -> Optional[str]:
     """None if `path` matches the manifest entry for `name`, else the slug."""
     try:
         entry = _load_manifest().get(name)
+    except FileNotFoundError:
+        # A fresh clone, before `record`: the manifest is per machine.
+        return f"{ERR_UNVERIFIED}: {os.path.basename(path)} is not recorded yet (no bin manifest)"
     except (OSError, ValueError) as exc:
         return f"{ERR_UNVERIFIED}: the bin manifest is unreadable ({type(exc).__name__})"
     if not isinstance(entry, dict) or not isinstance(entry.get("sha256"), str):
@@ -166,8 +186,8 @@ def resolve(name: str) -> Resolution:
                 problem = _check(name, local)
                 _verdicts[key] = problem
                 if problem:
-                    log.error("Aegis: refusing bin/%s.exe — %s. If it was updated on "
-                              "purpose, record it: python -m tools.aegis record %s",
+                    log.error("Aegis: refusing bin/%s.exe — %s. If it is the copy you "
+                              "meant to run, record it: python -m tools.aegis record %s",
                               name, problem, name)
         return Resolution(None, problem) if problem else Resolution(local, None)
 
@@ -192,6 +212,7 @@ def _write_manifest(programs: dict[str, Any]) -> None:
             data = {}
     except (OSError, ValueError):
         data = {}
+    data.setdefault("_about", _ABOUT)
     data["programs"] = dict(sorted(programs.items()))
     folder = os.path.dirname(MANIFEST_PATH)
     fd, tmp = tempfile.mkstemp(dir=folder, suffix=".tmp")
@@ -281,6 +302,9 @@ def record_other(name: str, version: str, source_url: str, expect: str,
     """For a program whose publisher gives one checksum, of the exe or of the
     archive it ships in. With an archive, the exe inside it (read from a zip,
     or `extracted` by hand from anything else) must be byte-identical to bin/."""
+    if name not in PROGRAMS:
+        raise RecordError(f"{name!r} is not a program Felhaven runs "
+                          f"({', '.join(PROGRAMS)})")
     path = os.path.join(BIN_DIR, f"{name}.exe")
     if not os.path.isfile(path):
         raise RecordError(f"bin/{name}.exe is missing")
@@ -336,14 +360,11 @@ def _store(name: str, entry: dict[str, str]) -> dict[str, str]:
 
 
 def verify() -> dict[str, str]:
-    """{name: "ok" | the problem} for every manifest entry, checked now."""
+    """{name: "ok" | "not in bin/" | the problem} for each of PROGRAMS, checked
+    now. A program in bin/ that was never recorded is a problem, not "ok"."""
     _clear_cache()
     out: dict[str, str] = {}
-    try:
-        names = sorted(_load_manifest())
-    except (OSError, ValueError) as exc:
-        return {"manifest": f"unreadable ({type(exc).__name__})"}
-    for name in names:
+    for name in PROGRAMS:
         path = os.path.join(BIN_DIR, f"{name}.exe")
         if not os.path.isfile(path):
             out[name] = "not in bin/"
@@ -385,7 +406,7 @@ def main(argv: "list[str] | None" = None) -> int:
         print(f"refused: {exc}")
         return 1
     print(f"recorded {args.name} {entry['version']}: {entry['sha256']}")
-    print("Commit config/bin_manifest.json with the update.")
+    print("Saved in config/bin_manifest.json, for this machine only (it is not committed).")
     return 0
 
 

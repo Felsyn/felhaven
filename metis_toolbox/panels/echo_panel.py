@@ -66,9 +66,9 @@ _DRAIN_MS = 150
 # Placeholder shown when ffmpeg can't be resolved (OrpheusPanel precedent).
 _NO_BIN_MSG = "ffmpeg not found — drop ffmpeg.exe in bin\\ or install to PATH"
 # bin\ffmpeg.exe is there, but aegis refused it (tools/aegis.py).
-_UNVERIFIED_MSG = ("ffmpeg in bin\\ doesn't match its recorded checksum, so "
-                   "Felhaven won't run it. Updated it on purpose? Record it: "
-                   "SETUP.md section 5.")
+_UNVERIFIED_MSG = ("ffmpeg in bin\\ isn't recorded, or doesn't match what was "
+                   "recorded, so Felhaven won't run it. If it's the copy you "
+                   "meant, record it: SETUP.md section 5.")
 
 # Human-readable status text per Echo error code (anything unknown falls back to
 # the raw code so a new code is still surfaced, never swallowed).

@@ -1,19 +1,22 @@
 """
-test_bin_manifest.py — config/bin_manifest.json says where each program in
-bin/ came from, and what it must hash to.
+test_bin_manifest.py — each program in bin/ matches what this machine recorded
+for it in config/bin_manifest.json.
 
-Three checks, in order of where they can run:
-  * SHAPE, everywhere: every entry has its fields, sha256s are sha256s, URLs
-    are https.
-  * LOCKSTEP, everywhere: the programs the code asks aegis for are exactly the
-    programs the manifest describes (parsed from the tracked source, not a
-    hardcoded list).
-  * The REAL PROGRAMS, wherever bin/ exists. bin/ is gitignored, so CI has
-    none, and there the check skips by name (GITHUB_ACTIONS). Anywhere else a
-    missing bin/ FAILS rather than skips, because "skipped" on Obelisk would
-    hide exactly the mismatch this exists to catch. A worktree has no bin/ of
-    its own, so the main checkout's is used. A machine that genuinely runs
-    without bin/ can set FELHAVEN_NO_BIN=1.
+The manifest describes this machine's bin/, so like bin/ it is per machine and
+gitignored (tools/aegis.py). Two kinds of check:
+  * EVERYWHERE (CI, a fresh clone, a worktree): the programs the code asks
+    aegis for are exactly aegis.PROGRAMS (parsed from the tracked source, not
+    a hardcoded list); only aegis looks programs up on PATH; the manifest is
+    not committed; and the main checkout can be found.
+  * The REAL PROGRAMS, wherever bin/ exists: each program in bin/ has a
+    well-formed entry and matches it. A worktree has no bin/ of its own, so
+    the main checkout's bin/ and manifest are used, always as a pair.
+
+With no bin/ at all (CI, or a clone that runs without the optional programs,
+SETUP.md section 5) the real-program check skips. That skip can't hide a
+mismatch: a mismatch needs a bin/, and looking for bin/ can't quietly fail.
+Finding the main checkout raises when git can't answer, and
+test_the_main_checkout_is_found proves the lookup lands on a real app root.
 
 Run from the package root:
     python -X utf8 -m unittest tests.test_bin_manifest
@@ -34,20 +37,19 @@ from tools import aegis
 
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+_MANIFEST_REL = os.path.join("config", "bin_manifest.json")
 
 
-def _manifest():
-    with open(os.path.join(_APP_ROOT, "config", "bin_manifest.json"), encoding="utf-8") as fh:
-        return json.load(fh)["programs"]
+def _git(*args):
+    return subprocess.run(["git", *args], cwd=_APP_ROOT, capture_output=True,
+                          text=True, check=True).stdout.strip()
 
 
 def _names_the_code_asks_for():
     """String literals passed to aegis.resolve(...) or a module's _resolve(...)
     in tracked tools/ files."""
-    out = subprocess.run(["git", "ls-files", "tools/*.py"], cwd=_APP_ROOT,
-                         capture_output=True, text=True, check=True).stdout
     names = set()
-    for rel in out.split():
+    for rel in _git("ls-files", "tools/*.py").split():
         with open(os.path.join(_APP_ROOT, rel), encoding="utf-8") as fh:
             tree = ast.parse(fh.read())
         for node in ast.walk(tree):
@@ -64,57 +66,41 @@ def _names_the_code_asks_for():
     return names
 
 
-def _bin_dir():
-    """This checkout's bin/, else the main checkout's (from a worktree)."""
-    own = os.path.join(_APP_ROOT, "bin")
-    if os.path.isdir(own):
-        return own
+def _main_app_root():
+    """The main checkout's app root: this one, unless this is a worktree.
+
+    Worked out from git, never hardcoded: the app root's place inside this
+    checkout, joined onto the main checkout. Raises when git can't answer,
+    because returning nothing here would turn into a skip, and a skip on the
+    machine that runs Felhaven is exactly what must not happen quietly."""
     try:
-        common = subprocess.run(["git", "rev-parse", "--path-format=absolute",
-                                 "--git-common-dir"], cwd=_APP_ROOT, capture_output=True,
-                                text=True, check=True).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        return None
-    main = os.path.join(os.path.dirname(common), "metis_toolbox", "bin")
-    return main if os.path.isdir(main) else None
+        common = _git("rev-parse", "--path-format=absolute", "--git-common-dir")
+        top = _git("rev-parse", "--show-toplevel")
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(f"git could not locate the main checkout ({exc}); not "
+                           "skipping, because a skip here could hide a mismatch") from exc
+    rel = os.path.relpath(_APP_ROOT, top)
+    return os.path.normpath(os.path.join(os.path.dirname(common), rel))
 
 
-class TheManifestIsWellFormed(unittest.TestCase):
+def _machine_root():
+    """The app root whose bin/ and manifest this machine runs: this
+    checkout's if it has a bin/, else the main checkout's."""
+    if os.path.isdir(os.path.join(_APP_ROOT, "bin")):
+        return _APP_ROOT
+    return _main_app_root()
 
-    def test_every_entry_has_every_field(self):
-        for name, entry in _manifest().items():
-            with self.subTest(name=name):
-                self.assertEqual(set(entry), set(aegis._FIELDS))
-                self.assertEqual(entry["file"], f"{name}.exe")
-                self.assertTrue(entry["version"].strip())
 
-    def test_checksums_are_sha256(self):
-        for name, entry in _manifest().items():
-            with self.subTest(name=name):
-                self.assertRegex(entry["sha256"], _SHA256)
-                self.assertRegex(entry["published_sha256"], _SHA256)
+class WhatHoldsEverywhere(unittest.TestCase):
 
-    def test_sources_are_https(self):
-        for name, entry in _manifest().items():
-            with self.subTest(name=name):
-                self.assertTrue(entry["source_url"].startswith("https://"))
-                self.assertTrue(entry["checksum_source"].startswith("https://"))
-
-    def test_recorded_is_a_date(self):
-        for name, entry in _manifest().items():
-            with self.subTest(name=name):
-                datetime.date.fromisoformat(entry["recorded"])
-
-    def test_the_code_and_the_manifest_name_the_same_programs(self):
-        self.assertEqual(_names_the_code_asks_for(), set(_manifest()))
+    def test_the_code_asks_for_exactly_aegis_programs(self):
+        self.assertEqual(_names_the_code_asks_for(), set(aegis.PROGRAMS))
 
     def test_only_aegis_looks_programs_up_on_path(self):
         """A module that calls shutil.which itself has found a program aegis
         never vouched for, and would run it whether or not bin/ was refused."""
-        out = subprocess.run(["git", "ls-files", "*.py"], cwd=_APP_ROOT,
-                             capture_output=True, text=True, check=True).stdout
         offenders = []
-        for rel in out.split():
+        for rel in _git("ls-files", "*.py").split():
             if rel.startswith("tests/") or rel == "tools/aegis.py":
                 continue
             with open(os.path.join(_APP_ROOT, rel), encoding="utf-8") as fh:
@@ -126,27 +112,71 @@ class TheManifestIsWellFormed(unittest.TestCase):
                     offenders.append(f"{rel}:{node.lineno}")
         self.assertEqual(offenders, [], "find programs through tools/aegis.py")
 
+    def test_the_manifest_is_not_committed(self):
+        """Asked of git, not the filesystem: the file exists on Obelisk either
+        way. Committed, it would hand one machine's hashes to every clone."""
+        rel = "config/bin_manifest.json"
+        tracked = subprocess.run(["git", "ls-files", "--error-unmatch", rel],
+                                 cwd=_APP_ROOT, capture_output=True).returncode == 0
+        ignored = subprocess.run(["git", "check-ignore", "-q", rel],
+                                 cwd=_APP_ROOT, capture_output=True).returncode == 0
+        self.assertFalse(tracked, f"{rel} is committed; it is per machine (git rm --cached it)")
+        self.assertTrue(ignored, f"{rel} is not gitignored; a `record` would show as a change")
+
+    def test_the_main_checkout_is_found(self):
+        """What makes the real-program skip trustworthy: the lookup lands on a
+        real app root, so 'no bin/ there' means there is no bin/."""
+        root = _main_app_root()
+        self.assertTrue(os.path.isfile(os.path.join(root, "felhaven.py")),
+                        f"{root} is not a Felhaven app root")
+
 
 class TheRealProgramsMatch(unittest.TestCase):
 
-    def test_each_program_in_bin_matches_its_entry(self):
-        folder = _bin_dir()
-        if folder is None:
-            if os.environ.get("GITHUB_ACTIONS") == "true":
-                self.skipTest("CI has no bin/ (it is gitignored); the shape and "
-                              "lockstep checks above still ran")
-            if os.environ.get("FELHAVEN_NO_BIN") == "1":
-                self.skipTest("FELHAVEN_NO_BIN=1: this machine runs without bin/")
-            self.fail("No bin/ found here or in the main checkout. Put the programs "
-                      "in bin/ (SETUP.md), or set FELHAVEN_NO_BIN=1 if this "
-                      "machine runs without them.")
-        for name, entry in _manifest().items():
+    def setUp(self):
+        self.root = _machine_root()
+        self.bin = os.path.join(self.root, "bin")
+        if not os.path.isdir(self.bin):
+            self.skipTest(f"no bin/ at {self.root}: the programs are optional "
+                          "(SETUP.md section 5); the checks that hold everywhere still ran")
+        self.present = [n for n in aegis.PROGRAMS
+                        if os.path.isfile(os.path.join(self.bin, f"{n}.exe"))]
+
+    def _programs(self):
+        path = os.path.join(self.root, _MANIFEST_REL)
+        if not os.path.isfile(path):
+            if self.present:
+                self.fail(f"bin/ holds {', '.join(self.present)} but nothing is recorded "
+                          f"({path} is missing), so Felhaven refuses them. Record each: "
+                          f"python -m tools.aegis record {self.present[0]} (SETUP.md section 5)")
+            return {}
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)["programs"]
+
+    def test_each_program_in_bin_is_recorded_and_matches(self):
+        programs = self._programs()
+        for name in self.present:
             with self.subTest(name=name):
-                path = os.path.join(folder, entry["file"])
-                self.assertTrue(os.path.isfile(path), f"{path} is missing")
+                entry = programs.get(name)
+                self.assertIsNotNone(entry, f"bin/{name}.exe is not recorded: "
+                                            f"python -m tools.aegis record {name}")
+                path = os.path.join(self.bin, f"{name}.exe")
                 self.assertEqual(aegis.sha256_of(path), entry["sha256"],
-                                 f"{entry['file']} in bin/ does not match the manifest. "
+                                 f"bin/{name}.exe does not match what was recorded. "
                                  f"Updated on purpose? python -m tools.aegis record {name}")
+
+    def test_every_entry_is_well_formed(self):
+        for name, entry in self._programs().items():
+            with self.subTest(name=name):
+                self.assertIn(name, aegis.PROGRAMS)
+                self.assertEqual(set(entry), set(aegis._FIELDS))
+                self.assertEqual(entry["file"], f"{name}.exe")
+                self.assertTrue(entry["version"].strip())
+                self.assertRegex(entry["sha256"], _SHA256)
+                self.assertRegex(entry["published_sha256"], _SHA256)
+                self.assertTrue(entry["source_url"].startswith("https://"))
+                self.assertTrue(entry["checksum_source"].startswith("https://"))
+                datetime.date.fromisoformat(entry["recorded"])
 
 
 if __name__ == "__main__":

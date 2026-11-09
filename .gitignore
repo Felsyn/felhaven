@@ -59,6 +59,11 @@ cerberus_vault.json
 cerberus_vault*.old
 cerberus_ledger.json
 
+# Aegis — this machine's record of its bin/ programs (tools/aegis.py). It
+# describes bin/, which is per machine, so it is per machine too: a clone
+# records its own instead of inheriting the author's hashes (SETUP section 5).
+bin_manifest.json
+
 # Herodotus — the Markdown knowledge archive. Personal state, not source.
 herodotus_archive/
 

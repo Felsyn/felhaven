@@ -97,9 +97,9 @@ from tools import morpheus
 _NO_BIN_MSG = ("mpv / yt-dlp not found — drop mpv.exe and yt-dlp.exe in "
                "bin\\ or install to PATH")
 # The program is in bin\, but aegis refused it (tools/aegis.py).
-_UNVERIFIED_MSG = ("mpv or yt-dlp in bin\\ doesn't match its recorded checksum, "
-                   "so Felhaven won't run it. Updated it on purpose? Record it: "
-                   "SETUP.md section 5.")
+_UNVERIFIED_MSG = ("mpv or yt-dlp in bin\\ isn't recorded, or doesn't match what "
+                   "was recorded, so Felhaven won't run it. If it's the copy you "
+                   "meant, record it: SETUP.md section 5.")
 
 # Human text per status() error slug, with a raw-slug fallback so an unmapped
 # code is surfaced rather than swallowed (the echo_panel _ERROR_TEXT precedent).

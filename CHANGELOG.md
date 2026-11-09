@@ -14,6 +14,11 @@ New here? Start with [`README.md`](README.md) for what Felhaven is,
 [`SETUP.md`](SETUP.md) to run it, and [`CONVENTIONS.md`](CONVENTIONS.md) for how
 the code is put together.
 
+- `2026-11-09` — `config/bin_manifest.json`: per machine and gitignored, no longer committed; each machine records its own programs.
+- `2026-11-09` — `tools/aegis.py`: `PROGRAMS` lists the programs Felhaven runs; `record` refuses other names, `verify` reports each program, and a missing manifest reads "not recorded yet".
+- `2026-11-09` — `tests/test_bin_manifest.py`: with no `bin/` the real-program check skips; a failed main-checkout lookup fails; `FELHAVEN_NO_BIN` is gone.
+- `2026-11-09` — Morpheus, Echo and Orpheus tabs: a refused program "isn't recorded, or doesn't match what was recorded".
+- `2026-11-09` — `BACKLOG.md`: `test_clio_layout`'s drawn-text tests never run from a worktree.
 - `2026-11-08` — `BACKLOG.md`: drops the smoke tests' `<<ThemeChanged>>` stderr item; no such line in two local full runs or CI on Python 3.13 (Tcl 8.6.15), against 63 on the 2026-09-29 CI run (3.10 and 3.11).
 - `2026-11-08` — `BACKLOG.md`: drops the three leftover worktrees item; their sessions are archived and the worktrees removed.
 - `2026-11-07` — `publish/`: Clio stays out of the public snapshot; `private_paths.txt` lists its files and `public_tree.py` removes them and every pointer to them.

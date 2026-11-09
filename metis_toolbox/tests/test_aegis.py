@@ -3,8 +3,8 @@ test_aegis.py — the bin/ programs are vouched for before they run.
 
 Every test works on a temporary bin/ and a temporary manifest (aegis.BIN_DIR
 and aegis.MANIFEST_PATH are redirected), so nothing here reads or writes the
-real ones. tests/test_bin_manifest.py checks the real manifest and, where bin/
-exists, the real programs.
+real ones. tests/test_bin_manifest.py checks, wherever bin/ exists, the real
+programs against this machine's real manifest.
 
 The rules under test (owner's decisions, 2026-10-01):
   * a bin/ copy that matches its manifest entry runs;
@@ -119,9 +119,13 @@ class TheBinCopyMustMatch(_AegisCase):
             self.assertIsNone(aegis.resolve("ffmpeg").path)
 
     def test_a_missing_manifest_refuses_everything(self):
+        """A fresh clone before `record`: the manifest is per machine, so the
+        problem says what to do rather than 'unreadable'."""
         self.put("ffmpeg")
         with self.assertLogs("METIS.aegis", "ERROR"):
-            self.assertIsNone(aegis.resolve("ffmpeg").path)
+            found = aegis.resolve("ffmpeg")
+        self.assertIsNone(found.path)
+        self.assertIn("not recorded yet", found.problem)
 
 
 class ThePathFallback(_AegisCase):
@@ -186,6 +190,9 @@ class Recording(_AegisCase):
         self.assertTrue(get.call_args.args[0].endswith("/2026.10.01/SHA2-256SUMS"))
         self.assertEqual(entry["sha256"], _sha(_BODY))
         self.assertEqual(entry["version"], "2026.10.01")
+        # The shape test_bin_manifest checks on a real manifest, held here too,
+        # since CI has no real manifest to check.
+        self.assertEqual(set(entry), set(aegis._FIELDS))
         with open(self.manifest, encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["programs"]["yt-dlp"], entry)
         self.assertIsNotNone(aegis.resolve("yt-dlp").path)
@@ -250,6 +257,7 @@ class Recording(_AegisCase):
         self.put("mpv")
         entry = aegis.record_other("mpv", "1", "https://example.invalid/mpv.7z", _sha(_BODY))
         self.assertEqual(entry["published_for"], "mpv.exe")
+        self.assertEqual(set(entry), set(aegis._FIELDS))
         with self.assertRaises(aegis.RecordError):
             aegis.record_other("mpv", "1", "https://example.invalid/mpv.7z", _sha(b"other"))
 
@@ -298,6 +306,23 @@ class Recording(_AegisCase):
                                    extracted=extracted)
         self.assertEqual(entry["sha256"], _sha(_BODY))
 
+    def test_only_a_program_felhaven_runs_can_be_recorded(self):
+        """A typo would otherwise leave a stray entry nothing ever reads."""
+        self.put("mvp")
+        with self.assertRaises(aegis.RecordError):
+            aegis.record_other("mvp", "1", "https://example.invalid/m", _sha(_BODY))
+        with open(self.manifest, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["programs"], {})
+
+    def test_a_fresh_manifest_says_it_is_per_machine(self):
+        os.remove(self.manifest)
+        self.put("mpv")
+        aegis.record_other("mpv", "1", "https://example.invalid/m", _sha(_BODY))
+        with open(self.manifest, encoding="utf-8") as fh:
+            data = json.load(fh)
+        self.assertIn("Per machine", data["_about"])
+        self.assertEqual(list(data["programs"]), ["mpv"])
+
     def test_the_cli_reports_a_refusal_and_exits_non_zero(self):
         self.put("mpv")
         out = io.StringIO()
@@ -316,6 +341,21 @@ class Recording(_AegisCase):
         self.assertEqual(results["ffmpeg"], "ok")
         self.assertTrue(results["mpv"].startswith("binary_unverified"))
         self.assertEqual(results["yt-dlp"], "not in bin/")
+
+    def test_verify_without_a_manifest_names_each_program(self):
+        """A fresh clone: an unrecorded program in bin/ is a problem, an absent
+        one is just absent, and the exit code says which."""
+        os.remove(self.manifest)
+        self.put("ffmpeg")
+        results = aegis.verify()
+        self.assertEqual(set(results), set(aegis.PROGRAMS))
+        self.assertIn("not recorded yet", results["ffmpeg"])
+        self.assertEqual(results["mpv"], "not in bin/")
+        with mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(aegis.main(["verify"]), 1)
+        os.remove(os.path.join(self.bin, "ffmpeg.exe"))
+        with mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(aegis.main(["verify"]), 0)
 
 
 if __name__ == "__main__":

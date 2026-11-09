@@ -280,8 +280,8 @@ _WRITES: dict[str, Write] = {
         "config/sphynx_data.json, a constant; mkstemp in the same folder, os.replace."),
     "tools/aegis.py::_write_manifest": Write(
         _ATOMIC, frozenset({"config/"}), frozenset({"constant", "app path"}), "trusted",
-        "config/bin_manifest.json, a constant, written only by the `record` "
-        "command; mkstemp in the same folder, os.replace."),
+        "config/bin_manifest.json (per machine, gitignored), a constant, written "
+        "only by the `record` command; mkstemp in the same folder, os.replace."),
     "tools/morpheus.py::_save_playlists": Write(
         ("open", "os.replace"), frozenset({"config/"}), frozenset({"constant", "app path"}),
         "trusted", "config/morpheus_playlists.json, written to '<name>.tmp' beside "

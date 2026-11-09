@@ -129,6 +129,13 @@ Sections are ordered by what an item needs before work can start.
   looked at: could be the displayed timestamps, the "last N" tail ordering, or
   the log's own clock. — needs: reproduce against `felhaven.log` timestamps,
   then diagnose · found 2026-10-02 (owner report)
+- **`test_clio_layout`'s drawn-text tests never run from a worktree.** They
+  skip when `aegis.resolve("ffmpeg")` finds nothing, and a worktree has no
+  `bin/` of its own, so they run only from the main checkout (CI skips them
+  too). Every session works in a worktree, so a change to the drawn text can
+  pass there untested. `test_bin_manifest` already finds the main checkout's
+  `bin/` from a worktree, and the same lookup would fit here. — needs: small
+  change to the test · found 2026-11-09 (fresh-clone run, bin manifest PR)
 
 ## Audits
 

@@ -109,10 +109,9 @@ is affected.
 
 The **Vox Array** card's three tabs need two external binaries between them (Echo
 and Orpheus share one). All follow the same rule: a copy in `metis_toolbox/bin/`
-**wins over** PATH (flash-drive-portable), **but only if it matches its entry in
-`metis_toolbox/config/bin_manifest.json`**, and absence degrades cleanly — never a
-crash. All are gitignored, so a fresh clone won't have them: this is a per-machine
-setup step.
+**wins over** PATH (flash-drive-portable), **but only once you have recorded it**
+(below), and absence degrades cleanly — never a crash. All are gitignored, so a
+fresh clone won't have them: this is a per-machine setup step.
 
 - **Morpheus** (YouTube audio playback) — `mpv.exe` + `yt-dlp.exe`. yt-dlp from
   its official releases, <https://github.com/yt-dlp/yt-dlp/releases>; mpv from
@@ -135,14 +134,18 @@ setup step.
 
 ### Checked before they run
 
-`config/bin_manifest.json` (committed) records, for each program, where it came
-from, the checksum its publisher published, and the sha256 of the copy in
-`bin/`. Felhaven checks each `bin/` copy against it once per launch
-(`tools/aegis.py`):
+`config/bin_manifest.json` records, for each program in **this machine's**
+`bin/`, where it came from, the checksum its publisher published, and the sha256
+of your copy. Like `bin/` it is per machine and gitignored, so a fresh clone has
+none: **after putting a program in `bin/`, record it** (the commands below).
+Recording checks your download against its publisher's checksum, so each
+machine vouches for its own copies. Felhaven checks each `bin/` copy against
+the manifest once per launch (`tools/aegis.py`):
 
-- **A copy that doesn't match is refused**, and Felhaven does not fall back to a
-  copy on PATH instead. Its tab says so, and Emanon shows the ERROR. This is what
-  you will see after updating a program without recording it.
+- **A copy that isn't recorded, or doesn't match, is refused**, and Felhaven does
+  not fall back to a copy on PATH instead. Its tab says so, and Emanon shows the
+  ERROR. This is what you will see on a new machine before recording, and after
+  updating a program without recording it.
 - **A program only on PATH** (nothing in `bin/`) runs unverified, with one
   WARNING per launch. That copy is your own install, outside the manifest.
 
@@ -152,11 +155,12 @@ Check everything at any time, from `metis_toolbox\`:
 .\.venv\Scripts\python.exe -m tools.aegis verify
 ```
 
-**Recording a yt-dlp update** (the common one): update it with its own updater,
-then record it. `record` first checks the file against the latest release's
-published `SHA2-256SUMS` without running it, then reads its version and checks
-that release's sums too, and refuses unless the file matches both. If it says
-the file isn't the latest release, run `-U` again:
+**Recording yt-dlp** (the common one, after a fresh download or an update):
+update it with its own updater, then record it. `record` first checks the file
+against the latest release's published `SHA2-256SUMS` without running it, then
+reads its version and checks that release's sums too, and refuses unless the
+file matches both. If it says the file isn't the latest release, run `-U`
+again:
 
 ```powershell
 .\bin\yt-dlp.exe -U
@@ -165,7 +169,7 @@ the file isn't the latest release, run `-U` again:
 .\.venv\Scripts\python.exe -m tools.aegis record yt-dlp
 ```
 
-Then commit `config/bin_manifest.json`.
+There is nothing to commit: the manifest stays on this machine.
 
 **Recording mpv or ffmpeg**: download the official archive, take the publisher's
 checksum for it (GitHub shows a sha256 beside every release file), put the new
@@ -334,6 +338,8 @@ Sphynx gate, which `Felhaven.bat` normally fronts.
 
 Hermetic (no network, no audio, no models needed). Run them with the venv's
 Python (activated as in §2); one test checks that the venv is exactly the lock.
+The check of the programs in `bin/` against your manifest (§5) runs only where
+`bin/` exists; without it, that check is skipped.
 
 ```
 cd metis_toolbox

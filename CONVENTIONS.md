@@ -2244,7 +2244,9 @@ and when, one line per change, so a decision worth keeping must be written here.
   wherever `bin/` exists (from a worktree, the main checkout's). CI has no
   `bin/`, so there it skips by name; anywhere else a missing `bin/` fails
   unless `FELHAVEN_NO_BIN=1`, because a quiet skip on the machine that runs
-  Felhaven would hide exactly the mismatch this exists to catch.
+  Felhaven would hide exactly the mismatch this exists to catch. *(Changed
+  2026-11-09: the manifest is per machine and no `bin/` skips; see "The bin
+  manifest is per machine" below.)*
   **First recording (2026-10-01):** yt-dlp matched its release's
   `SHA2-256SUMS`, and ffmpeg was byte-identical to the one inside gyan.dev's
   8.1.2 essentials zip (the zip matching its published sha256). mpv was the
@@ -2545,3 +2547,39 @@ and when, one line per change, so a decision worth keeping must be written here.
   screen's corner at zero opacity, and `grab_fresh()` stays as the guard.
   The output never changed, only the speed: a stale grab was always grabbed
   again, never written. *(2026-10-28.)*
+- **The bin manifest is per machine, and `test_bin_manifest` skips where there
+  is no `bin/` (`tools/aegis.py`, `config/bin_manifest.json`).** This changes
+  two parts of the 2026-10-01 Aegis entry above. An outside review found that
+  a fresh clone failed the suite: the real-program check failed wherever no
+  `bin/` was found unless `FELHAVEN_NO_BIN=1` was set, and no setup doc named
+  the variable. The committed manifest also held one machine's hashes, so a
+  clone's newer yt-dlp was refused, and recording it edited a tracked file
+  that would conflict on every pull. Both came from one file holding two kinds
+  of fact: which programs Felhaven uses, which is code, and what is in this
+  machine's `bin/`, which is machine state (`bin/` itself is gitignored).
+  Decisions, each the owner's:
+  (1) **The manifest is gitignored, and each machine records its own.** The
+  same reasoning as the PIN files: a clone records its own instead of
+  inheriting the author's. `record` already checks a download against its
+  publisher's checksum, so each machine vouches for its own copies. The list
+  of programs moved into the code as `aegis.PROGRAMS`; the lockstep test now
+  holds the code to it, and `record` refuses any other name.
+  (2) **No `bin/` skips.** The 2026-10-01 reason for failing was that a quiet
+  skip on Obelisk would hide a mismatch. A mismatch needs a `bin/`, so with a
+  skip the one way to hide one is a lookup that fails quietly: from a
+  worktree the test finds `bin/` through git, and the old lookup turned a git
+  error into "no `bin/`". Now a git error fails the test, the main checkout's
+  path is worked out from git instead of naming `metis_toolbox`, and a test
+  that runs everywhere proves the lookup lands on a folder holding
+  `felhaven.py`. `FELHAVEN_NO_BIN` and the `GITHUB_ACTIONS` case are gone: CI
+  skips by the same rule as any machine without `bin/`. A `bin/` holding
+  programs with no manifest still fails, since Felhaven would refuse them.
+  (3) **The runtime rule is unchanged.** An unrecorded or mismatched `bin/`
+  copy is refused and never falls back to PATH. With no manifest at all, the
+  tab and the log now say the program isn't recorded yet, rather than that
+  the manifest is unreadable.
+  The cost, accepted: an edited manifest no longer shows in `git status`, and
+  later recordings leave no trail in git history. Neither was a real defence.
+  The entry above already concedes that anyone with local write access can
+  edit the code, and `.venv`, also untracked, holds code that runs on every
+  launch. *(2026-11-09.)*

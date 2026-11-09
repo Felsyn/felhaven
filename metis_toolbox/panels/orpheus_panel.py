@@ -59,9 +59,9 @@ from tools import orpheus
 
 _NO_BIN_MSG = "ffmpeg not found — drop ffmpeg.exe in bin\\ or install to PATH"
 # bin\ffmpeg.exe is there, but aegis refused it (tools/aegis.py).
-_UNVERIFIED_MSG = ("ffmpeg in bin\\ doesn't match its recorded checksum, so "
-                   "Felhaven won't run it. Updated it on purpose? Record it: "
-                   "SETUP.md section 5.")
+_UNVERIFIED_MSG = ("ffmpeg in bin\\ isn't recorded, or doesn't match what was "
+                   "recorded, so Felhaven won't run it. If it's the copy you "
+                   "meant, record it: SETUP.md section 5.")
 
 # Human-readable status text per Orpheus error code — every code play_file()
 # and delete_file() can return (bad_name is shared by both).
