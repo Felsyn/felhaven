@@ -308,6 +308,33 @@ class TestSourcePath(_FixtureCase):
         self.assertIsNone(daedalus.source_path("../outside"))
 
 
+class TestGloss(_FixtureCase):
+    """gloss() is Virgil's read: the node's own gloss, one lookup per hover."""
+
+    def test_gloss_is_the_node_gloss_for_every_node(self):
+        for key, node in daedalus.index()["nodes"].items():
+            with self.subTest(key=key):
+                self.assertEqual(daedalus.gloss(key), node["gloss"])
+
+    def test_names_resolve_as_they_do_for_docstring(self):
+        self.assertEqual(daedalus.gloss("tool_a"), "Report the thing.")
+        self.assertEqual(daedalus.gloss("tools/tool_a.py"), "Report the thing.")
+        self.assertEqual(daedalus.gloss("The Tool"), "Report the thing.")   # a tab label
+
+    def test_unknown_unparsable_or_undocumented_is_none(self):
+        self.assertIsNone(daedalus.gloss("nope"))
+        self.assertIsNone(daedalus.gloss("broken"))     # will not parse
+        self.assertIsNone(daedalus.gloss("core_b"))     # no docstring
+        for garbage in (None, 7, "", "   ", ["tool_a"]):
+            self.assertIsNone(daedalus.gloss(garbage))
+
+    def test_a_hover_never_copies_the_index(self):
+        daedalus.index()        # warm the view, so only gloss() runs below
+        with mock.patch.object(daedalus.copy, "deepcopy",
+                               side_effect=AssertionError("deep copy")):
+            self.assertEqual(daedalus.gloss("tool_a"), "Report the thing.")
+
+
 class TestCache(_FixtureCase):
     def _counting(self):
         return mock.patch("tools.daedalus._parse_file", wraps=daedalus._parse_file)
@@ -455,6 +482,63 @@ class TestRealTree(unittest.TestCase):
         nodes = daedalus.index()["nodes"]
         self.assertIn("Atmospherics", nodes["aura"]["display"])
         self.assertIn("Settings", nodes["themis"]["display"])
+
+    # CONVENTIONS §0: the gloss is one sentence, ending in a period, of at most
+    # this many characters, and every hover surface shows it word for word.
+    _GLOSS_MAX = 90
+    # The one module with no Job: field BY DESIGN: the entry point keeps its
+    # prose docstring, because it is a shell, not a tool (its V0.02 note). Its
+    # gloss is its title line, which is not a sentence.
+    _BY_DESIGN = {"felhaven"}
+    # Panels written before §0 asked for a Job: field. Their gloss falls back
+    # to the docstring's first line, which already keeps the shape below.
+    # Each comes off this list as it gains one (BACKLOG); a stale entry fails.
+    _NO_JOB_FIELD_YET = {
+        "argus_panel", "artemis_panel", "aura_panel", "echo_panel",
+        "emanon_panel", "eudoxus_panel", "hephaestus_panel", "horai_panel",
+        "hypatia_panel", "midas_panel", "morpheus_panel", "orpheus_panel",
+        "scribe_panel", "zeno_panel",
+    }
+
+    def _has_job_field(self, key):
+        doc = daedalus.docstring(key).get("docstring") or ""
+        return daedalus._JOB_FIELD.search(doc) is not None
+
+    def test_every_module_gloss_keeps_conventions_0(self):
+        for key, node in daedalus.index()["nodes"].items():
+            if key in self._BY_DESIGN:
+                continue
+            with self.subTest(module=key):
+                gloss = node["gloss"] or ""
+                self.assertTrue(gloss.endswith("."),
+                                f"{node['path']}: the gloss must end in a period: {gloss!r}")
+                self.assertLessEqual(
+                    len(gloss), self._GLOSS_MAX,
+                    f"{node['path']}: the gloss is {len(gloss)} characters, over "
+                    f"§0's {self._GLOSS_MAX}. Shorten the Job: first sentence and "
+                    f"move the detail into a second one: {gloss!r}")
+
+    def test_every_module_has_a_job_field(self):
+        for key, node in daedalus.index()["nodes"].items():
+            if key in self._BY_DESIGN | self._NO_JOB_FIELD_YET:
+                continue
+            with self.subTest(module=key):
+                self.assertTrue(self._has_job_field(key),
+                                f"{node['path']} has no Job: field (CONVENTIONS §0)")
+
+    def test_every_exemption_is_still_needed(self):
+        nodes = daedalus.index()["nodes"]
+        for key in self._BY_DESIGN | self._NO_JOB_FIELD_YET:
+            with self.subTest(module=key):
+                self.assertIn(key, nodes, f"{key} is gone — drop its exemption")
+                self.assertFalse(self._has_job_field(key),
+                                 f"{key} has a Job: field now — drop its exemption")
+
+    def test_gloss_is_the_node_gloss_for_every_real_module(self):
+        for key, node in daedalus.index()["nodes"].items():
+            with self.subTest(key=key):
+                self.assertEqual(daedalus.gloss(key), node["gloss"])
+        self.assertIsNone(daedalus.gloss("no_such_module"))
 
     def test_daedalus_describes_itself(self):
         out = daedalus.handle("daedalus")

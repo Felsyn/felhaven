@@ -3,10 +3,10 @@ awen.py — Auto-DJ
 ==================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         When a song ends and Auto-DJ is on, choose the next one, play it,
-             and hand back a spoken introduction. Pythia's first unprompted
-             job — nobody asks for a turn, and nobody is reading the transcript
-             while it happens.
+Job:         When a song ends with Auto-DJ on, choose and play the next one and
+             introduce it. Pythia speaks the introduction: her first
+             unprompted job — nobody asks for a turn, and nobody is reading
+             the transcript while it happens.
 
 Contract:    A flavor §2's table did not have: a POLLED ACTOR.
 

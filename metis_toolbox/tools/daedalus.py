@@ -19,6 +19,8 @@ Contract:    Request-driven brain tool (CONVENTIONS §2) plus plain functions
                docstring(name)       -> {"module", "path", "docstring"}
                                         or {"error": "unknown_module: ...",
                                             "did_you_mean": [...]}
+               gloss(name)           -> the module's gloss (CONVENTIONS §0),
+                                        or None
                source_path(name)     -> absolute path inside the app root,
                                         or None
                layout(width, height) -> {key: (x, y)}, deterministic
@@ -74,7 +76,8 @@ Out of LLM scope: Opening a file, or starting any process, is UI-only. The
              touching it.
 
 Upstream:    pythia.py (registration + dispatch), panels/daedalus_panel.py
-             (the graph and the docstring pane).
+             (the graph and the docstring pane), tools/virgil.py (a tooltip's
+             module gloss, through gloss()).
 Downstream:  the .py files it reads; panels/sidebar.py and every TabHost
              `_build_tabs([...])` call, for display names — read as source,
              never imported.
@@ -524,6 +527,21 @@ def docstring(name: str) -> dict[str, Any]:
         return {"error": f"parse_failed: {rec.path}{where}",
                 "module": key, "path": rec.path}
     return {"module": key, "path": rec.path, "docstring": rec.docstring}
+
+
+def gloss(name: str) -> Optional[str]:
+    """One module's gloss, exactly as index() carries it in its node: the
+    Job: first sentence (CONVENTIONS §0). None for an unknown name, a file
+    that will not parse, or a module with no docstring. `name` resolves as it
+    does for docstring().
+
+    A tooltip asks this on every hover, so it answers from the current view
+    and never deep-copies the whole index the way index() does."""
+    view = _refresh()
+    key = _resolve(view, name)
+    if key is None:
+        return None
+    return view.by_key[key].gloss
 
 
 def source_path(name: str) -> Optional[str]:

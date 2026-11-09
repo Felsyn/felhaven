@@ -23,6 +23,8 @@ V0.02: Audited 2026-07-26 — verified honest; no polled tab (nothing here is a
 """
 
 from theme import C, TabHost
+from tools import virgil
+from panels import virgil_tooltip
 
 from panels.scribe_panel   import ScribePanel
 from panels.zeno_panel     import ZenoPanel
@@ -36,6 +38,14 @@ class CogitatorPanel(TabHost):
     A pure UI container: no update(), not registered with Kairos. Scribe needs
     the shared data dict + save callback; Zeno and Eudoxus are self-contained.
     """
+
+    # Each tab's hover tooltip (Virgil): that module's own gloss. One per tab;
+    # test_virgil_surfaces holds it to the _build_tabs list.
+    _TIPS = {
+        "scribe":  virgil.module("scribe"),
+        "zeno":    virgil.module("zeno"),
+        "eudoxus": virgil.module("eudoxus"),
+    }
 
     def __init__(self, parent, data: dict, on_save):
         super().__init__(parent, "Cogitator — tasks & tools", C["gray"])
@@ -52,3 +62,6 @@ class CogitatorPanel(TabHost):
             ("zeno",    "ZENO",    self.zeno,    C["gray"]),
             ("eudoxus", "EUDOXUS", self.eudoxus, C["blue"]),
         ], default="scribe")
+        for key, tip in self._TIPS.items():
+            if key in self._tabs:
+                virgil_tooltip.attach(self._tabs[key], tip)

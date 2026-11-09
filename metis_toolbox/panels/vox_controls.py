@@ -3,9 +3,10 @@ panels/vox_controls.py — the Vox control row
 ============================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         Draw Pythia's four vox controls as words, not glyphs — Vox
-             Response, Vox End, Auto-DJ, Reset Session — stacked in a bordered
-             box, each with a state dot, and report a click. Owns the lit/dim
+Job:         Draw Pythia's four vox controls as words, each with a state dot,
+             and report a click. They are Vox Response, Vox End, Auto-DJ and
+             Reset Session, written out rather than drawn as glyphs and stacked
+             in a bordered box. Owns the lit/dim
              styling and nothing else: no chat state, no worker, no narration
              state of its own.
 

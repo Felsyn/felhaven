@@ -30,6 +30,8 @@ V0.02: Audited 2026-07-26 — verified honest; felhaven reaches through to
 """
 
 from theme import C, TabHost
+from tools import virgil
+from panels import virgil_tooltip
 
 from panels.morpheus_panel import MorpheusPanel
 from panels.echo_panel     import EchoPanel
@@ -40,6 +42,16 @@ from panels.euterpe_panel  import EuterpePanel
 class VoxArrayPanel(TabHost):
     """Thin tab host (theme.TabHost). Tab bodies are children of self.body and
     ARE the tabs."""
+
+    # Each tab's hover tooltip (Virgil): that module's own gloss. TUNES is
+    # Euterpe's ledger, so its tip is Euterpe's. One per tab;
+    # test_virgil_surfaces holds it to the _build_tabs list.
+    _TIPS = {
+        "morpheus": virgil.module("morpheus"),
+        "echo":     virgil.module("echo"),
+        "orpheus":  virgil.module("orpheus"),
+        "tunes":    virgil.module("euterpe"),
+    }
 
     def __init__(self, parent):
         super().__init__(parent, "Vox Array — audio", C["purple"])
@@ -64,3 +76,6 @@ class VoxArrayPanel(TabHost):
             ("orpheus",  "ORPHEUS",  self.orpheus,  C["teal"]),
             ("tunes",    "TUNES",    self.euterpe,  C["amber"]),
         ], default="morpheus")
+        for key, tip in self._TIPS.items():
+            if key in self._tabs:
+                virgil_tooltip.attach(self._tabs[key], tip)

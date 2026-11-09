@@ -3,8 +3,9 @@ sphynx_panel.py — Boot Litany + Riddle Gate UI
 =================================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         Draw the Sphynx boot/riddle sequence, take PIN input, and hand
-             off to felhaven.py on success. Owns tkinter and subprocess; all
+Job:         Draw the Sphynx boot sequence, take the PIN, and open Felhaven on
+             success. The boot sequence is the riddle; success hands off to
+             felhaven.py. Owns tkinter and subprocess; all
              hash/attempt logic lives in sphynx.py — this module never
              computes a hash or touches the attempt counter directly.
 

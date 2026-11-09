@@ -22,9 +22,10 @@ line without "and", the module is doing too much — split it.
 
 **The `Job:` first sentence is the gloss.** Any hover/tooltip surface reads it
 verbatim, so it must stand alone: a neutral, functional statement of what the
-module *does*, written for a human reading the UI. One sentence, ≤ ~90
-characters, ending in a period. Personality belongs to the deity name, never the
-gloss. Sentences after the first elaborate and are not shown.
+module *does*, written for a human reading the UI. One sentence, at most 90
+characters, ending in a period; `tests/test_daedalus.py` holds every module to
+it. Personality belongs to the deity name, never the gloss. Sentences after the
+first elaborate and are not shown, so detail that doesn't fit moves there.
 
 A module never reaches across this boundary: tools don't draw, panels don't
 fetch, the scheduler doesn't parse data, the log watcher reads logs but never
@@ -368,6 +369,16 @@ to track whether the timer is still live.
   (`<Enter>`/`<Leave>`) so stacked scroll frames don't fight over wheel events.
 - **Clickable rows**: `cursor="hand2"`, `<Button-1>` for the action, and a hover
   highlight flipping `fg` to `C["amber"]` on `<Enter>` and back on `<Leave>`.
+- **Tooltips**: a panel never builds its own. It calls
+  `virgil_tooltip.attach(widget, tip)` from a `_TIPS` table, and a lockstep
+  test holds the table to its widgets (`tests/test_virgil_surfaces.py`). A
+  module tip, `virgil.module(key)`, shows that module's gloss (§0); everything
+  else is a glossary entry, `virgil.term(key)`, from
+  `config/virgil_glossary.json`. The nav rail says what a place is (a term), a
+  tab says who works there (a module), a readout says what the number means (a
+  term). A widget's own `<Enter>`, `<Leave>` or `<Button-1>` bound *after*
+  `attach()` must use `add="+"`, or it replaces the tip's. Why: §12,
+  2026-11-09.
 - **The one inversion — Hestia's vox controls** (`panels/vox_controls.py`):
   there, active = `C["amber"]` and inactive = `C["text3"]`, the opposite of the
   rule above. It is deliberate and it is local. Home's command surface sits
@@ -2583,3 +2594,53 @@ and when, one line per change, so a decision worth keeping must be written here.
   The entry above already concedes that anyone with local write access can
   edit the code, and `.venv`, also untracked, holds code that runs on every
   launch. *(2026-11-09.)*
+- **Virgil's hover tooltips: two modules, two sources (`tools/virgil.py`,
+  `panels/virgil_tooltip.py`, `config/virgil_glossary.json`).** Decisions:
+  (1) **Two modules.** `virgil.py` turns a tip into words and draws nothing;
+  `virgil_tooltip.py` draws and decides nothing about the words (§0). The
+  headless half is testable without Tk, and it is the seam a later Pythia
+  tool would use. The panel is not also named `virgil.py`, because Daedalus
+  keys modules by file stem across the app root, `tools/` and `panels/`, and
+  two of one stem collide.
+  (2) **A module's words come from Daedalus, never from importing it.**
+  Importing a module to read its `__doc__` runs its threads, sockets and
+  audio. Daedalus's new `gloss()` answers from its current view, without
+  `index()`'s deep copy of every node, because a hover asks on every show.
+  (3) **No glossary key may equal a module key** (`test_virgil` holds it). A
+  module is described by its docstring only; a glossary entry for one would
+  be a second copy, and copies drift. Home's key is `home` because `felhaven`
+  is a module.
+  (4) **A module gloss is drawn in `C["verbatim"]`, a glossary entry in
+  `C["text2"]`.** A gloss is the module's own words, quoted, which is what
+  `verbatim` already meant for a Daedalus docstring in the chat.
+  (5) **No brain tool in v1.** Module glosses already reach Pythia through
+  Daedalus's enum, and a glossary tool would add prompt tokens to every chat
+  turn on gemma4:e2b. Parked in BACKLOG with its trigger, not dropped.
+  (6) **One shared tooltip window per root**, borderless and transient to the
+  root, never one Toplevel per widget: many widgets attach, and at most one
+  tip is on screen.
+  (7) **Shown after 500 ms, by one one-shot `after()` on the root**, never on
+  the attached widget, whose destruction would orphan it. The tip window is
+  the root's child, so `Tk.destroy()` reaches its `destroy()` override while
+  the root's commands still exist, and it cancels there.
+  (8) **`<Leave>` is judged by the pointer, not the event.** A composite
+  widget (a SidebarRow is a frame of frames and labels) hears `<Leave>` when
+  the pointer moves onto its own child, so the tip hides only once the
+  pointer is outside the widget's rectangle.
+  Two things found while building it, each held by a test: Tk runs only the
+  most specific binding a widget has for an event, so a bare `<ButtonPress>`
+  never fired on a row with its own `<Button-1>` — the click that hides the
+  tip is bound per button (`<ButtonPress-1>` and its siblings), which appends
+  to the row's script instead. And on Windows a widget hears `<Unmap>` when
+  its whole view is packed away, so view switches hide the tip through that
+  handler; the viewable re-check before showing is the backstop. *(2026-11-09.)*
+- **§0's gloss limit is exact and every module is held to it
+  (`tests/test_daedalus.py`).** It said "≤ ~90", and fifteen glosses had
+  grown past it, two of them on surfaces Virgil now shows. Each was cut to
+  one sentence, with the dropped detail moved into the next. Two kinds of
+  module are exempt by name, each listed in the test with its reason:
+  `felhaven.py`, whose prose docstring is a choice its V0.02 note records
+  (the entry point is a shell, not a tool), and fourteen panels written
+  before §0 asked for a `Job:` field, whose fallback first line already fits.
+  The panels come off the list as each gains one (BACKLOG); a stale
+  exemption fails. *(2026-11-09.)*

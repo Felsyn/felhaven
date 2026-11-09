@@ -3,8 +3,8 @@ sidebar.py — Felhaven's navigation rail
 =======================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         The left-hand nav: one clickable row per view, plus optional group
-             headers that expand to show indented child rows. A click on a row
+Job:         Draw the left-hand nav: a clickable row per view, and group headers.
+             A group header expands to show indented child rows. A click on a row
              calls the on_select callback (felhaven switches views); set_active
              lights the chosen row. Rows are dumb display surfaces — no timing
              of their own.
@@ -15,8 +15,17 @@ Groups:      A name listed in _GROUPS is a header, NOT a view — clicking it on
              SidebarRows (same dot, same lit-border active state) that happen to
              be indented, so a grouped view stays a first-class destination with
              the whole content area — not a tab inside a host panel. Groups open
-             collapsed (§7), which is also what keeps the rail from outgrowing
-             the window as more views join a group.
+             collapsed (§7), which keeps the rail short as more views join a
+             group.
+
+Scrolling:   The rows sit in a frame inside a canvas, with a PhosphorScroll
+             lane on the right (§7's _ScrollFrame pattern, built in here
+             rather than copied, because the rail IS the scrolled thing). At
+             the default 960 x 620 window the rail is taller than the window
+             once Navigation is open, and fonts grow with the window's height,
+             so a bigger window doesn't fix that. The mouse wheel scrolls it
+             while the pointer is over it, and set_active() scrolls the lit
+             row into view.
 
 Special:     The "aura" row is registered with Kairos (felhaven.py) and shows the
              live temperature in its subtitle; its update(data) is swapped for
@@ -36,7 +45,9 @@ V0.02: Audited 2026-07-25 — added this header docstring (the module had none) 
 import tkinter as tk
 
 import themis
-from theme import C, FONTS
+from panels import virgil_tooltip
+from theme import C, FONTS, PhosphorScroll
+from tools import virgil
 
 
 class SidebarRow(tk.Frame):
@@ -147,8 +158,11 @@ class GroupRow(tk.Frame):
 
 
 class Sidebar(tk.Frame):
-    BASE_WIDTH  = 200   # px at scale 1.0; rescale() grows it to match the fonts
+    BASE_WIDTH  = 200   # px of rows at scale 1.0; rescale() grows it to match the fonts.
+                        # The scroll lane (PhosphorScroll.LANE, never scaled) rides on
+                        # top, in the gap felhaven used to leave with padx.
     BASE_INDENT = 14    # px at scale 1.0; child-row inset, matches Card's padx
+    ROW_PAD     = 3     # px above and below each row (pady), kept in view by _reveal
 
     _ROWS = [
         ("felhaven",   "Felhaven",        "Home"),
@@ -173,10 +187,48 @@ class Sidebar(tk.Frame):
         ],
     }
 
+    # Each row's hover tooltip (Virgil). The rail says what a PLACE is, so
+    # every tip is a glossary entry, never a module gloss. One per row and
+    # group header in _ROWS and _GROUPS; test_virgil_surfaces holds the two
+    # tables in lockstep. Home is `home`, because `felhaven` names a module.
+    _TIPS = {
+        "felhaven":   virgil.term("home"),
+        "horai":      virgil.term("chronometry"),
+        "moderati":   virgil.term("moderati"),
+        "aura":       virgil.term("atmospherics"),
+        "navigation": virgil.term("navigation"),
+        "hypatia":    virgil.term("celestarium"),
+        "artemis":    virgil.term("cartograph"),
+        "midas":      virgil.term("dynastic_vault"),
+        "pheme":      virgil.term("scriptorium"),
+        "morpheus":   virgil.term("vox_array"),
+        "cogitator":  virgil.term("cogitator"),
+    }
+
     def __init__(self, parent, on_select):
-        super().__init__(parent, bg=C["bg"], width=self.BASE_WIDTH)
+        super().__init__(parent, bg=C["bg"],
+                         width=self.BASE_WIDTH + PhosphorScroll.LANE)
         self.pack_propagate(False)
         self._indent = self.BASE_INDENT
+
+        # The scroll frame. width/height=1: a bare Canvas asks for 265 px,
+        # and that fiction would reach the geometry manager (see
+        # PhosphorScroll). The rail's width is set by this frame, not by it.
+        self._canvas = tk.Canvas(self, bg=C["bg"], highlightthickness=0, bd=0,
+                                 width=1, height=1)
+        self._scroll = PhosphorScroll(self, command=self._canvas.yview, bg=C["bg"])
+        self._canvas.configure(yscrollcommand=self._scroll.set)
+        self._scroll.pack(side="right", fill="y")
+        self._canvas.pack(side="left", fill="both", expand=True)
+        self._inner = tk.Frame(self._canvas, bg=C["bg"])
+        self._win = self._canvas.create_window((0, 0), window=self._inner,
+                                               anchor="nw")
+        self._inner.bind("<Configure>", lambda e: self._sync_region())
+        self._canvas.bind("<Configure>", self._on_canvas_config)
+        # §7: the wheel is bound only while the pointer is over the rail, so
+        # it never fights a panel's own scroll frame for the same events.
+        self._canvas.bind("<Enter>", self._bind_wheel)
+        self._canvas.bind("<Leave>", self._unbind_wheel)
 
         self._rows:        dict[str, SidebarRow] = {}   # selectable rows only
         self._groups:      dict[str, GroupRow]   = {}
@@ -184,13 +236,14 @@ class Sidebar(tk.Frame):
         self._expanded:    dict[str, bool]       = {}
         self._parent_of:   dict[str, str]        = {}   # child name -> group name
 
+        rail = self._inner
         for name, label, subtitle in self._ROWS:
             if name in self._GROUPS:
-                self._groups[name] = GroupRow(self, name, label, subtitle,
+                self._groups[name] = GroupRow(rail, name, label, subtitle,
                                               self._toggle_group)
                 # Children are packed into this box ONCE and never re-packed;
                 # collapsing forgets the box, which leaves them untouched inside.
-                box = tk.Frame(self, bg=C["bg"])
+                box = tk.Frame(rail, bg=C["bg"])
                 self._group_boxes[name] = box
                 # Collapsed on open (§7). set_expanded keeps the glyph in step
                 # with the flag, so the two can't drift if this default changes.
@@ -198,11 +251,16 @@ class Sidebar(tk.Frame):
                 self._groups[name].set_expanded(False)
                 for c_name, c_label, c_sub in self._GROUPS[name]:
                     row = SidebarRow(box, c_name, c_label, c_sub, on_select)
-                    row.pack(fill="x", pady=3, padx=(self._indent, 0))
+                    row.pack(fill="x", pady=self.ROW_PAD, padx=(self._indent, 0))
                     self._rows[c_name] = row
                     self._parent_of[c_name] = name
             else:
-                self._rows[name] = SidebarRow(self, name, label, subtitle, on_select)
+                self._rows[name] = SidebarRow(rail, name, label, subtitle, on_select)
+
+        for name, tip in self._TIPS.items():
+            row = self._rows.get(name) or self._groups.get(name)
+            if row is not None:
+                virgil_tooltip.attach(row, tip)
 
         self._relayout()
 
@@ -224,38 +282,84 @@ class Sidebar(tk.Frame):
         Forget-all-then-pack, the same idiom felhaven._show_view uses. A bare
         pack() on a re-expanded group box would append it to the BOTTOM of the
         rail rather than back into its slot, so the whole rail is rebuilt in
-        declaration order instead. Only direct children of self are touched —
-        the child rows live inside their group box and are never disturbed."""
-        for w in self.pack_slaves():
+        declaration order instead. Only direct children of the rail are
+        touched — the child rows live inside their group box and are never
+        disturbed."""
+        for w in self._inner.pack_slaves():
             w.pack_forget()
         for name, _label, _subtitle in self._ROWS:
             if name in self._GROUPS:
                 # pady gives the bordered cards breathing room; the header takes
                 # the same spacing so the rail keeps one rhythm.
-                self._groups[name].pack(fill="x", pady=3)
+                self._groups[name].pack(fill="x", pady=self.ROW_PAD)
                 if self._expanded[name]:
                     self._group_boxes[name].pack(fill="x")
             else:
-                self._rows[name].pack(fill="x", pady=3)
+                self._rows[name].pack(fill="x", pady=self.ROW_PAD)
 
     def _toggle_group(self, name: str) -> None:
         self._expanded[name] = not self._expanded[name]
         self._groups[name].set_expanded(self._expanded[name])
         self._relayout()
 
+    # ── scrolling ────────────────────────────────────────────────────────────
+
+    def _sync_region(self) -> None:
+        """Scroll region = the rail's requested size. Read from the request,
+        not bbox("all"), so it is right before the inner frame's <Configure>
+        has been delivered (set_active reads it straight after a relayout)."""
+        self._canvas.configure(scrollregion=(
+            0, 0, self._inner.winfo_reqwidth(), self._inner.winfo_reqheight()))
+
+    def _on_canvas_config(self, event) -> None:
+        self._canvas.itemconfigure(self._win, width=event.width)
+
+    def _bind_wheel(self, _event) -> None:
+        self._canvas.bind_all("<MouseWheel>", self._on_wheel)
+
+    def _unbind_wheel(self, _event) -> None:
+        self._canvas.unbind_all("<MouseWheel>")
+
+    def _on_wheel(self, event) -> None:
+        self._canvas.yview_scroll(int(-event.delta / 120), "units")
+
+    def _reveal(self, widget: tk.Widget) -> None:
+        """Scroll just far enough that `widget` (a row on the rail) is fully
+        in view. Does nothing when the whole rail fits."""
+        self.update_idletasks()
+        self._sync_region()
+        total = self._inner.winfo_reqheight()
+        view = self._canvas.winfo_height()
+        if view <= 1 or total <= view:
+            return
+        top = 0
+        w = widget
+        while w is not self._inner:        # a child row sits inside its group box
+            top += w.winfo_y()
+            w = w.master
+        # Keep the row's padding in view too, so the first row scrolls all the
+        # way back to the top of the rail rather than stopping ROW_PAD short.
+        bottom = top + widget.winfo_height() + self.ROW_PAD
+        top = max(0, top - self.ROW_PAD)
+        shown = self._canvas.canvasy(0)    # rail y at the top of the view
+        if top < shown:
+            self._canvas.yview_moveto(top / total)
+        elif bottom > shown + view:
+            self._canvas.yview_moveto((bottom - view) / total)
+
     def rescale(self, scale: float) -> None:
         """Grow the fixed sidebar width in lockstep with the fonts so the nav
         labels never outgrow their box. Uses the same scale theme.rescale_fonts
         applied to the fonts, so the text-to-box fit stays constant at any size.
         The child-row indent scales with it so the nesting stays legible."""
-        self.configure(width=int(round(self.BASE_WIDTH * scale)))
+        self.configure(width=int(round(self.BASE_WIDTH * scale)) + PhosphorScroll.LANE)
         self._indent = int(round(self.BASE_INDENT * scale))
         for name in self._parent_of:
             self._rows[name].pack_configure(padx=(self._indent, 0))
 
     def set_active(self, name: str) -> None:
-        """Light the named row. Expands its group first if collapsed — the lit
-        row must never be hidden."""
+        """Light the named row. Expands its group first if collapsed, then
+        scrolls it into view — the lit row must never be hidden."""
         parent = self._parent_of.get(name)
         if parent is not None and not self._expanded[parent]:
             self._expanded[parent] = True
@@ -263,6 +367,7 @@ class Sidebar(tk.Frame):
             self._relayout()
         for row_name, row in self._rows.items():
             row.set_active(row_name == name)
+        self._reveal(self._rows[name])
 
     def row(self, name: str) -> SidebarRow:
         return self._rows[name]

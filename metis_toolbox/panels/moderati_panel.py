@@ -33,6 +33,8 @@ V0.02: Audited 2026-07-26 — verified honest against felhaven.py wiring; freshe
 """
 
 from theme import C, TabHost
+from tools import virgil
+from panels import virgil_tooltip
 
 from panels.hephaestus_panel import VitalsPanel
 from panels.emanon_panel     import EmanonPanel
@@ -46,6 +48,19 @@ from panels.daedalus_panel   import DaedalusPanel
 class ModeratiPanel(TabHost):
     """Thin tab host (theme.TabHost). Tab bodies are children of self.body and
     ARE the tabs."""
+
+    # Each tab's hover tooltip (Virgil): a tab says who works there, so each
+    # is that module's own gloss. One per tab; test_virgil_surfaces holds it
+    # to the _build_tabs list.
+    _TIPS = {
+        "hephaestus":     virgil.module("hephaestus"),
+        "emanon":         virgil.module("emanon"),
+        "argus":          virgil.module("argus"),
+        "cerberus":       virgil.module("cerberus"),
+        "themis":         virgil.module("themis"),
+        "machine_spirit": virgil.module("machine_spirit"),
+        "daedalus":       virgil.module("daedalus"),
+    }
 
     def __init__(self, parent):
         super().__init__(parent, "Moderati — vitals, logs, network & settings", C["teal"])
@@ -72,3 +87,6 @@ class ModeratiPanel(TabHost):
             ("machine_spirit", "MACHINE SPIRIT", self.machine_spirit, C["green"]),
             ("daedalus",       "DAEDALUS",       self.daedalus,       C["gray"]),
         ], default="hephaestus")
+        for key, tip in self._TIPS.items():
+            if key in self._tabs:
+                virgil_tooltip.attach(self._tabs[key], tip)

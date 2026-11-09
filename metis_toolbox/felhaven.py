@@ -147,8 +147,10 @@ class FelhavenApp:
         self._sidebar = Sidebar(body, on_select=self._show_view)
         self._sidebar.pack(side="left", fill="y")
 
+        # No padx: the sidebar's scroll lane (8 px, empty while the rail fits)
+        # is the gap between the rail and the content, as padx=(8, 0) was.
         self._content_area = tk.Frame(body, bg=C["bg"])
-        self._content_area.pack(side="left", fill="both", expand=True, padx=(8, 0))
+        self._content_area.pack(side="left", fill="both", expand=True)
 
         # Build all eight views once
         self._views: dict[str, tk.Widget] = {

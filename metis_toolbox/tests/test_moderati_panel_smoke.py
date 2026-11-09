@@ -106,6 +106,13 @@ class TestModeratiPanelSmoke(unittest.TestCase):
         self.assertIsInstance(self.panel.machine_spirit, self.MachineSpiritPanel)
         self.assertIsInstance(self.panel.daedalus, self.DaedalusPanel)
 
+    def test_every_tab_label_carries_its_tooltip(self):
+        from panels import virgil_tooltip
+        tips = virgil_tooltip._shared(self.root)._tips
+        self.assertEqual(sorted(self.panel._TIPS), sorted(self.panel._tabs))
+        for key, label in self.panel._tabs.items():
+            self.assertEqual(tips.get(str(label)), self.panel._TIPS[key], key)
+
     def test_starts_on_hephaestus_tab(self):
         self.assertEqual(self.panel._active, "hephaestus")
 

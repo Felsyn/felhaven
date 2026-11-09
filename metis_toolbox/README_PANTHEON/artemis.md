@@ -1,7 +1,7 @@
 # Artemis
 
-Own the local-chart cache: projection, area manifest, county reference, and the
-shared vector format.
+Own the local-chart cache: its projection, area manifest and shared vector
+format. It also holds the county reference.
 
 - **UI:** Navigation view → Cartograph
 - **Brain tool:** none

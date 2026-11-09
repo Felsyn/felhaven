@@ -3,9 +3,10 @@ euterpe.py — Song Ledger
 =========================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         Remember what music has played, and answer two questions about it:
-             "have we heard this recently?" and "what does the listener
-             actually like?". One row per song, plus the views over it. It
+Job:         Remember what music has played, and what the listener seems to
+             like. It answers two questions: "have we heard this recently?"
+             and "what does the listener actually like?". One row per song,
+             plus the views over it. It
              does not choose songs, play them, or talk to mpv — Awen chooses,
              Morpheus plays.
 

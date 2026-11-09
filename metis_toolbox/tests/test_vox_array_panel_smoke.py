@@ -106,6 +106,13 @@ class TestVoxArrayPanelSmoke(_LedgerRedirect, unittest.TestCase):
         self.assertIsInstance(self.panel.orpheus, self.OrpheusPanel)
         self.assertIsInstance(self.panel.euterpe, self.EuterpePanel)
 
+    def test_every_tab_label_carries_its_tooltip(self):
+        from panels import virgil_tooltip
+        tips = virgil_tooltip._shared(self.root)._tips
+        self.assertEqual(sorted(self.panel._TIPS), sorted(self.panel._tabs))
+        for key, label in self.panel._tabs.items():
+            self.assertEqual(tips.get(str(label)), self.panel._TIPS[key], key)
+
     def test_echo_says_why_when_its_ffmpeg_is_refused(self):
         from panels.echo_panel import _UNVERIFIED_MSG
         echo.available = lambda: {"ffmpeg": None,

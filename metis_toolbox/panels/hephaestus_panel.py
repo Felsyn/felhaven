@@ -7,7 +7,9 @@ VitalsPanel   — CPU / RAM / DISK bars + node/OS footer, fed hephaestus.fetch()
 
 import tkinter as tk
 
+from panels import virgil_tooltip
 from theme import C, FONTS
+from tools import virgil
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -83,9 +85,13 @@ class AetherWidget(tk.Frame):
         tk.Label(self, text="AETHER — CONNECTIVITY", font=FONTS["card_header"],
                  fg=C["text3"], bg=C["card"], anchor="w").pack(fill="x")
 
-        self._wifi_dot,     self._wifi_lbl     = self._build_row("WiFi")
-        self._internet_dot, self._internet_lbl = self._build_row("Internet")
-        self._ollama_dot,   self._ollama_lbl   = self._build_row("Ollama")
+        # The whole row of each, by readout, for VitalsPanel's tooltips: the
+        # label, the dot and the value all count as hovering it.
+        self.rows: dict[str, tk.Frame] = {}
+        wifi,     self._wifi_dot,     self._wifi_lbl     = self._build_row("WiFi")
+        internet, self._internet_dot, self._internet_lbl = self._build_row("Internet")
+        ollama,   self._ollama_dot,   self._ollama_lbl   = self._build_row("Ollama")
+        self.rows.update(wifi=wifi, internet=internet, ollama=ollama)
 
         for dot in (self._wifi_dot, self._internet_dot, self._ollama_dot):
             self._draw_dot(dot, C["text3"])
@@ -100,7 +106,7 @@ class AetherWidget(tk.Frame):
         val = tk.Label(row, text="—", font=FONTS["small"],
                        fg=C["text1"], bg=C["card"], anchor="e")
         val.pack(side="right")
-        return dot, val
+        return row, dot, val
 
     def _draw_dot(self, canvas: tk.Canvas, color: str):
         canvas.delete("all")
@@ -147,6 +153,18 @@ class VitalsPanel(tk.Frame):
             AetherWidget (session 5).
     """
 
+    # Each readout's hover tooltip (Virgil): a readout says what the number
+    # means, so each is a glossary entry. Keys name the widgets in
+    # self._tip_targets; test_virgil_surfaces holds the two in lockstep.
+    _TIPS = {
+        "cpu":      virgil.term("cpu"),
+        "ram":      virgil.term("ram"),
+        "disk":     virgil.term("disk"),
+        "wifi":     virgil.term("wifi"),
+        "internet": virgil.term("internet"),
+        "ollama":   virgil.term("ollama"),
+    }
+
     def __init__(self, parent):
         super().__init__(parent, bg=C["card"])
         self.cpu = BarMeter(self, "CPU", C["amber"])
@@ -161,6 +179,14 @@ class VitalsPanel(tk.Frame):
 
         self.aether = AetherWidget(self)
         self.aether.pack(fill="x")
+
+        self._tip_targets: dict[str, tk.Misc] = {
+            "cpu": self.cpu, "ram": self.ram, "disk": self.disk,
+            **self.aether.rows,
+        }
+        for key, tip in self._TIPS.items():
+            if key in self._tip_targets:
+                virgil_tooltip.attach(self._tip_targets[key], tip)
 
     def update(self, data: dict) -> None:
         """Called by Kairos every 5 s on the main thread."""

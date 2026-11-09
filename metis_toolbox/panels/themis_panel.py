@@ -3,10 +3,10 @@ Themis panel — the Settings face inside Moderati (the SETTINGS tab).
 ====================================================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         Draw the Settings UI: labeled entries for latitude / longitude /
-             optional weather-location, a temperature-unit toggle (°F/°C) and a
-             clock-format toggle (12h/24h), and a Save button. Its ONE job is to
-             turn those fields into a themis.save() call — all persistence,
+Job:         Draw the Settings form and turn its fields into a themis.save() call.
+             The form is labeled entries for latitude / longitude / optional
+             weather-location, a temperature-unit toggle (°F/°C), a
+             clock-format toggle (12h/24h), and a Save button. All persistence,
              validation, and defaults live in themis.py; this module never reads
              or writes felhaven_settings.json directly.
 

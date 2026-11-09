@@ -51,7 +51,8 @@ C: dict[str, str] = {
     "text3":     "#2F7A2F",   # dim phosphor — subtitles / inactive
     "amber":     "#D6A11F",   # THE uniform nav dot
     # Text shown EXACTLY as a tool gave it, not spoken by anyone — a Daedalus
-    # docstring in the chat (pythia's on_verbatim). The one cyan outside the
+    # docstring in the chat (pythia's on_verbatim), or a module's own gloss in
+    # a Virgil tooltip (panels/virgil_tooltip.py). The one cyan outside the
     # map, so a quotation can never be mistaken for Pythia (green), the DJ
     # (amber) or a failure (red). Same value as map_water today, but its own
     # key: retuning the rivers must never recolour the chat.

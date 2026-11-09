@@ -4,7 +4,8 @@ dev_build_hypatia_catalog.py — Star/Constellation Catalog Generator
 Metis Toolbox | Anti-Legion: ONE JOB
 
 Job:         Turn two public astronomical datasets into the two JSON files
-             Hypatia reads (hypatia_stars.json, hypatia_constellations.json).
+             Hypatia reads. They are hypatia_stars.json and
+             hypatia_constellations.json.
 
 This is a ONE-OFF, HAND-RUN SCRIPT. It is not imported by anything, not a
 Kairos worker, and not part of the running dashboard — Matthew runs it

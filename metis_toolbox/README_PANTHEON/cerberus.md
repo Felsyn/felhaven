@@ -1,7 +1,7 @@
 # Cerberus
 
-Keep the toolbox's API keys encrypted to this Windows account, and gate their use
-behind a PIN child lock. Vault, Custody, and Ledger are its three heads.
+Keep the API keys encrypted to this Windows account, behind a PIN child lock.
+Vault, Custody, and Ledger are its three heads.
 
 - **UI:** Moderati card → CERBERUS tab; the lamp beside Scraptoken Flux on Home;
   the Dynastic Vault's gate

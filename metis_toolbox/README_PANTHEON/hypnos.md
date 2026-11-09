@@ -1,7 +1,8 @@
 # Hypnos
 
-Tell whether the person has stepped away: Windows locked, the PC asleep, or no
-keyboard or mouse input for a while. It only reads; Cerberus decides what to do.
+Tell whether the person has stepped away: locked, asleep or idle. Locked is
+Windows locked, asleep is the PC asleep, and idle is no keyboard or mouse input
+for a while. It only reads; Cerberus decides what to do.
 
 - **UI:** none — Cerberus's worker reads it every 2 s
 - **Brain tool:** none

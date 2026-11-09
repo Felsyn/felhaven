@@ -3,10 +3,11 @@ panels/machine_spirit_panel.py — the MACHINE SPIRIT face inside Moderati
 ==========================================================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         Draw Pythia's system-prompt editor: a multiline text box
-             pre-filled from machine_spirit.effective_prompt(), a Save
-             button, and a "Revert to Default" button. Its ONE job is to
-             turn edits into machine_spirit.save()/revert() calls — all
+Job:         Draw Pythia's system-prompt editor and turn its edits into save
+             and revert calls. The editor is a multiline text box pre-filled
+             from machine_spirit.effective_prompt(), a Save button, and a
+             "Revert to Default" button; edits become
+             machine_spirit.save()/revert() calls — all
              persistence and the default text itself live in
              machine_spirit.py; this module never reads or writes
              machine_spirit_config.json directly.

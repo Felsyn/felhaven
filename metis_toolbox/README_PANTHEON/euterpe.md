@@ -1,7 +1,8 @@
 # Euterpe
 
-Remember what music has played, and answer two questions about it: "have we
-heard this recently?" and "what does the listener actually like?".
+Remember what music has played, and what the listener seems to like. It answers
+two questions: "have we heard this recently?" and "what does the listener
+actually like?".
 
 - **UI:** Vox Array → TUNES tab — the ledger as editable JSON
 - **Brain tools:** none (out of LLM scope — the no-repeat rule is a guard the model must not be able to write around)

@@ -14,6 +14,30 @@ New here? Start with [`README.md`](README.md) for what Felhaven is,
 [`SETUP.md`](SETUP.md) to run it, and [`CONVENTIONS.md`](CONVENTIONS.md) for how
 the code is put together.
 
+- `2026-11-09` — `panels/sidebar.py`: every row and group header carries a Virgil tooltip, a glossary entry from `_TIPS`.
+- `2026-11-09` — `panels/moderati_panel.py`, `panels/cogitator_panel.py`, `panels/vox_array_panel.py`: each tab label's tooltip is its module's gloss, from `_TIPS`.
+- `2026-11-09` — `panels/hephaestus_panel.py`: the CPU, RAM and DISK meters and the Wi-Fi, Internet and Ollama rows carry glossary tooltips; `AetherWidget.rows` holds the three rows.
+- `2026-11-09` — `panels/virgil_tooltip.py`: a click hides the tip on a widget with its own `<Button-1>` too; the press is bound per button, not as a bare `<ButtonPress>`.
+- `2026-11-09` — `tests/test_virgil_surfaces.py`: new; every `_TIPS` table matches its widgets, every tip has words, and every glossary entry is used.
+- `2026-11-09` — `CONVENTIONS.md`: §7 says how a panel gets a tooltip; §12 records Virgil's decisions and the exact gloss limit.
+- `2026-11-09` — `BACKLOG.md`: more tooltip surfaces, one decision each.
+- `2026-11-09` — `panels/virgil_tooltip.py`: new; `attach(widget, tip)` shows Virgil's words after 500 ms of hover in one shared, borderless window per root, and hides on leave, click, unmap or destroy.
+- `2026-11-09` — `tests/test_panel_after_teardown.py`: the tooltip's pending show is cancelled when its widget or its root is destroyed.
+- `2026-11-09` — `palette.py`: the `verbatim` comment names tooltips too; no value changed.
+- `2026-11-09` — Thirteen modules' `Job:` first sentence is under 90 characters, with the pantheon pages and index rows of the three that have one (Artemis, Awen, Hypnos).
+- `2026-11-09` — `tests/test_daedalus.py`: every module's gloss ends in a period within 90 characters, and every module has a `Job:` field, except `felhaven.py` by design and fourteen panels listed until they gain one.
+- `2026-11-09` — `CONVENTIONS.md` §0: the gloss limit is exactly 90 characters, and a test holds it.
+- `2026-11-09` — `BACKLOG.md`: the glosses over 90 characters are done; fourteen panels have no `Job:` field; `felhaven.py`'s banner docstring has gone stale.
+- `2026-11-09` — `tools/virgil.py`: new; turns a tooltip into words, a module's gloss through Daedalus or an entry from `config/virgil_glossary.json`, re-read when the file changes.
+- `2026-11-09` — `config/virgil_glossary.json`: new; plain-language entries for the nav rail's names and the vitals readouts, listed in Cerberus Custody.
+- `2026-11-09` — `tools/daedalus.py`: `gloss(name)` returns one module's gloss without copying the index.
+- `2026-11-09` — `cerberus.py`, `tools/euterpe.py`: the `Job:` first sentence is under 90 characters, with their pantheon pages and index rows.
+- `2026-11-09` — `BACKLOG.md`: a glossary tool for Pythia (parked), and the thirteen glosses still over 90 characters.
+- `2026-11-09` — `panels/sidebar.py`: the rail scrolls (a PhosphorScroll lane, the wheel while hovering) when its rows don't fit, as at the default 960 x 620 window with Navigation open; `set_active` scrolls the lit row into view.
+- `2026-11-09` — `felhaven.py`: the content area drops its `padx=(8, 0)`; the sidebar's 8 px scroll lane is that gap now.
+- `2026-11-09` — `BACKLOG.md`: Atmospherics' dropdown moves from Decisions to Features; it lists Home and the places saved for Artemis.
+- `2026-11-09` — `BACKLOG.md`: the sidebar runs out of room at the default window size.
+- `2026-11-09` — `BACKLOG.md`: holds features asked for too; a Features section (Hephaestus depth, Pythia's model dropdown and download, weather and space alerts) and a decision on Atmospherics' dropdown.
 - `2026-11-09` — `config/bin_manifest.json`: per machine and gitignored, no longer committed; each machine records its own programs.
 - `2026-11-09` — `tools/aegis.py`: `PROGRAMS` lists the programs Felhaven runs; `record` refuses other names, `verify` reports each program, and a missing manifest reads "not recorded yet".
 - `2026-11-09` — `tests/test_bin_manifest.py`: with no `bin/` the real-program check skips; a failed main-checkout lookup fails; `FELHAVEN_NO_BIN` is gone.

@@ -3,12 +3,11 @@ cerberus.py — The Guardian of Secrets (logic)
 =============================================
 Metis Toolbox | Anti-Legion: THREE HEADS, ONE GUARDIAN
 
-Job:         Keep the toolbox's API keys encrypted to this Windows account, and
-             gate their use behind a PIN child lock. Its three heads are the
-             Vault (the keys), Custody (a PIN-gated list of config files) and
-             the Ledger (an access log). Every module that stores or reads a
-             secret defers here; nothing else in the toolbox rolls its own
-             crypto.
+Job:         Keep the API keys encrypted to this Windows account, behind a PIN
+             child lock. Its three heads are the Vault (the keys), Custody (a
+             PIN-gated list of config files) and the Ledger (an access log).
+             Every module that stores or reads a secret defers here; nothing
+             else in the toolbox rolls its own crypto.
 
              The one deliberate exception to §0's "one file, one job": the
              three heads are facets of one guardian, sharing one session.

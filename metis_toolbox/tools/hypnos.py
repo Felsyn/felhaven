@@ -3,9 +3,10 @@ hypnos.py — God of Sleep
 ========================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         Tell whether the person has stepped away: Windows locked, the PC
-             asleep, or no keyboard or mouse input for a while. It only reads;
-             it decides nothing.
+Job:         Tell whether the person has stepped away: locked, asleep or idle.
+             Locked is Windows locked, asleep is the PC asleep, and idle is no
+             keyboard or mouse input for a while. It only reads; it decides
+             nothing.
 
 Contract:    presence() -> Presence, three readings taken together:
                • idle_s         — seconds since the last keyboard or mouse

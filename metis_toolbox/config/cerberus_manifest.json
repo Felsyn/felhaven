@@ -5,6 +5,7 @@
     {"file": "midas_watchlist.json", "desc": "Midas tickers — also the source for Plutus's ledger dropdown."},
     {"file": "morpheus_playlists.json", "desc": "Morpheus playlists — label/url rows for the audio engine."},
     {"file": "hypatia_lore.json", "desc": "Hypatia constellation lore — hand-curated mythology text per constellation."},
+    {"file": "virgil_glossary.json", "desc": "Virgil's glossary — plain-language tooltip text for the UI's names and readouts."},
     {"file": "calliope_config.json", "desc": "Calliope narrator — voice, speed, language, and TTS model paths."},
     {"file": "euterpe_config.json", "desc": "Euterpe tuning — Auto-DJ's no-repeat window, taste anchor, and longest thing that counts as a song."},
     {"file": "bin_manifest.json", "desc": "Aegis — where each bin/ program on this machine came from and its sha256. Per machine, not committed. Written by python -m tools.aegis record, not by hand (SETUP section 5)."},

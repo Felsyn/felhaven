@@ -411,5 +411,68 @@ class TestOrpheusPanelTeardown(_TeardownCase):
         self.assertNoTimersSurvive(self._build, arm)
 
 
+class TestVirgilTooltipTeardown(_TeardownCase):
+    """The tooltip's one pending show is scheduled on the ROOT, so the widget
+    it is for can die first, or the whole root can, with it still pending.
+    Both must take the timer back (CONVENTIONS §6)."""
+
+    def _attached(self, master):
+        from panels import virgil_tooltip
+        from tools import virgil
+        frame = tk.Frame(master, width=80, height=30)
+        virgil_tooltip.attach(frame, virgil.term("cpu"))
+        return frame, virgil_tooltip._shared(frame._root())
+
+    @staticmethod
+    def _pending_on(root):
+        """`after info` still answers on a destroyed root's interpreter."""
+        return set(root.tk.splitlist(root.tk.call("after", "info")))
+
+    def test_destroying_the_widget_cancels_its_pending_show(self):
+        def build():
+            frame, self._tip = self._attached(self.root)
+            return frame
+
+        def arm(frame):
+            self._tip._on_enter(frame)
+            self.assertIsNotNone(self._tip._after_id)
+
+        self.assertNoTimersSurvive(build, arm)
+
+    def test_destroying_the_root_cancels_a_pending_show(self):
+        from panels import virgil_tooltip
+        root = tk.Tk()
+        root.withdraw()
+        # The tip window first, so Tk.destroy() reaches it BEFORE the widget:
+        # its own destroy() override must cancel, not the widget's <Destroy>.
+        tip = virgil_tooltip._shared(root)
+        frame, same = self._attached(root)
+        self.assertIs(same, tip)
+        tip._on_enter(frame)
+        self.assertTrue(self._pending_on(root), "nothing was scheduled")
+        root.destroy()
+        self.assertEqual(self._pending_on(root), set(),
+                         "the pending show outlived its root")
+
+    def test_destroying_the_root_while_a_tip_is_visible(self):
+        from panels import virgil_tooltip
+        root = tk.Tk()
+        root.attributes("-alpha", 0.0)
+        root.overrideredirect(True)
+        root.geometry("120x60+40+40")
+        frame, tip = self._attached(root)
+        frame.pack()
+        tip.attributes("-alpha", 0.0)
+        root.update()
+        inside = (frame.winfo_rootx() + 5, frame.winfo_rooty() + 5)
+        with mock.patch.object(virgil_tooltip, "_pointer_xy", return_value=inside):
+            tip._on_enter(frame)
+            tip._fire()
+        self.assertTrue(tip._shown, "the tip never showed — the case would be vacuous")
+        root.destroy()
+        self.assertTrue(tip._destroyed)
+        self.assertEqual(self._pending_on(root), set())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,20 +10,20 @@ the module's own docstring, where it cannot drift from the code.
 | [Aether](aether.md) | Report whether WiFi, the internet and Ollama are reachable. |
 | [Ammit](ammit.md) | Manage a single countdown timer. |
 | [Argus](argus.md) | Report what this computer is communicating with on the network. |
-| [Artemis](artemis.md) | Own the local-chart cache: projection, area manifest, county reference, and the shared vector format. |
+| [Artemis](artemis.md) | Own the local-chart cache: its projection, area manifest and shared vector format. |
 | [Aura](aura.md) | Report current weather: temperature, sky, wind, and forecast. |
-| [Awen](awen.md) | When a song ends and Auto-DJ is on, choose the next one, play it, and hand back a spoken introduction. |
+| [Awen](awen.md) | When a song ends with Auto-DJ on, choose and play the next one and introduce it. |
 | [Cadmus](cadmus.md) | Decode ESRI shapefile bytes (.shp/.dbf) into geometry and attribute records. |
 | [Callimachus](callimachus.md) | Ask the web a question and return trimmed text. |
 | [Calliope](calliope.md) | Turn a string of text into speech and play it. |
-| [Cerberus](cerberus.md) | Keep the toolbox's API keys encrypted to this Windows account, and gate their use behind a PIN child lock. |
+| [Cerberus](cerberus.md) | Keep the API keys encrypted to this Windows account, behind a PIN child lock. |
 | [Daedalus](daedalus.md) | Map Felhaven's own modules, their docstrings and their imports, from the source. |
 | [Demeter](demeter.md) | Fetch, resample and cache local elevation, and render the terrain raster. |
 | [Echo](echo.md) | Turn text into an audio file on disk. |
 | [Emanon](emanon.md) | Watch the stack's logs and report what broke — read-only, never act. |
 | [Eratosthenes](eratosthenes.md) | Resolve a typed location query to a latitude and longitude. |
 | [Eudoxus](eudoxus.md) | Convert between units of length, volume, weight, temperature, and time. |
-| [Euterpe](euterpe.md) | Remember what music has played, and answer two questions about it: "have we heard this recently?" and "what does the listener actually like?". |
+| [Euterpe](euterpe.md) | Remember what music has played, and what the listener seems to like. |
 | [Harmonia](harmonia.md) | Own the one audio output device. |
 | [Hecate](hecate.md) | Fetch and cache TIGER/Line roads for an area as tiered Features. |
 | [Helios](helios.md) | Report sunrise, sunset, golden-hour windows, and day length. |
@@ -32,7 +32,7 @@ the module's own docstring, where it cannot drift from the code.
 | [Herodotus](herodotus.md) | Manage a local archive of Markdown documents. |
 | [Horai](horai.md) | Give the current date, time, season, and time-of-day. |
 | [Hypatia](hypatia.md) | Map where every catalog star and planet sits in the sky right now. |
-| [Hypnos](hypnos.md) | Tell whether the person has stepped away: Windows locked, the PC asleep, or no keyboard or mouse input for a while. |
+| [Hypnos](hypnos.md) | Tell whether the person has stepped away: locked, asleep or idle. |
 | [Kairos](kairos.md) | Own the clock. Fire workers. Dispatch results to panels. |
 | [Kepler](kepler.md) | Compute the positions of the five classical planets. |
 | [Machine Spirit](machine_spirit.md) | Own Pythia's system prompt — the default text plus an optional per-install override. |
@@ -47,6 +47,7 @@ the module's own docstring, where it cannot drift from the code.
 | [Selene](selene.md) | Report the moon's phase, illumination, moonrise, and moonset. |
 | [Sphynx](sphynx.md) | Verify a PIN against the stored hash, and track how many attempts remain. |
 | [Themis](themis.md) | Own the per-install user preferences (location, temperature unit, clock format). |
+| [Virgil](virgil.md) | Give a tooltip its words: a module's own gloss, or a glossary entry. |
 | [Voices](voices.md) | Resolve the voice Felhaven should speak in. |
 | [Zeno](zeno.md) | Evaluate Python arithmetic expressions safely, step by step. |
 

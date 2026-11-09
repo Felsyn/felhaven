@@ -1,7 +1,7 @@
 # Awen
 
-When a song ends and Auto-DJ is on, choose the next one, play it, and hand back
-a spoken introduction.
+When a song ends with Auto-DJ on, choose and play the next one and introduce it.
+Pythia speaks the introduction.
 
 - **UI:** Home view → Hestia's vox box → Auto-DJ toggle; the status line's queue count opens the queue window
 - **Brain tools:** none — it is a job, not a tool. A job the model could start would be the model scheduling its own unprompted work.

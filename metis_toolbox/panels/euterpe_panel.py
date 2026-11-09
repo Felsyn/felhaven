@@ -3,8 +3,8 @@ panels/euterpe_panel.py — the TUNES tab inside Vox Array
 ==========================================================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         Draw Euterpe's song ledger as plain editable JSON: a text box
-             pre-filled from euterpe.raw_text(), a SAVE and a RELOAD. Its ONE
+Job:         Draw Euterpe's song ledger as plain editable JSON, with SAVE and
+             RELOAD. The text box is pre-filled from euterpe.raw_text(). Its ONE
              job is to turn edits into euterpe.replace_all() calls — every
              validation rule and the write itself live in tools/euterpe.py,
              and this module never opens euterpe_ledger.json directly.

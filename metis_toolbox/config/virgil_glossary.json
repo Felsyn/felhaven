@@ -1,0 +1,22 @@
+{
+  "_comment": "Virgil's glossary — plain-language entries for UI names and readouts. Hand-written; config, committed. Keys are lowercase snake_case and must never equal a module key (module descriptions come from their docstrings, through Daedalus). Each text: one or two sentences, ending in a period, at most 240 characters.",
+  "terms": {
+    "home": {"label": "Felhaven", "text": "Home. Talk to Pythia here; her language model runs on this PC, not in the cloud."},
+    "chronometry": {"label": "Chronometry", "text": "Time awareness: the date, the time, the season, and where the day stands."},
+    "moderati": {"label": "Moderati", "text": "The machine looking at itself: vitals, network, logs, keys, settings, and a map of its own modules."},
+    "atmospherics": {"label": "Atmospherics", "text": "Weather for your location, now and in the days ahead, with sunrise, sunset and the moon."},
+    "navigation": {"label": "Navigation", "text": "Charts and maps. Open it to find the Celestarium and the Cartograph."},
+    "celestarium": {"label": "Celestarium", "text": "A map of the sky overhead right now, with constellation stories and tonight's viewing conditions."},
+    "cartograph": {"label": "Cartograph", "text": "A local map: terrain, water and roads around one point, saved so it still works offline."},
+    "dynastic_vault": {"label": "Dynastic Vault", "text": "Finance, behind Cerberus's lock: prices for a watchlist, and a buy and sell ledger you keep by hand."},
+    "scriptorium": {"label": "Scriptorium", "text": "News. Headlines from the feeds you chose, each one linking back to where it came from."},
+    "vox_array": {"label": "Vox Array", "text": "Audio: music from YouTube, text turned into audio files, playback of those files, and the Auto-DJ's memory."},
+    "cogitator": {"label": "Cogitator", "text": "Small utilities: a to-do list and notes, a calculator, and a unit converter."},
+    "cpu": {"label": "CPU", "text": "The processor, the part that does the computing. Spikes are normal; pinned near 100% for minutes means something is working it hard."},
+    "ram": {"label": "RAM", "text": "Short-term working memory, where programs keep what they're using right now. Busy is fine; near 100% for a long stretch makes everything slow."},
+    "disk": {"label": "Disk", "text": "Long-term storage, where files stay when the PC is off. This shows how full the drive is; leave some room free for Windows and updates."},
+    "wifi": {"label": "Wi-Fi", "text": "Whether this PC's Wi-Fi adapter is connected. Connected isn't the same as online; the next row says that."},
+    "internet": {"label": "Internet", "text": "Whether the internet actually answers. \"limited\" usually means a sign-in page is in the way, like hotel or campground Wi-Fi."},
+    "ollama": {"label": "Ollama", "text": "The program that runs Pythia's language model on this PC. If it's offline, Pythia can't answer."}
+  }
+}

@@ -1,7 +1,9 @@
 # FELHAVEN — Backlog
 
-Known, not done. **One job:** things found but not fixed yet, so nothing a
-session notices is lost when the session ends.
+Known, not done. **One job:** things found but not fixed yet, and features
+asked for but not built yet, so nothing a session notices or the owner asks
+for is lost when the session ends. It is where the owner and the AI sessions
+hand work to each other: read it when picking what to do next.
 
 **The rules:**
 
@@ -9,6 +11,8 @@ session notices is lost when the session ends.
   and fixed in that same session, no exceptions. (This file is also published
   with the public snapshot.)
 - **Found something out of scope?** Add a line before the session ends.
+- **Want a feature?** Write it as the gap it fills, under "Features", with the
+  same `needs` and `found` ending as every other line.
 - **Fixed it?** Delete its line **in the same commit** as the fix, so this file
   can't go stale. `CHANGELOG.md` records the fix. There is no "done" section and
   no strikethrough.
@@ -136,6 +140,79 @@ Sections are ordered by what an item needs before work can start.
   pass there untested. `test_bin_manifest` already finds the main checkout's
   `bin/` from a worktree, and the same lookup would fit here. — needs: small
   change to the test · found 2026-11-09 (fresh-clone run, bin manifest PR)
+- **`felhaven.py`'s banner docstring has gone stale.** It says "Python
+  3.10+" and `pip install psutil requests`, where the stack now runs on 3.13
+  from a hashed lock (SETUP §2), says Aura uses wttr.in only, and lists seven
+  of the toolbox's modules. It keeps its prose shape by design (its V0.02
+  note), so the fix is the facts, not a `Job:` field. — needs: small docstring
+  edit · found 2026-11-09 (Virgil gloss audit)
+- **Fourteen panels have no `Job:` field** (CONVENTIONS §0): Argus, Artemis,
+  Aura, Echo, Emanon, Eudoxus, Hephaestus, Horai, Hypatia, Midas, Morpheus,
+  Orpheus, Scribe and Zeno's. Their gloss falls back to the docstring's first
+  line ("Zeno panel — calculator for the Felhaven dashboard."), which keeps
+  §0's shape but not its form. `_NO_JOB_FIELD_YET` in `tests/test_daedalus.py`
+  lists them, and each comes off as it gains one. — needs: a `Job:` field per
+  panel · found 2026-11-09 (Virgil gloss audit)
+
+## Features (need a design first)
+
+- **Hephaestus can't show the GPU or what Ollama has loaded.** The HEPHAESTUS
+  tab is three bars (CPU, RAM, the drive Felhaven lives on) above Aether's
+  dots. psutil can't see a GPU, so VRAM, GPU load and temperature are
+  missing, and nothing shows which model Ollama holds, how much of it is on
+  the GPU, or its context size (`/api/ps`). That one line would have shown
+  the prewarm loading a second runner, which went unseen for six weeks
+  (fixed 2026-08-19). The boot drive, the one that fills up, isn't shown
+  either. The owner wants this depth here, likely as tabs. — needs: a
+  design (tab layout; NVML through `nvidia-ml-py` or ctypes, not
+  `nvidia-smi` every 5 s), then change and tests · found 2026-11-09 (owner
+  request)
+- **Pythia's model can only be changed through an environment variable.**
+  `PYTHIA_MODEL` is read once at import, so trying another model means a
+  shell setting and a restart. The owner wants a dropdown on the MACHINE
+  SPIRIT tab, saved by Themis. It has to unload the old model first
+  (`keep_alive=-1` keeps it resident), list only models whose `/api/show`
+  capabilities include `tools` (a model without them loses every tool,
+  silently), and say that a switch costs a cold load. Every probe in this
+  file was measured on gemma4:e2b, so a switch is also how "a bigger model"
+  gets tried. — needs: a design, then change and tests · found 2026-11-09
+  (owner request)
+- **A fresh clone has no way to get a model.** Pythia answers nothing until
+  the user installs Ollama and pulls one by hand. The owner wants a download
+  option on the dropdown above for a short tested list (gemma4:e2b first),
+  each with its requirements beside it (measured here: ~7.2 GB disk, ~1.7 GB
+  VRAM once loaded, about a minute to load). Pull through Ollama's
+  `/api/pull` for progress; check free space on the model store's drive
+  (`OLLAMA_MODELS`, not Felhaven's); stop on no progress rather than on a
+  whole-request deadline; and make Cancel work (the Artemis cancel item
+  above is the same gap). — needs: the dropdown, then a design, then change
+  and tests · found 2026-11-09 (owner request)
+- **Felhaven shows no weather warnings and no space weather.** Atmospherics
+  polls every 30 min and carries no alerts. The owner wants emergency
+  weather alerts and space weather (solar flares, geomagnetic storms).
+  Free, keyless sources answered on 2026-11-09: NWS active alerts by point
+  (US only; 233 B with none active), SWPC `noaa-scales.json` (R/S/G levels
+  now and for 3 days, 1.1 KB), `alerts.json` (48 KB of bulletins) and the
+  planetary Kp index (4.8 KB). The design has to settle: "couldn't check"
+  never looks like "no alerts"; a 1–2 min worker of its own; which
+  severities pop up (Ammit-style, read aloud); whether dismissing a warning
+  still in effect turns the displays green; new modules, not more Aura.
+  Panel first, brain tool after the stale-reading item above. — needs: a
+  design and the owner's decisions, then new modules and tests · found
+  2026-11-09 (owner request)
+- **Atmospherics only shows the weather at home.** Aura reads its place from
+  Themis on every fetch, so the weather at another place means changing
+  Settings. The owner wants a dropdown in the Atmospherics header: Home, then
+  the places saved for Artemis (`eratosthenes.waypoints()`). A pick changes
+  NOW and FORECAST and leaves Themis alone. Aura's cache key is already the
+  place, so a passed-in lat/lon needs no second cache. To settle: whether
+  alerts follow the pick (suggested: pop-ups stay on Home, so looking at a
+  camp never hides a warning at the house), and whether the pick survives a
+  restart. No saved-places file exists on the Obelisk yet, and adding one is
+  a JSON edit, so the menu would read only Home; a "save this place" in
+  Artemis (a new file write for `test_file_writes`) may need to come first.
+  — needs: a design, then change and tests · found 2026-11-09 (owner
+  request)
 
 ## Audits
 
@@ -164,6 +241,13 @@ Sections are ordered by what an item needs before work can start.
   walkthrough that opens one won't show it. A screen-region mode would record
   them, but also anything lying on top of Felhaven. — needs: decision (add the
   mode, or keep walkthroughs off popups) · found 2026-10-28 (Clio capture)
+- **More tooltip surfaces.** Virgil covers the nav rail, the Moderati,
+  Cogitator and Vox Array tabs, and the Hephaestus readouts. Not yet: the tab
+  bars inside Pheme, Morpheus and the Dynastic Vault, Home's Scraptoken Flux
+  and Cerberus lamp, and the Rite Log. Tips are pointer-only, too: a widget
+  with keyboard focus shows none. Each is one `_TIPS` table and, for a term,
+  a glossary entry (CONVENTIONS §7). — needs: decision, one per surface
+  · found 2026-11-09 (Virgil)
 
 ## Parked, until a trigger
 
@@ -195,6 +279,12 @@ Sections are ordered by what an item needs before work can start.
   keeps the history · found 2026-10-05 (file-write guard)
 - **Tool Broker** (per-turn tool selection). §12 (2026-09-27) says when to
   revisit. — needs: its trigger · found 2026-09-27 (V0.03 audit §6)
+- **A glossary tool for Pythia.** Virgil's glossary explains the UI's names
+  and readouts on hover, but Pythia can't read it, so "what is the Cogitator?"
+  gets a guess. Module glosses already reach her through Daedalus; a glossary
+  tool would add prompt tokens to every chat turn on gemma4:e2b. — needs: its
+  trigger (other people in the household start using Felhaven), then a
+  design session · found 2026-11-09 (Virgil)
 - **Freshness cache helper.** Aura and Pheme carry two deliberately parallel
   copies; extract a helper when a third polled tool adopts the pattern (§12,
   2026-09-28). — needs: its trigger · found 2026-09-28 (PR #27)

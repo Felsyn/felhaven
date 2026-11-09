@@ -3,11 +3,12 @@ Cerberus panel — the Guardian's face inside Moderati (the CERBERUS tab).
 =======================================================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         Draw Cerberus's UI: a PIN gate, and once unlocked, three
-             collapsible sections — Vault (one row per key, masked, with
-             reveal and REPLACE, plus a generic add form), Custody (the
-             manifest's config files, handed to the OS editor) and Ledger (the
-             access log, newest first). Above both faces, a red banner for any
+Job:         Draw Cerberus's UI: a PIN gate, then the Vault, Custody and Ledger.
+             Once unlocked, those are three collapsible sections — Vault (one
+             row per key, masked, with reveal and REPLACE, plus a generic add
+             form), Custody (the manifest's config files, handed to the OS
+             editor) and Ledger (the access log, newest first). Above both
+             faces, a red banner for any
              tamper alarm. All logic — the PIN check, DPAPI, the ledger, the
              manifest — lives in cerberus.py; this module only draws and hands
              off.

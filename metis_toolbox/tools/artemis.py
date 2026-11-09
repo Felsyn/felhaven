@@ -3,8 +3,8 @@ artemis.py — The Huntress (local chart core)
 =============================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         Own the local-chart cache: projection, area manifest, county
-             reference, and the shared vector format.
+Job:         Own the local-chart cache: its projection, area manifest and
+             shared vector format. It also holds the county reference.
              Named for Artemis, goddess of the hunt and the wild country the
              chart depicts. The layer modules (Hecate roads, later Poseidon
              water and Demeter elevation) know about formats; Artemis knows

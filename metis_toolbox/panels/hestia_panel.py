@@ -3,8 +3,9 @@ panels/hestia_panel.py — Hestia: the Home command surface
 ===========================================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         Draw Pythia's command surface — the "PYTHIA / ask the oracle"
-             title block, the wireframe face, and the vox control box. Draws
+Job:         Draw Pythia's command surface: her title, the wireframe face and
+             the vox controls. The title block reads "PYTHIA / ask the
+             oracle", and the controls sit in a bordered box. Draws
              and delegates — owns NO chat state, no worker, no history, no
              counters of its own. HomePanel wires the controls to its own
              handlers and tells the face what she is doing.

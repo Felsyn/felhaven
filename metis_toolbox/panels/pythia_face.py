@@ -3,8 +3,8 @@ panels/pythia_face.py — Pythia's wireframe face
 ===============================================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         Draw Pythia as a wireframe face and animate it to say what she is
-             doing — idle, thinking, speaking. A pure indicator: it reads no
+Job:         Draw Pythia as a wireframe face, animated for idle, thinking or
+             speaking. A pure indicator: it reads no
              state of its own, holds no audio handle, and calls nothing back.
              HestiaBar pushes a state name in; that is the entire input.
 
