@@ -39,6 +39,27 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pythia
+import themis
+
+_saved_settings_path = None
+_settings_dir = None
+
+
+def setUpModule():
+    """These tests assert on the request's think and options, which follow the
+    owner's settings (themis). Point themis at an empty temp folder, so they
+    see the defaults on every machine, never the checkout's own settings."""
+    import tempfile
+    from pathlib import Path
+    global _saved_settings_path, _settings_dir
+    _settings_dir = tempfile.TemporaryDirectory()
+    _saved_settings_path = themis._DATA_PATH
+    themis._DATA_PATH = Path(_settings_dir.name) / "felhaven_settings.json"
+
+
+def tearDownModule():
+    themis._DATA_PATH = _saved_settings_path
+    _settings_dir.cleanup()
 
 
 def _chunk(obj) -> bytes:

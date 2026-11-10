@@ -103,6 +103,7 @@ from typing import Any, Callable, Optional, Sequence
 import requests
 
 import machine_spirit
+import themis
 from tools import (
     horai, hephaestus, aura, ammit, midas, aether, pheme, zeno, eudoxus,
     argus, helios, hypatia, selene, morpheus, callimachus, herodotus,
@@ -192,6 +193,26 @@ _KEEP_ALIVE = -1
 # that runner away and reloaded at 8192. Both _chat() and _warm() read this one
 # dict so the two can never drift apart again; the lockstep test enforces it.
 _OPTIONS = {"num_ctx": _NUM_CTX, "num_predict": _NUM_PREDICT}
+# Thinking and temperature are the owner's (themis, the MACHINE SPIRIT tab),
+# read once per ask(). Neither touches the runner: temperature and num_predict
+# are per-request sampling options (measured 2026-11-09: load 3-4 ms after a
+# change, versus ~70 s for a num_ctx change). The reasoning a thinking round
+# writes counts against num_predict — one measured round spent 656 of 1024
+# tokens on it — so a thinking round gets this budget instead. At ~68 tok/s,
+# a round that used all of it would take about 45 s.
+_NUM_PREDICT_THINKING = 3072
+
+
+def _request_options(think: bool, temperature: Optional[float]) -> dict[str, Any]:
+    """This request's options: _OPTIONS (num_ctx decides the runner, so it never
+    varies), the thinking budget when thinking, and the owner's temperature if
+    set. With none set, no temperature is sent and the model keeps its own."""
+    options: dict[str, Any] = dict(_OPTIONS)
+    if think:
+        options["num_predict"] = _NUM_PREDICT_THINKING
+    if temperature is not None:
+        options["temperature"] = temperature
+    return options
 
 # ── Degraded answers ─────────────────────────────────────────────────────────
 # What ask() returns when there is no answer to give: the model went silent, ran
@@ -697,6 +718,8 @@ def _chat(
     on_delta: Optional[Callable[[str], None]] = None,
     cancel: Optional[threading.Event] = None,
     tools: Optional[list[dict[str, Any]]] = None,
+    think: bool = False,
+    temperature: Optional[float] = None,
 ) -> tuple[dict[str, Any], dict[str, int]]:
     """One STREAMING round trip to Ollama's /api/chat. Reads the newline-delimited
     JSON stream, calls on_delta(piece) for each content token as it arrives, and
@@ -728,12 +751,12 @@ def _chat(
         "messages": messages,
         "tools": TOOLS if tools is None else tools,
         "stream": True,
-        # Skip gemma4's reasoning trace — we want the answer. If a round returns
-        # `thinking` anyway (this flipped, or a model that thinks regardless),
-        # it is dropped, not shown; see the docstring.
-        "think": False,
+        # The owner's choice (themis), off by default. Either way the reasoning
+        # trace is dropped, not shown — see the docstring — so thinking makes
+        # an answer slower and more careful, never longer on screen.
+        "think": think,
         "keep_alive": _KEEP_ALIVE,
-        "options": dict(_OPTIONS),
+        "options": _request_options(think, temperature),
     }
     content_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
@@ -793,8 +816,8 @@ def _chat(
     # All reasoning, no answer, no tool call — the round is blank to everyone
     # downstream. Say so here, or it looks like the model returned nothing at
     # all. (A tool round with empty content is normal, hence the tool_calls
-    # guard.) Reached today only if someone flips `think` above, or a future
-    # PYTHIA_MODEL thinks anyway.
+    # guard.) Reached when thinking is on (themis) and the round spent its whole
+    # budget reasoning, or when a model thinks regardless.
     if thinking_chars and not content.strip() and not tool_calls:
         log.warning(
             f"Pythia: round returned no content and {thinking_chars} chars of "
@@ -883,6 +906,7 @@ def ask(
     tool_overrides: Optional[dict[str, Callable[..., dict[str, Any]]]] = None,
     on_verbatim: Optional[Callable[[dict[str, Any]], None]] = None,
     on_confirm: Optional[Callable[[dict[str, Any]], bool]] = None,
+    think: Optional[bool] = None,
 ) -> str:
     """
     Answer `message`, using tools as needed. `history` is prior turns —
@@ -969,6 +993,12 @@ def ask(
     a user message or a search_web result in `history` or this turn. The
     model's own URLs are refused (see _TurnGuard).
 
+    `think` overrides the owner's thinking setting for this call; None (the
+    default) follows it. Awen passes False: a DJ pick runs between songs, and
+    thinking would leave the silence 5-20 s longer. The owner's temperature
+    always applies. Both are read ONCE here, so a change made mid-answer takes
+    effect on the next question, never halfway through this one.
+
     Never raises: network/LLM problems come back as a short readable string so
     the panel can print the result straight to the transcript. An empty reply
     (no content, no tool call — including a round that produced only a dropped
@@ -980,6 +1010,8 @@ def ask(
     is never empty and never a bare placeholder.
     """
     t_start = time.perf_counter()
+    thinking = themis.pythia_thinking() if think is None else bool(think)
+    temperature = themis.pythia_temperature()
     if system is not None and not system.strip():
         log.warning("Pythia: blank `system` override ignored — using the "
                     "Machine Spirit prompt")
@@ -1043,7 +1075,8 @@ def ask(
         for round_i in range(_MAX_TOOL_ROUNDS):
             try:
                 reply, stats = _chat(messages, on_delta=on_delta, cancel=cancel,
-                                     tools=tools)
+                                     tools=tools, think=thinking,
+                                     temperature=temperature)
             finally:
                 # Drop the nudge the moment its round is over — including a round
                 # that raised, whose handler below still persists turn_messages.
@@ -1266,7 +1299,12 @@ def _warm() -> None:
                     {"role": "user", "content": _WARM_PROBE},
                 ],
                 "tools": TOOLS,
-                "think": False,
+                # The owner's setting, because it changes the rendered prompt:
+                # the first request after flipping `think` re-read the whole
+                # prefix (15.4 s against 3.7 s, measured 2026-11-09), so a warm
+                # done the other way would cache a prefix the first question
+                # can't use.
+                "think": themis.pythia_thinking(),
                 "keep_alive": _KEEP_ALIVE,
                 # Same runner as _chat() will want — see docstring (1).
                 "options": dict(_OPTIONS, num_predict=_WARM_NUM_PREDICT),

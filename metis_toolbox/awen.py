@@ -1578,6 +1578,10 @@ def _take_a_turn(*, filling_silence: bool) -> None:
             system=SYSTEM_PROMPT,
             allow_tools=list(_ALLOWED_TOOLS),
             tool_overrides={"play_music": _play},
+            # Never think here, whatever the owner chose for her answers: this
+            # runs in the gap between songs, and reasoning would stretch the
+            # silence by 5-20 s (measured 2026-11-09).
+            think=False,
         )
     finally:
         # In a finally because ask() is documented never to raise and the label

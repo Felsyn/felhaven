@@ -135,5 +135,68 @@ class TestDerived(ThemisBase):
         self.assertFalse(themis.is_southern())
 
 
+class TestPythiaSettings(ThemisBase):
+    """Pythia's thinking and temperature (the MACHINE SPIRIT tab)."""
+
+    def test_the_defaults_change_nothing_pythia_sent_before(self):
+        self.assertIs(themis.pythia_thinking(), False)
+        self.assertIsNone(themis.pythia_temperature())    # the model's own
+
+    def test_save_pythia_round_trips(self):
+        themis.save_pythia(thinking=True, temperature=0.35)
+        self.assertIs(themis.pythia_thinking(), True)
+        self.assertEqual(themis.pythia_temperature(), 0.35)
+        themis.save_pythia(thinking=False, temperature=None)
+        self.assertIs(themis.pythia_thinking(), False)
+        self.assertIsNone(themis.pythia_temperature())
+
+    def test_the_temperature_keeps_two_decimals(self):
+        themis.save_pythia(thinking=False, temperature=0.30000000000000004)
+        self.assertEqual(themis.pythia_temperature(), 0.3)
+
+    def test_save_pythia_keeps_every_other_setting(self):
+        themis.save(latitude=10.5, longitude=-20.25, weather_location="Town",
+                    temperature_unit="C", clock_24h=True)
+        themis.save_pythia(thinking=True, temperature=1.4)
+        s = themis.load()
+        self.assertEqual((s["latitude"], s["longitude"], s["weather_location"],
+                          s["temperature_unit"], s["clock_24h"]),
+                         (10.5, -20.25, "Town", "C", True))
+
+    def test_the_settings_tab_save_keeps_pythias_settings(self):
+        """The Settings form doesn't show them, so its save must not reset them."""
+        themis.save_pythia(thinking=True, temperature=0.6)
+        themis.save(latitude=1.0, longitude=2.0)
+        self.assertIs(themis.pythia_thinking(), True)
+        self.assertEqual(themis.pythia_temperature(), 0.6)
+
+    def test_save_pythia_refuses_bad_values_and_writes_nothing(self):
+        for thinking, temperature in (("yes", None), (1, None), (False, -0.1),
+                                      (False, 2.01), (False, "hot"), (False, True)):
+            with self.subTest(thinking=thinking, temperature=temperature):
+                with self.assertRaises(themis.SettingsError):
+                    themis.save_pythia(thinking=thinking, temperature=temperature)
+                self.assertFalse(os.path.exists(themis._DATA_PATH))
+
+    def test_the_range_ends_are_allowed(self):
+        for value in (themis.TEMPERATURE_MIN, themis.TEMPERATURE_MAX):
+            themis.save_pythia(thinking=False, temperature=value)
+            self.assertEqual(themis.pythia_temperature(), value)
+
+    def test_a_bad_hand_edit_degrades_to_the_default(self):
+        """A string "false" must not switch the slow mode ON (bool("false") is
+        True), and a temperature out of range or not a number falls back to
+        the model's own."""
+        for raw in ({"pythia_thinking": "false"}, {"pythia_thinking": 1},
+                    {"pythia_temperature": 9}, {"pythia_temperature": "warm"},
+                    {"pythia_temperature": True}):
+            with self.subTest(raw=raw):
+                self._write(raw)
+                with self.assertLogs("METIS.themis", "WARNING"):
+                    s = themis.load()
+                self.assertIs(s["pythia_thinking"], False)
+                self.assertIsNone(s["pythia_temperature"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -32,9 +32,31 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import tempfile
+from pathlib import Path
+
 import requests
 
 import pythia
+import themis
+
+_saved_settings_path = None
+_settings_dir = None
+
+
+def setUpModule():
+    """Pythia reads the owner's thinking and temperature from themis at every
+    request. Point themis at an empty temp folder, so these tests see the
+    defaults on every machine, never the checkout's own settings file."""
+    global _saved_settings_path, _settings_dir
+    _settings_dir = tempfile.TemporaryDirectory()
+    _saved_settings_path = themis._DATA_PATH
+    themis._DATA_PATH = Path(_settings_dir.name) / "felhaven_settings.json"
+
+
+def tearDownModule():
+    themis._DATA_PATH = _saved_settings_path
+    _settings_dir.cleanup()
 
 
 def _stream(*objs: dict) -> mock.Mock:
@@ -563,6 +585,101 @@ def _tool_round(*names_and_args) -> mock.Mock:
     return _stream({"message": {"role": "assistant", "content": "", "tool_calls": [
         {"function": {"name": n, "arguments": a}} for n, a in names_and_args]},
         "done": True})
+
+
+class TestPythiaGenerationSettings(unittest.TestCase):
+    """The owner's thinking and temperature (themis, the MACHINE SPIRIT tab)
+    reach every request, and nothing that decides the runner moves with them.
+    Settings are written into this module's temp folder (setUpModule)."""
+
+    def tearDown(self):
+        try:
+            os.remove(themis._DATA_PATH)
+        except FileNotFoundError:
+            pass
+
+    def _payload(self, **ask_kwargs):
+        with mock.patch("pythia.requests.post",
+                        return_value=_stream(_final("hi"))) as post:
+            pythia.ask("hi", **ask_kwargs)
+        return post.call_args.kwargs["json"]
+
+    def _warm_payload(self):
+        with mock.patch("pythia.machine_spirit.effective_prompt",
+                        return_value="SPIRIT"), \
+                mock.patch("pythia.requests.post",
+                           return_value=_warm_response()) as post:
+            pythia._warm()
+        return post.call_args.kwargs["json"]
+
+    def test_the_defaults_send_what_felhaven_always_sent(self):
+        payload = self._payload()
+        self.assertIs(payload["think"], False)
+        self.assertEqual(payload["options"], dict(pythia._OPTIONS))
+        self.assertNotIn("temperature", payload["options"])   # the model's own
+
+    def test_thinking_asks_for_it_with_a_bigger_budget(self):
+        themis.save_pythia(thinking=True, temperature=None)
+        payload = self._payload()
+        self.assertIs(payload["think"], True)
+        self.assertEqual(payload["options"]["num_predict"],
+                         pythia._NUM_PREDICT_THINKING)
+        self.assertGreater(pythia._NUM_PREDICT_THINKING, pythia._NUM_PREDICT)
+
+    def test_a_temperature_is_sent_as_set(self):
+        themis.save_pythia(thinking=False, temperature=0.4)
+        options = self._payload()["options"]
+        self.assertEqual(options["temperature"], 0.4)
+        self.assertEqual(options["num_predict"], pythia._NUM_PREDICT)
+
+    def test_no_setting_moves_the_runner(self):
+        """num_ctx keys the resident runner; a change reloads it (~70 s)."""
+        for thinking, temperature in ((False, None), (True, None),
+                                      (False, 0.2), (True, 1.6)):
+            with self.subTest(thinking=thinking, temperature=temperature):
+                themis.save_pythia(thinking=thinking, temperature=temperature)
+                self.assertEqual(self._payload()["options"]["num_ctx"],
+                                 pythia._OPTIONS["num_ctx"])
+                self.assertEqual(self._warm_payload()["options"]["num_ctx"],
+                                 pythia._OPTIONS["num_ctx"])
+
+    def test_the_warm_follows_the_thinking_setting(self):
+        """Thinking changes the rendered prompt, so a warm done the other way
+        caches a prefix the first question can't use."""
+        self.assertIs(self._warm_payload()["think"], False)
+        themis.save_pythia(thinking=True, temperature=None)
+        self.assertIs(self._warm_payload()["think"], True)
+
+    def test_a_caller_can_turn_thinking_off(self):
+        themis.save_pythia(thinking=True, temperature=0.7)
+        payload = self._payload(think=False)
+        self.assertIs(payload["think"], False)
+        self.assertEqual(payload["options"]["num_predict"], pythia._NUM_PREDICT)
+        self.assertEqual(payload["options"]["temperature"], 0.7)
+
+    def test_both_rounds_of_a_question_use_the_settings_read_at_its_start(self):
+        themis.save_pythia(thinking=True, temperature=0.5)
+        tool_round = _stream({"message": {"role": "assistant", "content": "",
+                                          "tool_calls": [{"function": {
+                                              "name": "get_weather",
+                                              "arguments": {}}}]},
+                              "done": True})
+
+        def weather(**_):
+            # The owner flips both mid-answer: this question must not notice.
+            themis.save_pythia(thinking=False, temperature=1.2)
+            return {"temp_f": 70}
+
+        with mock.patch("pythia.requests.post",
+                        side_effect=[tool_round, _stream(_final("70."))]) as post, \
+                mock.patch.dict(pythia._DISPATCH, {"get_weather": weather}):
+            pythia.ask("weather?")
+        rounds = [call.kwargs["json"] for call in post.call_args_list]
+        self.assertEqual(len(rounds), 2)
+        for payload in rounds:
+            self.assertIs(payload["think"], True)
+            self.assertEqual(payload["options"]["temperature"], 0.5)
+        self.assertIs(self._payload()["think"], False)     # the next question does
 
 
 class TestPythiaRiteRecords(unittest.TestCase):

@@ -121,9 +121,12 @@ class DaedalusPanel(tk.Frame):
             highlightbackground=C["border"], highlightthickness=1, borderwidth=0,
             wrap="none", height=1, padx=6, pady=4, state="disabled",
         )
-        self._text.pack(side="left", fill="both", expand=True)
+        # The scroll lane first (CONVENTIONS §7): the Text asks for 80
+        # characters of width, and packed first it took the whole row of a
+        # narrow window and pack unmapped the scrollbar.
         scroll = PhosphorScroll(text_row, command=self._text.yview)
         scroll.pack(side="right", fill="y")
+        self._text.pack(side="left", fill="both", expand=True)
         self._text.configure(yscrollcommand=scroll.set)
         self._text.bind("<Shift-MouseWheel>", self._on_shift_wheel)
 

@@ -71,9 +71,12 @@ class EmanonPanel(tk.Frame):
             wrap="word", state="disabled", borderwidth=0, highlightthickness=0,
             padx=2, pady=2,
         )
-        self._log.pack(side="left", fill="both", expand=True)
+        # The scroll lane first (CONVENTIONS §7): the Text asks for 80
+        # characters of width, and packed first it took the whole row of a
+        # narrow window and pack unmapped the scrollbar.
         scroll = PhosphorScroll(self._events_frame, command=self._log.yview)
         scroll.pack(side="right", fill="y")
+        self._log.pack(side="left", fill="both", expand=True)
         self._log.configure(yscrollcommand=scroll.set)
 
         # Level colours as text tags (replacing the old per-Label colouring).

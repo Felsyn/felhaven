@@ -46,7 +46,7 @@ the module's own docstring, where it cannot drift from the code.
 | [Scribe](scribe.md) | Store the to-do list and notes. |
 | [Selene](selene.md) | Report the moon's phase, illumination, moonrise, and moonset. |
 | [Sphynx](sphynx.md) | Verify a PIN against the stored hash, and track how many attempts remain. |
-| [Themis](themis.md) | Own the per-install user preferences (location, temperature unit, clock format). |
+| [Themis](themis.md) | Own the per-install user preferences: location, units, clock, and how Pythia answers. |
 | [Virgil](virgil.md) | Give a tooltip its words: a module's own gloss, or a glossary entry. |
 | [Voices](voices.md) | Resolve the voice Felhaven should speak in. |
 | [Zeno](zeno.md) | Evaluate Python arithmetic expressions safely, step by step. |

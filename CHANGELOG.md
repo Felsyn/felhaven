@@ -14,6 +14,14 @@ New here? Start with [`README.md`](README.md) for what Felhaven is,
 [`SETUP.md`](SETUP.md) to run it, and [`CONVENTIONS.md`](CONVENTIONS.md) for how
 the code is put together.
 
+- `2026-11-09` — `panels/machine_spirit_panel.py`: the editor gets the right-click Cut / Copy / Paste / Select All, Control-a and undo every editable box has; its scrollbar is packed first, so a narrow window no longer squeezes it out.
+- `2026-11-09` — `CONVENTIONS.md` §7: pack the scrollbar before the widget it scrolls.
+- `2026-11-09` — `panels/home_panel.py`, `panels/emanon_panel.py`, `panels/daedalus_panel.py`, `panels/euterpe_panel.py`: each text box's scrollbar is packed first, so a narrow window no longer squeezes it out.
+- `2026-11-09` — `tests/test_scroll_lanes.py`: new; every Text with a PhosphorScroll packs the scrollbar first.
+- `2026-11-09` — `themis.py`: Pythia's thinking (off) and temperature (none: the model's own) are per-install settings; `save()` keeps them, `save_pythia()` writes them, `_write()` is the one atomic write.
+- `2026-11-09` — `pythia.py`: each question reads thinking and temperature once; a thinking round gets a 3072-token budget; the warm follows the thinking setting; `ask(think=)` overrides it.
+- `2026-11-09` — `awen.py`: Auto-DJ turns never think.
+- `2026-11-09` — `panels/machine_spirit_panel.py`: THINKING (off/on) and TEMPERATURE (0.1 steps, or DEFAULT) under the narration voice, saved on click; the editor's starting request is 4 lines, so SAVE stays on screen at the minimum window.
 - `2026-11-09` — `panels/sidebar.py`: every row and group header carries a Virgil tooltip, a glossary entry from `_TIPS`.
 - `2026-11-09` — `panels/moderati_panel.py`, `panels/cogitator_panel.py`, `panels/vox_array_panel.py`: each tab label's tooltip is its module's gloss, from `_TIPS`.
 - `2026-11-09` — `panels/hephaestus_panel.py`: the CPU, RAM and DISK meters and the Wi-Fi, Internet and Ollama rows carry glossary tooltips; `AetherWidget.rows` holds the three rows.

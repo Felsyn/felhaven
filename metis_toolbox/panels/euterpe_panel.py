@@ -134,9 +134,12 @@ class EuterpePanel(tk.Frame):
             highlightcolor=C["amber"], highlightthickness=1, borderwidth=0,
             wrap="word", height=1, padx=6, pady=4, undo=True,
         )
-        self._editor.pack(side="left", fill="both", expand=True)
+        # The scroll lane first (CONVENTIONS §7): the Text asks for 80
+        # characters of width, and packed first it took the whole row of a
+        # narrow window and pack unmapped the scrollbar.
         scroll = PhosphorScroll(editor_row, command=self._editor.yview)
         scroll.pack(side="right", fill="y")
+        self._editor.pack(side="left", fill="both", expand=True)
         self._editor.configure(yscrollcommand=scroll.set)
 
         self._editor.bind("<Button-3>", self._show_text_menu)

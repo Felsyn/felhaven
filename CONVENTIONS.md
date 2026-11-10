@@ -367,6 +367,11 @@ to track whether the timer is still live.
   `theme.PhosphorScroll`, never `tk.Scrollbar` (§12 — the stock widget can't be
   themed on Windows). Bind the mouse wheel **only while hovering**
   (`<Enter>`/`<Leave>`) so stacked scroll frames don't fight over wheel events.
+  **Pack the scrollbar before the widget it scrolls.** A `tk.Text` asks for
+  80 characters (574 px at the base font); packed first, it takes the whole
+  row of a narrow window and pack unmaps the scrollbar, at exactly the size
+  where the text overflows (measured 2026-11-09 on all five text boxes).
+  `tests/test_scroll_lanes.py` holds every Text with a PhosphorScroll to it.
 - **Clickable rows**: `cursor="hand2"`, `<Button-1>` for the action, and a hover
   highlight flipping `fg` to `C["amber"]` on `<Enter>` and back on `<Leave>`.
 - **Tooltips**: a panel never builds its own. It calls
@@ -2644,3 +2649,32 @@ and when, one line per change, so a decision worth keeping must be written here.
   before §0 asked for a `Job:` field, whose fallback first line already fits.
   The panels come off the list as each gains one (BACKLOG); a stale
   exemption fails. *(2026-11-09.)*
+- **Pythia's thinking and temperature are the owner's, saved by Themis
+  (`themis.py`, `pythia.py`, the MACHINE SPIRIT tab).** Measured first on the
+  Obelisk (Ollama 0.40.13): gemma4:e2b lists `thinking` among its
+  capabilities; with it on, each round writes 150–650 tokens of reasoning
+  (3–10 s at ~68 tok/s), and tool calls stayed correct (6 of 6). Changing
+  temperature, top_p or seed reloads nothing (3–4 ms), unlike num_ctx.
+  Decisions:
+  (1) **Themis owns them**, beside the planned model choice: they are
+  per-install preferences, read at each request the way Aura reads the
+  location. `save()` carries them over, because the Settings form doesn't
+  show them, and `save_pythia()` carries the location over.
+  (2) **The defaults change nothing.** Thinking is off, and temperature is
+  None, which sends no temperature at all, so the model keeps its own
+  default (gemma4:e2b: 1.0) — and a different model later keeps its own.
+  (3) **The reasoning is still dropped**, never shown or spoken (the
+  2026-07-31 rule). Thinking makes an answer slower and more careful, not
+  longer on screen.
+  (4) **A thinking round gets a 3072-token budget.** The reasoning counts
+  against `num_predict`; one measured round spent 656 of the 1024.
+  (5) **Read once per question**, so a change mid-answer applies to the next
+  one. The warm follows the thinking setting, because flipping it changes the
+  rendered prompt: the first request after a flip re-read the whole prefix
+  (15.4 s against 3.7 s).
+  (6) **Auto-DJ turns never think** (`ask(think=False)`): a pick runs in the
+  gap between songs, and reasoning would stretch the silence by 5–20 s. The
+  owner's temperature does apply to them.
+  Left out on purpose: top_p and top_k (the same job as temperature, harder
+  to explain), num_ctx (every change reloads the model, ~70 s), and seed
+  (only useful for testing). *(2026-11-09.)*

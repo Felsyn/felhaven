@@ -218,10 +218,11 @@ _WRITES: dict[str, Write] = {
         _ATOMIC, frozenset({"app folder"}), frozenset({"constant", "app path"}),
         "trusted", "scribe_data.json beside this file; mkstemp in the same folder, "
         "os.replace."),
-    "themis.py::save": Write(
+    "themis.py::_write": Write(
         _ATOMIC, frozenset({"app folder"}), frozenset({"constant", "app path"}),
         "trusted", "felhaven_settings.json beside this file; mkstemp in the same "
-        "folder, os.replace."),
+        "folder, os.replace. Called by save() and save_pythia(), which validate "
+        "the values; the path is the constant either way."),
     "voices.py::save_pythia_voice": Write(
         _ATOMIC, frozenset({"app folder"}), frozenset({"constant", "app path"}),
         "trusted", "voice_config.json beside this file; mkstemp in the same folder, "

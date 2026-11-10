@@ -370,9 +370,12 @@ class HomePanel(tk.Frame):
             borderwidth=0, highlightthickness=1, highlightbackground=C["border"],
             wrap="word", state="disabled", padx=8, pady=6, height=1,
         )
-        self._log.pack(side="left", fill="both", expand=True)
+        # The scroll lane first (CONVENTIONS §7): a Text also asks for 80
+        # characters of width, 658 px in this font, and packed first it took
+        # the whole row of a narrow window and pack unmapped the scrollbar.
         scroll = PhosphorScroll(log_row, command=self._log.yview)
         scroll.pack(side="right", fill="y")
+        self._log.pack(side="left", fill="both", expand=True)
         self._log.configure(yscrollcommand=scroll.set)
         self._log.tag_configure("you",     foreground=C["text2"])
         self._log.tag_configure("pythia",  foreground=C["text1"])

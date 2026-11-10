@@ -670,6 +670,12 @@ class TestFires(_AwenCase):
         self.assertEqual(kwargs["allow_tools"], ["play_music"])
         self.assertIn("play_music", kwargs["tool_overrides"])
 
+    def test_the_turn_never_thinks(self):
+        """A pick runs in the gap between songs. The owner's thinking setting is
+        for her answers; here it would stretch the silence by 5-20 s."""
+        self._play_then_end()
+        self.assertIs(self.ask.call_args.kwargs["think"], False)
+
     def test_the_turn_carries_no_chat_history(self):
         """Stateless by design — see the module's *Stateless* section."""
         self._play_then_end()
