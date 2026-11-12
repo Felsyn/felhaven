@@ -122,27 +122,34 @@ FACE_L = [
     (656, 962),
 ]
 
-# Landmarks on the left half of the face. The mesh is triangulated on this
-# half and mirrored, so the face is exactly symmetric and the hood is not.
-FACE_MARKS_L = [
-    # eye ring, outer corner round to the inner corner and back
-    (502, 600), (522, 587), (550, 581), (578, 589), (601, 606),
-    (576, 622), (548, 629), (520, 619),
-    # brow
-    (488, 556), (528, 541), (574, 544), (616, 566),
-    # forehead
-    (548, 476), (604, 462), (577, 512), (512, 508), (630, 520),
-    # nose flank and nostril
-    (628, 642), (622, 702), (612, 752), (630, 781), (645, 797),
-    # cheekbone and cheek
-    (494, 676), (536, 684), (584, 694), (506, 744), (558, 762),
-    (522, 810), (577, 818),
-    # mouth
-    (598, 848), (628, 836), (628, 869),
-    # jaw
-    (562, 862), (602, 896), (628, 924),
-]
-FACE_AXIS_Y = [440, 500, 560, 610, 665, 720, 770, 800, 834, 852, 872, 915]
+# The face's skeleton, LEFT half (mirrored; points on the axis stay put).
+# What gives the reference its character is a few lines that catch the light
+# harder than the rest — a brow that angles down to the nose, a long narrow
+# bridge, high cheekbones, a hard jaw — over a filler mesh that stays dim.
+# Each feature: (polyline, intensity, width).
+FACE_FEATURES_L = {
+    "brow":      ([(474, 544), (510, 548), (550, 557), (590, 570), (626, 588), (656, 598)], 0.72, 1.15),
+    "bridge":    ([(656, 598), (656, 690), (656, 772)], 0.70, 1.15),
+    "nose_side": ([(634, 612), (627, 690), (619, 750), (626, 779), (643, 792), (656, 788)], 0.50, 1.0),
+    "cheekbone": ([(466, 640), (494, 688), (538, 706), (584, 712), (619, 750)], 0.72, 1.15),
+    "zygoma":    ([(498, 598), (480, 628), (466, 640)], 0.42, 1.0),
+    "smile":     ([(619, 768), (606, 810), (597, 850)], 0.48, 1.0),
+    "lip_up":    ([(597, 850), (626, 840), (656, 846)], 0.52, 1.0),
+    "lip_low":   ([(597, 850), (627, 868), (656, 872)], 0.45, 1.0),
+    "jaw":       ([(476, 760), (490, 820), (545, 867), (600, 914), (656, 962)], 0.66, 1.15),
+    "chin":      ([(614, 926), (656, 936)], 0.50, 1.0),
+}
+# The eye's lids, outer corner -> inner. The upper lid falls toward the nose
+# with the brow; together they read as a stare, not a pair of lamps.
+LID_UP_L = [(498, 598), (526, 587), (562, 587), (602, 605)]
+LID_LOW_L = [(498, 598), (530, 619), (570, 623), (602, 605)]
+# Where the light catches hardest: brighter nodes, as in the reference.
+FACE_HUBS_L = [(474, 544), (626, 588), (538, 706), (490, 820), (597, 850),
+               (626, 779), (656, 772), (656, 962), (656, 598)]
+# A few extra seeds where the skeleton leaves the mesh to guess.
+FACE_MARKS_L = [(548, 476), (604, 462), (577, 512), (512, 508), (630, 522),
+                (520, 760), (562, 772), (530, 812), (566, 830), (566, 892)]
+FACE_AXIS_Y = [440, 500, 560, 640, 730, 810, 900]
 
 
 # --------------------------------------------------------------------------
@@ -271,6 +278,16 @@ class Near:
         if not segs:
             return self.r
         return min(self.r, min(dist_to_seg(x, y, *seg) for seg in segs))
+
+
+def densify(path, maxlen):
+    """The path's own vertices, plus evenly spaced points on any span longer
+    than maxlen — so the corners survive, unlike resample()."""
+    out = [tuple(path[0])]
+    for (ax, ay), (bx, by) in zip(path, path[1:]):
+        n = max(1, int(math.ceil(math.hypot(bx - ax, by - ay) / maxlen)))
+        out += [(ax + (bx - ax) * k / n, ay + (by - ay) * k / n) for k in range(1, n + 1)]
+    return out
 
 
 def resample(path, spacing, closed=False):
@@ -859,70 +876,117 @@ def _cavity(sc, rng, per_px):
                 "mesh", rng.uniform(0.30, 0.65))
 
 
+def _face_shade(x, y):
+    """How much light the face gets at a point, about 0.15 .. 1.3.
+
+    The reference is lit unevenly, and that is most of its character: the
+    forehead sits in the brim's shadow, the eyes burn inside dark sockets,
+    the light gathers down the nose, the cheekbones and the mouth, and the
+    cheeks fall into hollows under the bone.
+    """
+    s = 0.42 + 0.58 * smoothstep(430, 585, y)              # under the brim
+    for ex, ey in (EYE_L, EYE_R):                          # the sockets
+        d = ((x - ex) / 80.0) ** 2 + ((y - ey + 6) / 42.0) ** 2
+        s *= 0.28 + 0.72 * smoothstep(0.55, 1.7, d)
+    ax = abs(x - CX)                                       # cheek hollows
+    hollow = smoothstep(70, 130, ax) * smoothstep(712, 770, y) * (1 - smoothstep(850, 905, y))
+    s *= 1 - 0.50 * hollow
+    s += 0.38 * math.exp(-((x - CX) / 105.0) ** 2 - ((y - 745) / 115.0) ** 2)   # midface
+    return s
+
+
 def _face(sc, rng, per_px):
-    """The mask: triangulated on the left half, mirrored for exact symmetry,
-    and lit by the eyes. The face has no outline of its own — it is told
-    from the cavity by the density and brightness of its mesh, as in the
-    reference — and each eye burns inside a socket cut out of that mesh."""
+    """The mask: a skeleton of feature lines over a dim triangulated mesh,
+    lit unevenly (_face_shade). Triangulated on the left half and mirrored,
+    so it is exactly symmetric. It has no outline of its own — it is told
+    from the cavity by its mesh — and each eye burns inside a socket cut out
+    of that mesh, under a brow that angles down to the nose."""
     face_l = OUT["face_l"]
     half = face_l + [(CX, face_l[-1][1]), (CX, face_l[0][1])]
 
-    base = max(per_px * 10.0, 34.0)
+    def mirror(p):
+        return (2 * CX - p[0], p[1])
+
+    # Denser down the middle of the face, where the features crowd; sparser
+    # at the temples and up the shaded forehead.
+    base = max(per_px * 9.0, 30.0)
+
+    def spacing_at(x, y):
+        return (base * (0.80 + 0.50 * smoothstep(50, 190, abs(x - CX)))
+                * (1.0 + 0.35 * (1 - smoothstep(470, 570, y))))
+
     seeds = [(float(x), float(y)) for x, y in FACE_MARKS_L]
     seeds += [(CX, float(y)) for y in FACE_AXIS_Y]
+    for line, _i, _w in FACE_FEATURES_L.values():
+        seeds += [p for p in densify(line, base * 1.1) if p[0] <= CX]
+    seeds += LID_UP_L + LID_LOW_L[1:-1]
     seeds += resample(face_l, base * 1.1)
-    fill = scatter(rng, (440, 400, CX - 6, 970), lambda x, y: base * 1.3,
+    seeds = list(dict.fromkeys((round(x, 2), round(y, 2)) for x, y in seeds))
+    fill = scatter(rng, (440, 400, CX - 6, 970), spacing_at,
                    lambda x, y: point_in_poly(x, y, half) and x < CX - 10,
-                   cell=base, tries=600, seeds=seeds)
+                   cell=base * 0.8, tries=900, seeds=seeds)
     pts = seeds + fill
 
     def keep_tri(a, b, c):
         mx, my = (a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3
         return point_in_poly(mx, my, half)
 
-    # The socket is the eye ring's own landmarks: drop every edge that would
-    # cross the eye, and the dark almond falls out of the mesh by itself.
-    ring = [(float(x), float(y)) for x, y in FACE_MARKS_L[:8]]
+    # The socket is the lids' own almond: drop every edge across the eye.
+    almond = LID_UP_L + LID_LOW_L[::-1][1:-1]
     edges = [(a, b) for a, b in tri_edges(pts, delaunay(pts), keep_tri)
              if not point_in_poly((pts[a][0] + pts[b][0]) / 2,
-                                  (pts[a][1] + pts[b][1]) / 2, ring)]
+                                  (pts[a][1] + pts[b][1]) / 2, almond)]
 
-    def eyelight(x, y):
-        d = min(math.dist((x, y), EYE_L), math.dist((x, y), EYE_R))
-        return 0.55 * math.exp(-(d / 115.0) ** 2)
-
+    # The filler mesh: dim, and dimmer still toward the mask's edge, so the
+    # skeleton carries the face.
     near_rim = Near(face_l, 40.0)
     for a, b in edges:
         pa, pb = pts[a], pts[b]
         mx, my = (pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2
-        on_axis = pa[0] == CX and pb[0] == CX
-        # dimmer up the forehead, where the brim shades it; dimmer at the
-        # very edge, so the mask fades into the cavity instead of being cut
-        shade = 0.62 + 0.38 * smoothstep(430, 560, my)
-        edge = near_rim(mx, my) / 40.0
-        i = rng.uniform(0.55, 0.82) * shade * (0.65 + 0.35 * edge) + eyelight(mx, my)
-        if on_axis:
-            sc.line([pa, pb], "mesh_hot", i + 0.15)
-        else:
-            sc.line([pa, pb], "mesh_hot", i)
-            sc.line([(2 * CX - pa[0], pa[1]), (2 * CX - pb[0], pb[1])], "mesh_hot", i)
+        fade = 0.55 + 0.45 * near_rim(mx, my) / 40.0
+        i = rng.uniform(0.42, 0.66) * _face_shade(mx, my) * fade
+        sc.line([pa, pb], "mesh_hot", i)
+        if not (pa[0] == CX and pb[0] == CX):
+            sc.line([mirror(pa), mirror(pb)], "mesh_hot", i)
 
+    # The skeleton, over it: span by span, each a little brighter or dimmer
+    # than its neighbours, so it reads as mesh edges that happen to line up
+    # along the bone, not as a stroke drawn on top.
+    for line, i, width in FACE_FEATURES_L.values():
+        on_axis = all(x == CX for x, _ in line)
+        for a, b in zip(line, line[1:]):
+            k = i * rng.uniform(0.70, 1.15)
+            sc.line([a, b], "mesh_hot", k, width)
+            if not on_axis:
+                sc.line([mirror(a), mirror(b)], "mesh_hot", k, width)
+
+    # Nodes: dim where the face is in shadow, a few catching hard; the hubs
+    # of the skeleton brightest of all.
+    hubs = set(FACE_HUBS_L)
     for x, y in pts:
-        for px in ((x, y), (2 * CX - x, y)) if x < CX else ((x, y),):
-            hot = rng.random() < 0.18
-            j = 0.62 + eyelight(*px) + (0.55 if hot else 0.0)
-            sc.dot(*px, 2.6 if hot else 1.9, "mesh_hot", j)
+        if (x, y) in hubs:
+            continue
+        for p in ((x, y), mirror((x, y))) if x < CX else ((x, y),):
+            hot = rng.random() < 0.12
+            sc.dot(*p, 2.4 if hot else 1.8, "mesh_hot",
+                   (0.30 + 0.45 * _face_shade(*p)) * (1.7 if hot else 1.0))
+    for x, y in FACE_HUBS_L:
+        for p in ((x, y), mirror((x, y))) if x < CX else ((x, y),):
+            sc.dot(*p, 8, "mesh", 0.30)
+            sc.dot(*p, 3.2, "mesh_hot", 1.35)
 
-    # The eyes, burning inside their sockets: a wide faint halo, a tighter
-    # one, a hot core, and a short flare. Bloom does the rest.
+    # The eyes: lids traced in the eye's own light, then a small, intense
+    # core with a short flare. Small on purpose — a stare, not headlamps.
+    for lid, i in ((LID_UP_L, 0.42), (LID_LOW_L, 0.20)):
+        sc.line(lid, "eye", i, 1.3)
+        sc.line([mirror(p) for p in lid], "eye", i, 1.3)
     for ex, ey in (EYE_L, EYE_R):
-        sc.glow(ex, ey, 150, 110, "eye", 0.10)
-        sc.glow(ex, ey, 58, 42, "eye", 0.40)
-        sc.glow(ex, ey, 22, 16, "eye", 1.10)
-        sc.dot(ex, ey, 4.5, "mesh_hot", 1.8)
-        sc.line([(ex - 70, ey), (ex + 70, ey)], "eye", 0.30)
-        sc.line([(ex - 26, ey), (ex + 26, ey)], "eye", 0.85, 1.4)
-        sc.line([(ex, ey - 22), (ex, ey + 20)], "eye", 0.45)
+        sc.glow(ex, ey, 120, 70, "eye", 0.07)
+        sc.glow(ex, ey, 44, 24, "eye", 0.36)
+        sc.glow(ex, ey, 17, 10, "eye", 1.00)
+        sc.dot(ex, ey, 3.6, "mesh_hot", 1.9)
+        sc.line([(ex - 36, ey), (ex + 36, ey)], "eye", 0.30)
+        sc.line([(ex - 14, ey), (ex + 14, ey)], "eye", 0.80, 1.3)
 
 
 def _trim(sc, rng):

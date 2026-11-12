@@ -57,6 +57,15 @@ display gets native pixels, not a stretched, soft frame.
   HUD frame at the screen's edges, schematic and dust across the full width,
   glyphs easing outward, and the cloak falling past the shoulders into arms
   instead of stopping at the poster's edge.
+- **The face is a skeleton over a mesh.** A few feature lines catch the
+  light harder than the filler mesh: a brow angling down to the nose, the
+  bridge, high cheekbones, the lips and a hard jaw. The mesh is built on them
+  and stays dim. They are drawn span by span, each a little brighter or
+  dimmer, so they read as edges lining up along the bone, not strokes on
+  top. A lighting pass does the rest: the forehead sits in the brim's
+  shadow, the eyes burn in dark sockets cut out of the mesh, light gathers
+  down the nose, cheekbones and mouth, and the cheeks fall into hollows.
+  Exactly symmetric: triangulated on the left half and mirrored.
 - **Reference-measured.** The hood silhouette was measured off the reference
   row by row, and the colours were sampled region by region.
 - **Seeded.** `seed=7` draws the same figure every time; another seed draws a
@@ -93,7 +102,5 @@ the eyes, a few trim traces, and some node twinkle.
 From the review of the first still, not yet done:
 
 - volume in the hood: facets shaded as if lit from the front, and fold lines
-- character in the face: brow ridge, cheekbones, nose bridge and jaw picked
-  out, with the inner brows angled down
 - the robe as four or five draped folds, not free strands
 - a slight head tilt and an uneven hood, so it reads less like a diagram
