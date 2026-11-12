@@ -8,73 +8,92 @@ then on it follows every app rule.
 
 ---
 
-## Pythia face v2: static prototype
+## Pythia face v2: full-screen still
 
 The hooded wire-frame construct from `reference/pythia_v2_reference.webp`,
-drawn in code on a `tk.Canvas`: stdlib only, no image assets, no Pillow. It
-is still on purpose. This pass settles the look, and animation comes after.
+drawn in code with no image assets, and shown **full screen only**. It is
+still on purpose: this pass settles the look, and animation comes after.
 
 | File | Job |
 |---|---|
-| `pythia_face_v2.py` | Builds the scene (pure geometry, no tk) and paints it on a canvas. Run it for a live window. |
-| `render_still.py` | Paints each framing on a real canvas, grabs it and writes `renders/*.png` |
+| `pythia_face_v2.py` | Builds the scene (pure geometry: no tk, no numpy) and shows it full screen |
+| `pythia_v2_raster.py` | The renderer: scene to pixels, with additive light, anti-aliasing and bloom (numpy) |
+| `pythia_v2_font.py` | A stroke font, so the HUD text glows like the wire |
+| `render_still.py` | Writes the same pixels to `renders/*.png`, headless |
 | `reference/` | The poster the look was drawn from |
-| `renders/` | The current stills |
 
 ```bash
-# a window (Windows or Linux): poster|face, reference|phosphor
-python sandbox/pythia_face_v2.py poster reference
-python sandbox/pythia_face_v2.py face phosphor
+# full screen at the monitor's own resolution; Escape or q closes it
+python sandbox/pythia_face_v2.py                # reference colourway
+python sandbox/pythia_face_v2.py phosphor       # Felhaven's palette.C
 
-# the PNGs, headless on Linux
-xvfb-run -s "-screen 0 1400x2000x24" python3 sandbox/render_still.py
-# on Windows (grabs with Pillow; --small if the screen is shorter than 1936 px)
-python sandbox\render_still.py --small
+# stills: the 1080p pair by default; --all adds 1440p and the poster framing
+python sandbox/render_still.py
+python sandbox/render_still.py --size 3840x2160
 ```
+
+Needs numpy, which the app already has: it is in `requirements.txt` for
+Calliope. On Windows the window declares itself DPI-aware, so a scaled
+display gets native pixels, not a stretched, soft frame.
 
 ### How it is built
 
-- **Reference coordinates.** Every landmark is a pixel of the 1312×1936
-  poster. The hood silhouette was measured off it row by row, and the colours
-  were sampled region by region. A `View` maps the poster onto any canvas, so
-  the poster and the 190×160 header framing come from the same geometry.
-- **Mesh.** Poisson-disc points plus landmark seeds, Delaunay-triangulated in
-  pure Python (Bowyer-Watson). Facet size is set in *output* pixels, so a small
-  canvas gets fewer, larger facets instead of the poster's mesh shrunk to mush.
-- **Face.** Triangulated on the left half and mirrored, so it is exactly
-  symmetric and the hood is not. It has no outline of its own: denser,
-  brighter mesh is what separates it from the cavity. The eye sockets are cut
-  out of the mesh rather than painted over it.
-- **Glow.** Tk has no alpha, so this uses v1's fake-alpha trick, generalised:
-  each primitive is a *role* plus an *intensity*, blended from the background
-  up to the role colour and then toward burnout white above 1.0. A line drawn
-  over a glow has to be brighter than the glow, which is why the face mesh is
-  lit by the eyes.
-- **Seeded.** `build_scene(..., seed=7)` draws the same figure every time.
-  Another seed draws a different figure that is just as valid.
+- **Scene, then pixels.** `build_scene()` is pure geometry: a display list of
+  lines, dots, glows and polygons in the poster's 1312×1936 coordinates.
+  `render()` turns that into an image. The window and the PNG stills are the
+  same pixels; a test grab of the full-screen window matched the still
+  exactly.
+- **Light adds up.** Lines and dots add into a light buffer, so a bundle of
+  strands burns brighter than any one strand, and a hot channel spills into
+  the others and burns toward white. Then a five-level bloom. A plain
+  `tk.Canvas` can do neither, which is why v2 is no longer drawn as canvas
+  items.
+- **Fills are opaque.** A fill covers the light drawn before it. That keeps
+  the cavity dark in front of the hood and lays a dark fabric band under the
+  gold trim, so gold sits on dark instead of washing out to white over the
+  blue mesh.
+- **Wide screens.** The poster's height fits the screen and the figure
+  stays centred. Everything else lays itself out on the visible stage: the
+  HUD frame at the screen's edges, schematic and dust across the full width,
+  glyphs easing outward, and the cloak falling past the shoulders into arms
+  instead of stopping at the poster's edge.
+- **Reference-measured.** The hood silhouette was measured off the reference
+  row by row, and the colours were sampled region by region.
+- **Seeded.** `seed=7` draws the same figure every time; another seed draws a
+  different one that is just as valid.
 
-### Renders
+### Cost
 
-| | |
-|---|---|
-| `pythia_v2_poster.png` | 1312×1936, reference colourway, every layer |
-| `pythia_v2_face_380x320.png` | The head, at twice the header slot |
-| `pythia_v2_face_190x160.png` | The head, at the size Hestia mounts v1 |
-| `pythia_v2_phosphor_*.png` | The same scene in Felhaven's own `palette.C` |
+One render at launch, while the window shows black. Measured in the sandbox
+container:
 
-### To decide before it moves into `panels/`
+| Screen | Scene | Render |
+|---|---|---|
+| 1920×1080 | 1.0 s | 2.0 s |
+| 2560×1440 | 0.8 s | 3.4 s |
+
+Animation must not re-render the whole frame each tick. The plan is to keep
+this frame as the static layer and re-composite only the regions that move:
+the eyes, a few trim traces, and some node twinkle.
+
+### To decide before it moves into the app
 
 1. **Colour.** The reference colourway uses blue and crimson that
    `palette.py` does not have; `palette.py` deliberately folds `blue` into
    green so the app reads monochrome. Either v2 adds keys for them (a visible
    palette decision), or it ships the phosphor colourway, which needs none.
-2. **v1's contract said no eyes, no mouth, no text.** v2 has eyes by design,
-   and at header size they carry the whole signal. The text (HUD and footer)
-   is poster-only; the face framing draws none.
-3. **Animation.** v1 draws 265 items at 190×160 and v2 draws about 1,330. A
-   20 fps loop should touch only what moves (the eyes, a few trim traces, some
-   node twinkle) and leave the mesh static. Mapping the four states
-   (idle / playing / thinking / speaking) onto that is the next step.
-4. **Tk limits are real.** Lines are aliased and overlaps occlude instead of
-   adding, on Windows too. The renders show what the widget can actually
-   draw, not a softened preview.
+2. **v1's rules said no eyes, no mouth, no text, and no numpy.** v2 has eyes
+   and HUD text by design. It uses numpy because a full screen is millions of
+   pixels, and pure Python cannot light them in a launch-time budget.
+3. **Where it lives.** Full screen means its own window or mode, not the
+   Hestia header slot v1 is mounted in.
+
+### Still to improve
+
+From the review of the first still, not yet done:
+
+- volume in the hood: facets shaded as if lit from the front, and fold lines
+- character in the face: brow ridge, cheekbones, nose bridge and jaw picked
+  out, with the inner brows angled down
+- the robe as four or five draped folds, not free strands
+- a slight head tilt and an uneven hood, so it reads less like a diagram

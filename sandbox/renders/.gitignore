@@ -1,0 +1,5 @@
+# Only the two 1080p stills are committed; --all and --size renders
+# regenerate in seconds.
+pythia_v2_*.png
+!pythia_v2_1920x1080.png
+!pythia_v2_phosphor_1920x1080.png

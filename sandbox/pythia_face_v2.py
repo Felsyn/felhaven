@@ -3,59 +3,61 @@ sandbox/pythia_face_v2.py — Pythia v2: the hooded wire-frame construct
 ======================================================================
 SANDBOX. Not part of the app: nothing in metis_toolbox/ imports this, and it
 sits outside the app root, so neither the suite nor the palette guard ever
-reads it. It moves into panels/ (as v1 did on 2026-09-01) once the look is
+reads it. It moves into the app (as v1 did on 2026-09-01) once the look is
 settled. Until then it is free to break every app rule it needs to.
 
-Job:         Build Pythia v2 as one STATIC frame and paint it on a tk.Canvas.
-             A hooded figure drawn entirely as wire mesh: a faceted hood
-             converging on a pointed apex, a dark triangulated face mask lit
-             by two glowing eyes, a gold circuit trim along the hood's opening
-             that crosses at the chest, and cloak strands sweeping down.
-             Optional poster dressing behind and around it: alchemical glyphs,
-             faint schematic traces, a HUD frame with its footer text.
+Job:         Build Pythia v2 as one STATIC full-screen frame. A hooded figure
+             drawn entirely as wire mesh: a faceted hood converging on a
+             pointed apex, a dark triangulated face mask lit by two glowing
+             eyes, a gold circuit band along the hood's opening that crosses
+             at the chest, and cloak strands sweeping down. Dressing behind
+             and around it: alchemical glyphs, faint schematic traces, dust,
+             and a HUD frame with its footer text.
 
-             Static first, on purpose. No animation loop yet: get the still
-             right, then decide what moves.
+             Static first, on purpose. No animation loop yet.
 
 Contract:    build_scene(view, colourway="reference", seed=7, layers=...)
-                 -> Scene. PURE: no tk anywhere in it. A display list of
-                 primitives in REFERENCE coordinates (the 1312x1936 poster the
-                 look was drawn from) plus the View that maps them to pixels.
-                 The same seed draws the same figure.
-             draw(canvas, scene) -> int   paints it, returns the item count
-             poster_view(w, h) / face_view(w, h) -> View
+                 -> Scene. PURE: no tk, no numpy. A display list of primitives
+                 in REFERENCE coordinates (the 1312x1936 poster the look was
+                 drawn from), plus the View that maps them to pixels and the
+                 colourway's roles. The same seed draws the same figure.
+             screen_view(w, h) -> View   the full-screen framing
+             poster_view()     -> View   the reference's own framing, kept
+                                         only to compare against it
+             show(colourway, seed)       full screen; Escape or q closes it
              COLOURWAYS — "reference" (the poster's blue, gold and crimson)
                           and "phosphor" (Felhaven's own palette.C)
 
-Layers:      "figure"     cloak, hood, cavity, face, eyes, trim
-             "particles"  the dust around the figure
-             "glyphs"     alchemical marks and schematic traces, behind
-             "hud"        frame, ticks and the footer text, in front
-             face_view() is meant for the figure alone: at the 190x160 the
-             Hestia header mounts v1 at, everything else is noise.
+             Pixels come from pythia_v2_raster.render(scene); text is turned
+             into strokes by pythia_v2_font, so it glows like the rest.
 
-Colour:      Tk has no per-item alpha, so every glow is a colour blended
-             toward the background (v1's fake-alpha trick, generalised): a
-             primitive carries a ROLE and an INTENSITY, and colour() mixes
-             bg -> role colour over 0..1, then role -> burnout above 1, like
-             an overdriven phosphor. Lines drawn over a glow therefore have to
-             be brighter than it, never dimmer, or they read as dark scratches
-             — which is why the face mesh is lit by the eyes (see _face).
+Stage:       Full screen is wider than the poster. screen_view() fits the
+             poster's HEIGHT to the screen and centres the figure; everything
+             that is not the figure lays itself out on view.stage() (the
+             visible area in reference coordinates): the HUD frame sits at
+             the screen's edges, the dust and the schematic run the full
+             width, the glyphs ease outward, and the cloak flares on past the
+             shoulders instead of stopping at the poster's edge.
+
+Primitives:  line(pts, role, i, width)   light along a polyline
+             dot(x, y, r, role, i)       a soft point of light, i at its peak
+             glow(x, y, rx, ry, role, i) a wide soft halo
+             patch(pts, role, i)         an emissive polygon (pads, bars)
+             fill(pts, role, i)          an OPAQUE paint: covers the light
+                                         drawn before it (the dark cavity
+                                         in front of the hood behind it)
+             Real bloom happens in the renderer, so nothing here draws a wide
+             dim line under a bright one to fake a glow.
 
 Density:     Mesh spacing is set in OUTPUT pixels and converted to reference
-             units through the view, so a small canvas gets fewer, larger
-             facets rather than the poster's mesh shrunk to mush.
+             units through the view, so a small window gets fewer, larger
+             facets rather than the full screen's mesh shrunk to mush.
 
-Tk limits:   Lines are aliased (Tk on X11 and on Windows GDI both), and
-             overlaps occlude rather than add. The render is an honest preview
-             of what the shipped widget can draw — no Pillow, no supersampling.
+Requires:    math, random (stdlib). palette.py from metis_toolbox/ for the
+             "phosphor" colourway only. show() needs tkinter and numpy.
 
-Requires:    math, random, tkinter (stdlib). palette.py from metis_toolbox/
-             for the "phosphor" colourway only.
-
-Demo:        python sandbox/pythia_face_v2.py [poster|face] [reference|phosphor]
-             Opens one window. q or Escape closes it.
-Stills:      sandbox/render_still.py writes the PNGs in sandbox/renders/.
+Run:         python sandbox/pythia_face_v2.py [reference|phosphor] [seed]
+Stills:      python sandbox/render_still.py   (headless, no display needed)
 """
 
 import math
@@ -63,6 +65,8 @@ import os
 import random
 import sys
 from dataclasses import dataclass, field
+
+import pythia_v2_font as font
 
 # --------------------------------------------------------------------------
 # reference frame — every coordinate below is a pixel of the 1312x1936 poster
@@ -90,11 +94,13 @@ HOOD_L = [
     (236, 885), (234, 912),     # widest: the bright node in the reference
     (244, 948), (258, 978), (276, 1004),   # the hem, resting on the shoulder
 ]
-# Shoulder, from under the hem out past the left edge, then the off-canvas
-# tail, so the cloak's mesh runs off the edges instead of being hemmed there.
+# Shoulder and arm, from under the hem out and down to below the bottom
+# edge. On the poster everything past x=0 is off-canvas; on a wide screen it
+# is the cloak's outer silhouette, so it is a real, lit edge.
 SHOULDER_L = [(276, 1004), (214, 1030), (160, 1066), (104, 1104), (58, 1128),
-              (14, 1162), (-90, 1230)]
-CLOAK_TAIL_L = [(-90, 2050), (CX, 2050)]
+              (14, 1162), (-52, 1226), (-112, 1322), (-158, 1450),
+              (-190, 1620), (-210, 1830), (-218, 2050)]
+CLOAK_TAIL_L = [(CX, 2050)]
 
 # The hood's opening (gold-trimmed), LEFT half, brim peak -> the V at the
 # chest. Close round the temples, opening wide below the cheekbones.
@@ -143,11 +149,11 @@ FACE_AXIS_Y = [440, 500, 560, 610, 665, 720, 770, 800, 834, 852, 872, 915]
 # colourways
 # --------------------------------------------------------------------------
 
-# Prototype literals. The app forbids a colour outside palette.py (CONVENTIONS
-# §7, tests/test_palette_guard.py); this file is outside the app, and these
-# are exactly the values a promotion would have to argue into palette.py — or
+# Prototype literals, sampled off the reference poster region by region. The
+# app forbids a colour outside palette.py (CONVENTIONS §7,
+# tests/test_palette_guard.py); this file is outside the app, and these are
+# exactly the values a promotion would have to argue into palette.py — or
 # drop in favour of the phosphor mapping below.
-# Sampled off the reference poster, region by region.
 REFERENCE = {
     "bg":          "#05080F",
     "cloak_fill":  "#0A1A33",
@@ -155,12 +161,11 @@ REFERENCE = {
     "mesh":        "#2F8FE0",
     "mesh_hot":    "#9EE6FF",
     "eye":         "#2E9BFF",
-    "trim":        "#F0B45A",
-    "glyph":       "#B04652",
+    "trim":        "#F5A83E",
+    "glyph":       "#C2384A",
     "ash":         "#8E9098",
     "hud":         "#B88A3C",
     "text":        "#D8CDB0",
-    "burnout":     "#FFFFFF",
 }
 
 
@@ -185,48 +190,14 @@ def _phosphor():
         "ash":         C["text3"],
         "hud":         C["amber"],
         "text":        C["text1"],
-        "burnout":     C["burnout"],
     }
 
 
 COLOURWAYS = {"reference": lambda: REFERENCE, "phosphor": _phosphor}
 
 
-def _rgb(h):
-    return (int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16))
-
-
-def _mix(c1, c2, t):
-    return tuple(int(round(a + (b - a) * t)) for a, b in zip(c1, c2))
-
-
-class Palette:
-    """role + intensity -> '#rrggbb'. 0 is the background, 1 the role's own
-    colour, and up to ~1.4 a burn toward the burnout white. Cached: a poster
-    asks for a few thousand colours drawn from a few hundred distinct ones."""
-
-    def __init__(self, roles):
-        self.roles = {k: _rgb(v) for k, v in roles.items()}
-        self.bg = roles["bg"]
-        self._cache = {}
-
-    def __call__(self, role, i):
-        q = round(max(0.0, min(i, 1.45)), 3)
-        key = (role, q)
-        c = self._cache.get(key)
-        if c is None:
-            base = self.roles[role]
-            if q <= 1.0:
-                rgb = _mix(self.roles["bg"], base, q)
-            else:
-                rgb = _mix(base, self.roles["burnout"], min(1.0, (q - 1.0) / 0.45) * 0.75)
-            c = "#%02x%02x%02x" % rgb
-            self._cache[key] = c
-        return c
-
-
 # --------------------------------------------------------------------------
-# geometry — pure functions, no tk
+# geometry — pure functions
 # --------------------------------------------------------------------------
 
 def catmull(pts, k=6):
@@ -278,9 +249,28 @@ def dist_to_seg(px, py, ax, ay, bx, by):
     return math.hypot(px - qx, py - qy)
 
 
-def dist_to_path(px, py, path):
-    return min(dist_to_seg(px, py, *path[i], *path[i + 1])
-               for i in range(len(path) - 1))
+class Near:
+    """Distance from a point to a polyline, exact up to rmax and capped there.
+
+    The segments are bucketed on a grid of rmax cells, so a lookup tests only
+    the handful near the point. Every caller here only cares within a few
+    facets of an edge (rim light, keep-outs), and the brute-force version was
+    nearly all of the scene's build time.
+    """
+
+    def __init__(self, path, rmax):
+        self.r = float(rmax)
+        self.grid = {}
+        for (ax, ay), (bx, by) in zip(path, path[1:]):
+            for gx in range(int(min(ax, bx) // rmax) - 1, int(max(ax, bx) // rmax) + 2):
+                for gy in range(int(min(ay, by) // rmax) - 1, int(max(ay, by) // rmax) + 2):
+                    self.grid.setdefault((gx, gy), []).append((ax, ay, bx, by))
+
+    def __call__(self, x, y):
+        segs = self.grid.get((int(x // self.r), int(y // self.r)))
+        if not segs:
+            return self.r
+        return min(self.r, min(dist_to_seg(x, y, *seg) for seg in segs))
 
 
 def resample(path, spacing, closed=False):
@@ -445,14 +435,13 @@ def _outlines():
 
 OUT = _outlines()
 
-
 # --------------------------------------------------------------------------
 # view + scene
 # --------------------------------------------------------------------------
 
 @dataclass
 class View:
-    """Reference coords -> canvas pixels: X = (x - x0) * scale."""
+    """Reference coords -> pixels: X = (x - x0) * scale."""
     w: int
     h: int
     x0: float
@@ -462,45 +451,58 @@ class View:
     def px(self, x, y):
         return ((x - self.x0) * self.scale, (y - self.y0) * self.scale)
 
+    @property
+    def stage(self):
+        """The visible area, in reference coordinates: (x0, y0, x1, y1)."""
+        return (self.x0, self.y0,
+                self.x0 + self.w / self.scale, self.y0 + self.h / self.scale)
 
-def _cover(w, h, rx0, ry0, rx1, ry1):
-    """Fill a w x h canvas with the reference rect, cropping the overflow."""
-    scale = max(w / (rx1 - rx0), h / (ry1 - ry0))
-    cx, cy = (rx0 + rx1) / 2, (ry0 + ry1) / 2
-    return View(w, h, cx - w / scale / 2, cy - h / scale / 2, scale)
+
+def screen_view(w, h):
+    """The full-screen framing: the whole poster fits (its height, on any
+    landscape screen), centred; the stage runs on past it on either side."""
+    scale = min(w / REF_W, h / REF_H)
+    return View(w, h, CX - w / scale / 2, REF_H / 2 - h / scale / 2, scale)
 
 
 def poster_view(w=1312, h=1936):
-    return _cover(w, h, 0, 0, REF_W, REF_H)
-
-
-def face_view(w=190, h=160):
-    """The hood and face, framed for the Hestia header's 190x160 slot: the
-    apex just inside the top edge, the crossed lapels at the bottom."""
-    return _cover(w, h, CX - 560, 40, CX + 560, 1200)
+    """The reference's own portrait framing — only for comparing against it."""
+    return screen_view(w, h)
 
 
 @dataclass
 class Scene:
     view: View
-    pal: Palette
+    roles: dict
     prims: list = field(default_factory=list)
 
-    # every primitive is a tuple; draw() switches on the first element
-    def line(self, pts, role, i, width=1.0, dash=None):
-        self.prims.append(("line", pts, role, i, width, dash))
-
-    def poly(self, pts, role, i):
-        self.prims.append(("poly", pts, role, i))
+    def line(self, pts, role, i, width=1.0):
+        self.prims.append(("line", pts, role, i, width))
 
     def dot(self, x, y, r, role, i):
         self.prims.append(("dot", x, y, r, role, i))
 
-    def ring(self, x, y, rx, ry, role, i, width=1.0):
-        self.prims.append(("ring", x, y, rx, ry, role, i, width))
+    def glow(self, x, y, rx, ry, role, i):
+        self.prims.append(("glow", x, y, rx, ry, role, i))
 
-    def text(self, x, y, s, role, i, size, anchor="center", bold=False):
-        self.prims.append(("text", x, y, s, role, i, size, anchor, bold))
+    def patch(self, pts, role, i):
+        self.prims.append(("patch", pts, role, i))
+
+    def fill(self, pts, role, i):
+        self.prims.append(("fill", pts, role, i))
+
+    def ring(self, x, y, rx, ry, role, i, width=1.0):
+        n = max(16, int(max(rx, ry) / 3))
+        self.line([(x + rx * math.cos(2 * math.pi * k / n), y + ry * math.sin(2 * math.pi * k / n))
+                   for k in range(n + 1)], role, i, width)
+
+    def text(self, x, y, s, role, i, size, anchor="center", min_px=0):
+        """Stroke text. min_px floors the size in screen pixels, so the HUD
+        stays legible however far the poster is scaled down to fit."""
+        size = max(size, min_px / self.view.scale)
+        width = max(1.0, size * self.view.scale * 0.075) / self.view.scale
+        for stroke in font.strokes(s, x, y, size, anchor):
+            self.line(stroke, role, i, width)
 
 
 ALL_LAYERS = ("glyphs", "particles", "figure", "hud")
@@ -508,7 +510,7 @@ ALL_LAYERS = ("glyphs", "particles", "figure", "hud")
 
 def build_scene(view, colourway="reference", seed=7, layers=ALL_LAYERS):
     rng = random.Random(seed)
-    sc = Scene(view, Palette(COLOURWAYS[colourway]()))
+    sc = Scene(view, COLOURWAYS[colourway]())
     # Reference px per output px. Mesh spacing is chosen in output pixels.
     per_px = 1.0 / view.scale
 
@@ -530,37 +532,46 @@ def build_scene(view, colourway="reference", seed=7, layers=ALL_LAYERS):
     return sc
 
 
+def _visible(sc, x, margin=0.0):
+    sx0, _, sx1, _ = sc.view.stage
+    return sx0 - margin <= x <= sx1 + margin
+
+
 # --------------------------------------------------------------------------
-# backdrop: a faint radial lift behind the head, then the schematic
+# backdrop: a faint lift behind the head, then the schematic
 # --------------------------------------------------------------------------
 
 def _backdrop(sc, rng):
+    sx0, _, sx1, _ = sc.view.stage
     # The barest lift behind the head, so the black is not dead flat.
-    for r, i in ((900, 0.10), (680, 0.18), (480, 0.26)):
-        sc.prims.append(("oval_fill", CX, 720, r * 0.85, r, "cloak_fill", i))
+    sc.glow(CX, 760, 1500, 1700, "cloak_fill", 0.14)
 
-    # Manhattan traces: the faint red circuitry either side of the hood.
-    for zx0, zx1 in ((60, 470), (850, 1260)):
-        for _ in range(16):
-            x = rng.uniform(zx0, zx1)
+    # Manhattan traces: faint red circuitry either side of the hood, densest
+    # near the figure and thinning toward the screen's edges.
+    for near, far in ((470, sx0 + 80), (850, sx1 - 80)):
+        lo, hi = min(near, far), max(near, far)
+        count = int(16 * (hi - lo) / 410)
+        for _ in range(count):
+            x = near + (far - near) * rng.random() ** 1.5
             y = rng.uniform(220, 1060)
             pts = [(x, y)]
             horiz = rng.random() < 0.5
             for _seg in range(rng.randint(2, 5)):
                 L = rng.uniform(30, 170) * rng.choice((-1, 1))
-                x = min(max(x + (L if horiz else 0), zx0), zx1)
+                x = min(max(x + (L if horiz else 0), lo), hi)
                 y = min(max(y + (0 if horiz else L), 200), 1080)
                 pts.append((x, y))
                 horiz = not horiz
-            sc.line(pts, "glyph", rng.uniform(0.16, 0.32))
+            sc.line(pts, "glyph", rng.uniform(0.18, 0.36))
             if rng.random() < 0.5:
-                sc.ring(*pts[-1], 4, 4, "glyph", 0.32)
-        for _ in range(4):
-            x = rng.uniform(zx0, zx1 - 100)
+                sc.ring(*pts[-1], 4, 4, "glyph", 0.36)
+        for _ in range(max(2, count // 4)):
+            x = near + (far - near) * rng.random() ** 1.5
+            x = min(max(x, lo), hi - 100)
             y = rng.uniform(240, 1000)
             w, h = rng.uniform(50, 120), rng.uniform(30, 90)
             sc.line([(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)],
-                    "glyph", rng.uniform(0.14, 0.24))
+                    "glyph", rng.uniform(0.16, 0.26))
 
 
 def _crescent(cx, cy, R, r, d, step=5):
@@ -583,54 +594,64 @@ def _span(a, b, step):
 
 
 def _glyphs(sc, rng):
+    """The alchemical marks flanking the hood. On a wide stage each one eases
+    outward (up to 1.45x its distance from the axis) as a whole, so the
+    figure gets room without the marks drifting off into the margins."""
+    sx0, _, sx1, _ = sc.view.stage
+    spread = min(1.45, max(1.0, (sx1 - sx0) / REF_W))
+
+    def at(x):
+        """How far a mark anchored at x moves."""
+        return (x - CX) * (spread - 1.0)
+
     g = "glyph"
     # Sol — the alchemical mark for gold — top left, "Au" beneath.
-    x, y = 270, 268
-    sc.ring(x, y, 48, 48, g, 0.75, 2)
-    sc.ring(x, y, 30, 30, g, 0.40)
-    sc.dot(x, y, 7, g, 0.85)
-    sc.line([(x, y - 92), (x, y - 48)], g, 0.45)
-    sc.line([(x, y + 48), (x, y + 78)], g, 0.45)
-    sc.line([(x - 84, y), (x - 48, y)], g, 0.40)
-    sc.line([(x + 48, y), (x + 84, y)], g, 0.40)
-    sc.text(x, y + 82, "Au", g, 0.70, 26)
-    sc.text(405, 265, "Au", g, 0.45, 18)
+    x, y = 270 + at(270), 268
+    sc.ring(x, y, 48, 48, g, 0.85, 2)
+    sc.ring(x, y, 30, 30, g, 0.45)
+    sc.dot(x, y, 7, g, 0.95)
+    sc.line([(x, y - 92), (x, y - 48)], g, 0.5)
+    sc.line([(x, y + 48), (x, y + 78)], g, 0.5)
+    sc.line([(x - 84, y), (x - 48, y)], g, 0.45)
+    sc.line([(x + 48, y), (x + 84, y)], g, 0.45)
+    sc.text(x, y + 84, "Au", g, 0.75, 26, min_px=13)
+    sc.text(405 + at(405), 265, "Au", g, 0.50, 18, min_px=11)
 
     # The element itself, top right, in ash grey, under a small ring.
-    sc.text(1012, 246, "Au", "ash", 0.85, 74)
-    sc.ring(983, 170, 15, 15, "ash", 0.75, 2)
-    sc.line([(983, 185), (983, 214)], "ash", 0.75, 2)
-    sc.text(1000, 292, "Au", "ash", 0.65, 22)
+    dx = at(1012)
+    sc.text(1012 + dx, 246, "Au", "ash", 0.85, 74)
+    sc.ring(978 + dx, 168, 15, 15, "ash", 0.75, 2)
+    sc.line([(978 + dx, 183), (978 + dx, 212)], "ash", 0.75, 2)
+    sc.text(1004 + dx, 298, "Au", "ash", 0.65, 22, min_px=12)
 
     # Luna — a crescent right of the hood, engraved with a second inner line.
-    sc.line(_crescent(1104, 402, 74, 66, 30), g, 0.85, 2)
-    sc.line(_crescent(1106, 402, 64, 60, 30), g, 0.35)
+    dx = at(1104)
+    sc.line(_crescent(1104 + dx, 402, 74, 66, 30), g, 0.90, 2)
+    sc.line(_crescent(1106 + dx, 402, 64, 60, 30), g, 0.38)
 
     # Moon within the circle, mid left, with its small finial.
-    x, y = 125, 868
-    sc.ring(x, y, 62, 62, g, 0.60, 2)
-    sc.ring(x, y, 54, 54, g, 0.25)
-    sc.line(_crescent(x + 6, y, 40, 36, 18), g, 0.60)
-    sc.ring(x, y - 82, 9, 9, g, 0.55)
-    sc.line([(x, y - 73), (x, y - 62)], g, 0.5)
+    x, y = 125 + at(125), 868
+    sc.ring(x, y, 62, 62, g, 0.65, 2)
+    sc.ring(x, y, 54, 54, g, 0.28)
+    sc.line(_crescent(x + 6, y, 40, 36, 18), g, 0.65)
+    sc.ring(x, y - 82, 9, 9, g, 0.6)
+    sc.line([(x, y - 73), (x, y - 62)], g, 0.55)
     for a in (200, 340):
         ca, sa = math.cos(math.radians(a)), math.sin(math.radians(a))
-        sc.line([(x + 62 * ca, y + 62 * sa), (x + 92 * ca, y + 92 * sa)], g, 0.4)
+        sc.line([(x + 62 * ca, y + 62 * sa), (x + 92 * ca, y + 92 * sa)], g, 0.45)
 
     # Lattice — a square of diagonals and a rotated square, mid right.
-    x, y, s = 1190, 858, 80
+    x, y, s = 1190 + at(1190), 858, 80
     sq = [(x - s, y - s), (x + s, y - s), (x + s, y + s), (x - s, y + s), (x - s, y - s)]
-    sc.line(sq, g, 0.65, 2)
-    sc.line([(x - s, y - s), (x + s, y + s)], g, 0.45)
-    sc.line([(x + s, y - s), (x - s, y + s)], g, 0.45)
-    sc.line([(x, y - s), (x + s, y), (x, y + s), (x - s, y), (x, y - s)], g, 0.45)
+    sc.line(sq, g, 0.70, 2)
+    sc.line([(x - s, y - s), (x + s, y + s)], g, 0.5)
+    sc.line([(x + s, y - s), (x - s, y + s)], g, 0.5)
+    sc.line([(x, y - s), (x + s, y), (x, y + s), (x - s, y), (x, y - s)], g, 0.5)
     for k in (-0.5, 0.5):
-        sc.line([(x + k * s, y - s), (x + k * s, y + s)], g, 0.25)
-        sc.line([(x - s, y + k * s), (x + s, y + k * s)], g, 0.25)
-    sc.line([(x, y - s - 40), (x, y - s)], g, 0.35)
-    sc.line([(x - s - 30, y), (x - s, y)], g, 0.35)
-
-    sc.text(46, 1100, "Au", "ash", 0.55, 16)
+        sc.line([(x + k * s, y - s), (x + k * s, y + s)], g, 0.28)
+        sc.line([(x - s, y + k * s), (x + s, y + k * s)], g, 0.28)
+    sc.line([(x, y - s - 40), (x, y - s)], g, 0.4)
+    sc.line([(x - s - 30, y), (x - s, y)], g, 0.4)
 
 
 # --------------------------------------------------------------------------
@@ -638,7 +659,7 @@ def _glyphs(sc, rng):
 # --------------------------------------------------------------------------
 
 def _cloak(sc, rng, per_px):
-    """Hood and shoulders as one triangulated shell around the opening.
+    """Hood, shoulders and arms as one triangulated shell round the opening.
 
     Bright and fine in the hood, coarser and dimmer down the cloak — the
     strands carry the cloak, the mesh only gives it a surface.
@@ -655,20 +676,28 @@ def _cloak(sc, rng, per_px):
     def spacing_at(x, y):
         return base * (0.9 + 1.4 * smoothstep(250, 1500, y))
 
-    sc.poly(cloak, "cloak_fill", 0.30)
+    sc.fill(cloak, "cloak_fill", 0.30)
+    arms = [p for p in OUT["shoulder_l"][::-1] if p[1] < 2000]
+    arms += [None] + [p for p in OUT["shoulder_r"] if p[1] < 2000]
+    near_out = Near(hood_edge, base * 2.0)
+    near_arm = Near(arms[:arms.index(None)], base * 2.0)
+    near_arm_r = Near(arms[arms.index(None) + 1:], base * 2.0)
+    near_in = Near(rim_edge, base * 1.8)
 
     def keep(x, y):
-        return (point_in_poly(x, y, cloak) and not point_in_poly(x, y, cavity)
-                and dist_to_path(x, y, rim_edge) > base * 0.45)
+        return (_visible(sc, x, base * 3) and near_in(x, y) > base * 0.45
+                and point_in_poly(x, y, cloak) and not point_in_poly(x, y, cavity))
 
     seeds = [APEX]
     seeds += resample(hood_edge, base * 0.9)
     for sh in shoulders:
-        seeds += resample(sh[:-1], base * 1.3)[1:]
+        seeds += resample(sh, base * 1.3)[1:]
     seeds += resample(rim_edge, base * 0.8)
-    seeds = [p for p in seeds if -100 < p[0] < REF_W + 100]
-    area = REF_W * REF_H * 0.65
-    fill = scatter(rng, (-90, 60, REF_W + 90, 2050), spacing_at, keep,
+    seeds = [p for p in seeds if _visible(sc, p[0], base * 3) and p[1] < 2060]
+    bx0 = max(-400.0, sc.view.stage[0] - base * 3)
+    bx1 = min(REF_W + 400.0, sc.view.stage[2] + base * 3)
+    area = (bx1 - bx0) * REF_H * 0.55
+    fill = scatter(rng, (bx0, 60, bx1, 2050), spacing_at, keep,
                    cell=base * 0.9, tries=int(area / (base * base) * 7), seeds=seeds)
     pts = seeds + fill
     # break the exact ties a mirrored outline makes for the Delaunay test
@@ -685,23 +714,26 @@ def _cloak(sc, rng, per_px):
     edges = tri_edges(pts, tris, keep_tri)
 
     def lit(x, y):
-        """(glow, body): rim light off the hood's silhouette and opening, and
+        """(glow, body): rim light off the silhouette and the opening, and
         how much of the hood's brightness this point gets — full in the hood,
         falling away down the cloak."""
-        d_out = dist_to_path(x, y, hood_edge)
-        d_in = dist_to_path(x, y, rim_edge)
-        glow = 0.45 * max(0.0, 1 - d_out / (base * 2.0)) + 0.35 * max(0.0, 1 - d_in / (base * 1.8))
+        d_out = near_out(x, y)
+        d_arm = min(near_arm(x, y), near_arm_r(x, y))
+        d_in = near_in(x, y)
+        glow = (0.45 * max(0.0, 1 - d_out / (base * 2.0))
+                + 0.30 * max(0.0, 1 - d_arm / (base * 2.0)) * (1 - 0.5 * smoothstep(1300, 2000, y))
+                + 0.35 * max(0.0, 1 - d_in / (base * 1.8)))
         in_hood = y < 1010 and abs(x - CX) < 430
-        body = 1.0 if in_hood else 0.90 - 0.45 * smoothstep(1150, 1900, y)
+        if in_hood:
+            body = 1.0
+        else:
+            body = (0.68 - 0.36 * smoothstep(1150, 1900, y)) * (1 - 0.40 * smoothstep(320, 760, abs(x - CX)))
         return glow, body
 
     for a, b in edges:
         (ax, ay), (bx, by) = pts[a], pts[b]
         glow, body = lit((ax + bx) / 2, (ay + by) / 2)
-        i = rng.uniform(0.55, 0.95) * body + glow
-        if rng.random() < 0.5:
-            sc.line([(ax, ay), (bx, by)], "mesh", 0.22 * body + 0.1 * glow, 4)
-        sc.line([(ax, ay), (bx, by)], "mesh", i)
+        sc.line([(ax, ay), (bx, by)], "mesh", rng.uniform(0.55, 0.95) * body + glow)
 
     # Meridians: the hood's long facets, converging on the apex.
     for side in (OUT["inner_l"], OUT["inner_r"]):
@@ -716,24 +748,21 @@ def _cloak(sc, rng, per_px):
             tx, ty = side[idx]
             sc.line(bezier(APEX, (APEX[0] + (tx - CX) * 0.35, 260),
                            (tx * 0.85 + CX * 0.15, ty - 120), (tx, ty), 16), "mesh", 0.62)
-    sc.line([APEX, (656, 392)], "mesh_hot", 0.30, 6)       # ridge bloom
-    sc.line([APEX, (656, 392)], "mesh_hot", 1.05, 1.5)     # the ridge itself
+    sc.line([APEX, (656, 392)], "mesh_hot", 1.05, 1.5)     # the ridge
 
-    # Silhouette: a bloom, then the hot edge. Shoulders a step dimmer.
-    sc.line(hood_edge, "mesh", 0.38, 7)
+    # Silhouette: the hot edge. Shoulders and arms a step dimmer.
     sc.line(hood_edge, "mesh_hot", 0.95, 1.5)
     for sh in shoulders:
-        sc.line(sh, "mesh", 0.30, 6)
         sc.line(sh, "mesh_hot", 0.70, 1.2)
     for sign in (-1, 1):
         hem = [(CX + sign * (CX - x), y) for x, y in
                bezier((276, 1004), (330, 1080), (420, 1150), (560, 1214), 20)]
-        sc.line(hem, "mesh", 0.30, 6)
         sc.line(hem, "mesh_hot", 0.80, 1.4)
 
     # Nodes at the vertices; a few flare.
+    sx0, sy0, sx1, sy1 = sc.view.stage
     for x, y in pts:
-        if not (0 <= x <= REF_W and 0 <= y <= REF_H):
+        if not (sx0 <= x <= sx1 and sy0 <= y <= sy1):
             continue
         glow, body = lit(x, y)
         roll = rng.random()
@@ -752,8 +781,9 @@ def _cloak(sc, rng, per_px):
 
 def _strands(sc, rng):
     """Long cloak strands: fans out of a few hub points on each side that
-    sweep down, cross the chest, and run off the bottom edge. They, not the
-    mesh, are what make the cloak read as cloth."""
+    sweep down, cross the chest, and run off the bottom edge — plus, on a wide
+    stage, drapes down the arms. They, not the mesh, are what make the cloak
+    read as cloth."""
     for sign in (-1, 1):
         def sx(x):
             return CX + sign * (x - CX)
@@ -775,12 +805,10 @@ def _strands(sc, rng):
                 pts = bezier(p0, p1, p2, p3, 30)
                 roll = rng.random()
                 if roll < 0.12:
-                    sc.line(pts, "trim", rng.uniform(0.55, 0.90))
+                    sc.line(pts, "trim", rng.uniform(0.40, 0.62))
                 elif roll < 0.32:
                     sc.line(pts, "mesh_hot", rng.uniform(0.55, 0.90))
                 else:
-                    if rng.random() < 0.4:
-                        sc.line(pts, "mesh", 0.22, 4)
                     sc.line(pts, "mesh", rng.uniform(0.65, 1.10))
                 for _ in range(rng.randint(0, 3)):
                     x, y = pts[rng.randint(3, len(pts) - 4)]
@@ -791,12 +819,22 @@ def _strands(sc, rng):
             y0 = rng.uniform(1010, 1120)
             sc.line(bezier((x0, y0), (sx(500), y0 + 220), (sx(760 + 60 * k), 1500),
                            (sx(820 + 70 * k), 2010), 26), "mesh", rng.uniform(0.60, 1.05))
+        # down the arms, outside the poster's edge
+        if _visible(sc, sx(-120)):
+            for k in range(8):
+                t = (k + rng.random()) / 8
+                top = (sx(60 - 200 * t), 1140 + 260 * t ** 1.4)
+                bot = (sx(110 - 300 * t + rng.uniform(-24, 24)), 2010)
+                # bellying outward over the arm, then back in at the hem
+                sc.line(bezier(top, (top[0] - sign * 60, top[1] + 260),
+                               (bot[0] - sign * 90, 1720), bot, 24),
+                        "mesh", rng.uniform(0.30, 0.55))
 
 
 def _cavity(sc, rng, per_px):
     """The dark inside of the hood: near-black, a dim web from rim to mask."""
     cavity, face = OUT["cavity"], OUT["face"]
-    sc.poly(cavity, "cavity_fill", 1.0)
+    sc.fill(cavity, "cavity_fill", 1.0)
     base = max(per_px * 14.0, 32.0)
     seeds = resample(cavity, base, closed=True) + resample(face, base, closed=True)
     fill = scatter(rng, (360, 380, 960, 1200), lambda x, y: base * 1.4,
@@ -825,22 +863,14 @@ def _face(sc, rng, per_px):
     """The mask: triangulated on the left half, mirrored for exact symmetry,
     and lit by the eyes. The face has no outline of its own — it is told
     from the cavity by the density and brightness of its mesh, as in the
-    reference — and each eye burns inside a dark almond socket."""
+    reference — and each eye burns inside a socket cut out of that mesh."""
     face_l = OUT["face_l"]
     half = face_l + [(CX, face_l[-1][1]), (CX, face_l[0][1])]
 
     base = max(per_px * 10.0, 34.0)
-    if per_px > 3:
-        # At widget size the landmarks alone are the mesh; extras are mush.
-        marks = FACE_MARKS_L[::2]
-        axis = FACE_AXIS_Y[::2]
-    else:
-        marks = list(FACE_MARKS_L)
-        axis = list(FACE_AXIS_Y)
-    seeds = [(float(x), float(y)) for x, y in marks]
-    seeds += [(CX, float(y)) for y in axis]
-    rim = resample(face_l, base * 1.1)
-    seeds += rim
+    seeds = [(float(x), float(y)) for x, y in FACE_MARKS_L]
+    seeds += [(CX, float(y)) for y in FACE_AXIS_Y]
+    seeds += resample(face_l, base * 1.1)
     fill = scatter(rng, (440, 400, CX - 6, 970), lambda x, y: base * 1.3,
                    lambda x, y: point_in_poly(x, y, half) and x < CX - 10,
                    cell=base, tries=600, seeds=seeds)
@@ -861,57 +891,48 @@ def _face(sc, rng, per_px):
         d = min(math.dist((x, y), EYE_L), math.dist((x, y), EYE_R))
         return 0.55 * math.exp(-(d / 115.0) ** 2)
 
-    # a wide, faint halo under the mesh — the mesh sits on top, brighter
-    for r, i in ((72, 0.05), (52, 0.09), (36, 0.14)):
-        for ex, ey in (EYE_L, EYE_R):
-            sc.prims.append(("oval_fill", ex, ey, r * 1.3, r, "eye", i))
-
-    drawn = []
+    near_rim = Near(face_l, 40.0)
     for a, b in edges:
         pa, pb = pts[a], pts[b]
         mx, my = (pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2
         on_axis = pa[0] == CX and pb[0] == CX
         # dimmer up the forehead, where the brim shades it; dimmer at the
         # very edge, so the mask fades into the cavity instead of being cut
-        shade = (0.62 + 0.38 * smoothstep(430, 560, my))
-        edge = min(1.0, dist_to_path(mx, my, face_l) / 40.0)
+        shade = 0.62 + 0.38 * smoothstep(430, 560, my)
+        edge = near_rim(mx, my) / 40.0
         i = rng.uniform(0.55, 0.82) * shade * (0.65 + 0.35 * edge) + eyelight(mx, my)
         if on_axis:
-            i += 0.15
-        drawn.append((pa, pb, i))
-        drawn.append(((2 * CX - pa[0], pa[1]), (2 * CX - pb[0], pb[1]), i))
-    for pa, pb, i in drawn:
-        sc.line([pa, pb], "mesh_hot", i)
+            sc.line([pa, pb], "mesh_hot", i + 0.15)
+        else:
+            sc.line([pa, pb], "mesh_hot", i)
+            sc.line([(2 * CX - pa[0], pa[1]), (2 * CX - pb[0], pb[1])], "mesh_hot", i)
 
     for x, y in pts:
-        for px in ((x, y), (2 * CX - x, y)):
+        for px in ((x, y), (2 * CX - x, y)) if x < CX else ((x, y),):
             hot = rng.random() < 0.18
             j = 0.62 + eyelight(*px) + (0.55 if hot else 0.0)
             sc.dot(*px, 2.6 if hot else 1.9, "mesh_hot", j)
 
-    # The eyes, burning inside their sockets. They are the whole signal at
-    # header size, so below ~2.5 reference px per pixel they stop shrinking
-    # with the rest of the face: the core never drops under a pixel.
-    g = max(1.0, per_px / 2.5)
+    # The eyes, burning inside their sockets: a wide faint halo, a tighter
+    # one, a hot core, and a short flare. Bloom does the rest.
     for ex, ey in (EYE_L, EYE_R):
-        for r, i in ((20, 0.28), (15, 0.45), (11, 0.70), (8, 0.98), (5.2, 1.25), (3, 1.45)):
-            r = min(r * g, 44)
-            sc.prims.append(("oval_fill", ex, ey, r * 1.35, r, "eye", i))
-        sc.line([(ex - 54, ey), (ex + 54, ey)], "eye", 0.32)
-        sc.line([(ex - 22 * g, ey), (ex + 22 * g, ey)], "eye", 0.85)
-        sc.line([(ex, ey - 20), (ex, ey + 18)], "eye", 0.50)
+        sc.glow(ex, ey, 150, 110, "eye", 0.10)
+        sc.glow(ex, ey, 58, 42, "eye", 0.40)
+        sc.glow(ex, ey, 22, 16, "eye", 1.10)
+        sc.dot(ex, ey, 4.5, "mesh_hot", 1.8)
+        sc.line([(ex - 70, ey), (ex + 70, ey)], "eye", 0.30)
+        sc.line([(ex - 26, ey), (ex + 26, ey)], "eye", 0.85, 1.4)
+        sc.line([(ex, ey - 22), (ex, ey + 20)], "eye", 0.45)
 
 
 def _trim(sc, rng):
-    """Gold circuit band along the hood's opening: two rails with rungs and
+    """Gold circuit band along the hood's opening: rails with rungs and
     traces between and off them, crossing at the chest into the lapels."""
     il = OUT["inner_l"]
     lapel = [V_BOTTOM, (742, 1268), (812, 1330), (868, 1396)]
     # left trim: lapel end (lower right) -> the V -> up the left rim -> brim
     left = lapel[::-1][:-1] + il[::-1]
-    paths = [left, mirror_x(left)]
-
-    for path in paths:
+    for path in (left, mirror_x(left)):
         nrm = normals(path)
         # choose the side away from the cavity
         probe = len(path) * 2 // 3
@@ -921,21 +942,21 @@ def _trim(sc, rng):
         a = offset(path, 5 * sgn, nrm)
         m = offset(path, 15 * sgn, nrm)
         b = offset(path, 36 * sgn, nrm)
-        sc.line(a, "trim", 0.36, 9)
-        sc.line(b, "trim", 0.22, 6)
+        sc.fill(offset(path, 1 * sgn, nrm) + offset(path, 42 * sgn, nrm)[::-1], "cloak_fill", 0.55)
         # rungs across the band, like a ladder of traces
         for idx in range(3, len(path) - 2, 4):
             if rng.random() < 0.5:
-                sc.line([a[idx], b[idx]], "trim", rng.uniform(0.40, 0.70))
-        sc.line(a, "trim", 1.20, 2.6)
-        sc.line(m, "trim", 0.70, 1.0)
-        sc.line(b, "trim", 0.95, 1.6)
+                sc.line([a[idx], b[idx]], "trim", rng.uniform(0.25, 0.45))
+        sc.line(a, "trim", 0.10, 10)          # halo round the main rail
+        sc.line(a, "trim", 0.62, 3.2)
+        sc.line(m, "trim", 0.42, 1.0)
+        sc.line(b, "trim", 0.60, 1.8)
         # a broken fourth rail inside the band
         q = offset(path, 26 * sgn, nrm)
         k = 2
         while k < len(q) - 4:
             run = rng.randint(3, 8)
-            sc.line(q[k:k + run], "trim", rng.uniform(0.55, 0.95), 1.2)
+            sc.line(q[k:k + run], "trim", rng.uniform(0.35, 0.60), 1.2)
             k += run + rng.randint(2, 6)
 
         # circuit traces stepping outward off the outer rail
@@ -949,19 +970,19 @@ def _trim(sc, rng):
             run = rng.uniform(14, 52) * rng.choice((-1, 1))
             p1 = (x + nx * out, y + ny * out)
             p2 = (p1[0] + tx * run, p1[1] + ty * run)
-            sc.line([(x, y), p1, p2], "trim", rng.uniform(0.55, 0.90))
+            sc.line([(x, y), p1, p2], "trim", rng.uniform(0.40, 0.62))
             if rng.random() < 0.5:
-                sc.poly([(p2[0] - 5, p2[1] - 3), (p2[0] + 5, p2[1] - 3),
-                         (p2[0] + 5, p2[1] + 3), (p2[0] - 5, p2[1] + 3)], "trim", 1.0)
+                sc.patch([(p2[0] - 5, p2[1] - 3), (p2[0] + 5, p2[1] - 3),
+                          (p2[0] + 5, p2[1] + 3), (p2[0] - 5, p2[1] + 3)], "trim", 0.70)
             else:
-                sc.dot(*p2, 3.2, "trim", 1.15)
+                sc.dot(*p2, 3.2, "trim", 0.90)
 
     # broken gold along the hood's outer edge, upper half
     for side, inward in ((OUT["hood_l"], 1), (OUT["hood_r"], -1)):
         seg = [(x + 14 * inward, y) for x, y in side[20:70]]
         for k in range(0, len(seg) - 6, 9):
-            sc.line(seg[k:k + 6], "trim", rng.uniform(0.55, 0.85), 1.3)
-            sc.dot(*seg[k], 2.6, "trim", 1.1)
+            sc.line(seg[k:k + 6], "trim", rng.uniform(0.40, 0.60), 1.3)
+            sc.dot(*seg[k], 2.6, "trim", 0.9)
 
     # gold down the robe: long runs following the cloak's X, each break
     # capped with a pad, like a trace leaving the board
@@ -977,26 +998,27 @@ def _trim(sc, rng):
                 run = rng.randint(8, 18)
                 piece = curve[k:k + run]
                 if len(piece) > 1:
-                    sc.line(piece, "trim", 0.26, 6)
-                    sc.line(piece, "trim", rng.uniform(0.75, 1.10), 1.6)
-                    sc.dot(*piece[-1], 3.2, "trim", 1.15)
+                    sc.line(piece, "trim", rng.uniform(0.50, 0.75), 1.6)
+                    sc.dot(*piece[-1], 3.2, "trim", 0.90)
                 k += run + rng.randint(2, 5)
 
     # the crossing, where the two trims meet
     sc.dot(*V_BOTTOM, 10, "trim", 0.35)
-    sc.dot(*V_BOTTOM, 3.8, "trim", 1.35)
+    sc.dot(*V_BOTTOM, 3.8, "trim", 1.05)
 
 
 def _particles(sc, rng, behind):
-    n = 320 if behind else 170
+    """Dust: gathered round the figure, thinning out across the stage."""
+    sx0, sy0, sx1, sy1 = sc.view.stage
+    n = int((320 if behind else 170) * max(1.0, (sx1 - sx0) / REF_W) ** 0.8)
     face = OUT["face"]
     for _ in range(n):
         if rng.random() < 0.6:
             x = rng.gauss(CX, 430)
             y = rng.gauss(900, 560)
         else:
-            x, y = rng.uniform(0, REF_W), rng.uniform(0, REF_H)
-        if not (10 < x < REF_W - 10 and 10 < y < REF_H - 10):
+            x, y = rng.uniform(sx0, sx1), rng.uniform(sy0, sy1)
+        if not (sx0 + 10 < x < sx1 - 10 and sy0 + 10 < y < sy1 - 10):
             continue
         if not behind and point_in_poly(x, y, face):
             continue
@@ -1011,153 +1033,96 @@ def _particles(sc, rng, behind):
 
 
 # --------------------------------------------------------------------------
-# HUD: frame, ticks, side readouts, footer
+# HUD: frame, ticks, side readouts, footer — on the stage's edges
 # --------------------------------------------------------------------------
 
 def _hud(sc, rng):
     h = "hud"
+    X0, Y0, X1, Y1 = sc.view.stage
     m = 22
-    W, H = REF_W, REF_H
-    sc.line([(m, m), (W - m, m), (W - m, H - m), (m, H - m), (m, m)], h, 0.30)
+    sc.line([(X0 + m, Y0 + m), (X1 - m, Y0 + m), (X1 - m, Y1 - m),
+             (X0 + m, Y1 - m), (X0 + m, Y0 + m)], h, 0.30)
     L = 74
-    for cx, cy, dx, dy in ((m, m, 1, 1), (W - m, m, -1, 1), (m, H - m, 1, -1), (W - m, H - m, -1, -1)):
+    for cx, cy, dx, dy in ((X0 + m, Y0 + m, 1, 1), (X1 - m, Y0 + m, -1, 1),
+                           (X0 + m, Y1 - m, 1, -1), (X1 - m, Y1 - m, -1, -1)):
         sc.line([(cx, cy + dy * L), (cx, cy), (cx + dx * L, cy)], h, 0.75, 2.5)
         ix, iy = cx + dx * 26, cy + dy * 26
         sc.line([(ix, iy + dy * 40), (ix, iy), (ix + dx * 40, iy)], h, 0.40)
     # ruler along the top
-    x = 130
+    x = X0 + 130
     k = 0
-    while x < W - 130:
+    while x < X1 - 130:
         tick = 10 if k % 5 == 0 else 5
-        sc.line([(x, 34), (x, 34 + tick)], h, 0.32)
+        sc.line([(x, Y0 + 34), (x, Y0 + 34 + tick)], h, 0.32)
         x += 13
         k += 1
-    sc.line([(130, 34), (W - 130, 34)], h, 0.22)
+    sc.line([(X0 + 130, Y0 + 34), (X1 - 130, Y0 + 34)], h, 0.22)
     # side bars and readouts
-    for side_x, d in ((28, 1), (W - 28, -1)):
-        y = 120
-        while y < H - 160:
+    for side_x, d in ((X0 + 28, 1), (X1 - 28, -1)):
+        y = Y0 + 120
+        while y < Y1 - 160:
             hh = rng.uniform(6, 40)
             if rng.random() < 0.55:
-                sc.poly([(side_x, y), (side_x + d * rng.uniform(4, 12), y),
-                         (side_x + d * rng.uniform(4, 12), y + hh), (side_x, y + hh)],
-                        h, rng.uniform(0.18, 0.40))
+                sc.patch([(side_x, y), (side_x + d * rng.uniform(4, 12), y),
+                          (side_x + d * rng.uniform(4, 12), y + hh), (side_x, y + hh)],
+                         h, rng.uniform(0.18, 0.40))
             y += hh + rng.uniform(10, 60)
+    lh = max(12, 11 / sc.view.scale) * 1.45          # line height, reference units
     for i, s in enumerate(("0xB3C6", "8E01", "Au", "0x4A3E")):
-        sc.text(50, 1046 + i * 18, s, h, 0.45, 12, anchor="w")
+        sc.text(X0 + 56, 1046 + i * lh, s, h, 0.55, 12, anchor="w", min_px=11)
     for i, s in enumerate(("0xE436", "CBF936", "A0B2", "ΔA7F2")):
-        sc.text(W - 50, 1046 + i * 18, s, h, 0.45, 12, anchor="e")
+        sc.text(X1 - 56, 1046 + i * lh, s, h, 0.55, 12, anchor="e", min_px=11)
     for i, s in enumerate(("// 0x39", "37 66", "SIG 7")):
-        sc.text(W - 50, 220 + i * 18, s, h, 0.35, 11, anchor="e")
+        sc.text(X1 - 56, 220 + i * lh, s, h, 0.45, 11, anchor="e", min_px=10)
     # footer, on a band of background so the strands run under it, not
     # through the text
-    sc.poly([(m + 2, 1838), (W - m - 2, 1838), (W - m - 2, H - m - 2), (m + 2, H - m - 2)], h, 0.0)
-    sc.line([(100, 1842), (W - 100, 1842)], h, 0.22)
-    sc.text(106, 1866, "Felhaven OS :: PYTHIA v3.14 :: ORACLE/AI //", "text", 0.85, 15, anchor="w")
-    sc.text(W - 106, 1866, "// NODE: ORACLE_CORE // STATUS: ACTIVE // SIGNAL: 0xA7F2 //",
-            "text", 0.85, 15, anchor="e")
-    sc.text(CX, 1900, "PYTHIA — ORACLE AI • FELHAVEN OPERATING ENVIRONMENT "
-            "• WIRE FRAME CONSTRUCT", "trim", 1.0, 18, bold=True)
+    sc.fill([(X0 + m + 2, 1834), (X1 - m - 2, 1834), (X1 - m - 2, Y1 - m - 2),
+             (X0 + m + 2, Y1 - m - 2)], h, 0.0)
+    sc.line([(X0 + 100, 1842), (X1 - 100, 1842)], h, 0.22)
+    sc.text(X0 + 106, 1866, "Felhaven OS :: PYTHIA v3.14 :: ORACLE/AI //", "text", 0.85, 15,
+            anchor="w", min_px=14)
+    sc.text(X1 - 106, 1866, "// NODE: ORACLE_CORE // STATUS: ACTIVE // SIGNAL: 0xA7F2 //",
+            "text", 0.85, 15, anchor="e", min_px=14)
+    sc.text(CX, 1902, "PYTHIA — ORACLE AI • FELHAVEN OPERATING ENVIRONMENT "
+            "• WIRE FRAME CONSTRUCT", "trim", 1.0, 18, min_px=16)
 
 
 # --------------------------------------------------------------------------
-# tk backend — the only part that touches tkinter
+# full screen
 # --------------------------------------------------------------------------
 
-_MONO = ("Consolas", "DejaVu Sans Mono", "Courier New", "Courier")
-_SANS = ("Georgia", "DejaVu Serif", "Times New Roman")
-
-
-def _family(canvas, wanted):
-    import tkinter.font as tkfont
-    have = set(tkfont.families(canvas))
-    return next((f for f in wanted if f in have), "TkFixedFont")
-
-
-def draw(canvas, scene):
-    """Paint the scene. Returns the number of canvas items created."""
-    v, pal = scene.view, scene.pal
-    canvas.configure(bg=pal.bg)
-    mono = _family(canvas, _MONO)
-    serif = _family(canvas, _SANS)
-    s = v.scale
-    n = 0
-
-    def flat(pts):
-        out = []
-        for x, y in pts:
-            out += v.px(x, y)
-        return out
-
-    for p in scene.prims:
-        kind = p[0]
-        if kind == "line":
-            _, pts, role, i, width, dash = p
-            if i <= 0.004:
-                continue
-            canvas.create_line(*flat(pts), fill=pal(role, i),
-                               width=max(1.0, round(width * s * 2) / 2),
-                               dash=dash, capstyle="round", joinstyle="round")
-        elif kind == "poly":
-            _, pts, role, i = p
-            canvas.create_polygon(*flat(pts), fill=pal(role, i), outline="")
-        elif kind in ("dot", "oval_fill"):
-            if kind == "dot":
-                _, x, y, r, role, i = p
-                rx = ry = r
-            else:
-                _, x, y, rx, ry, role, i = p
-            X, Y = v.px(x, y)
-            RX, RY = rx * s, ry * s
-            if RX < 0.75:
-                if i * min(1.0, RX / 0.75) < 0.05:
-                    continue
-                canvas.create_rectangle(X, Y, X + 1, Y + 1, outline="",
-                                        fill=pal(role, i * min(1.0, 0.4 + RX)))
-            else:
-                canvas.create_oval(X - RX, Y - RY, X + RX, Y + RY,
-                                   fill=pal(role, i), outline="")
-        elif kind == "ring":
-            _, x, y, rx, ry, role, i, width = p
-            X, Y = v.px(x, y)
-            canvas.create_oval(X - rx * s, Y - ry * s, X + rx * s, Y + ry * s,
-                               outline=pal(role, i), width=max(1.0, width * s))
-        elif kind == "text":
-            _, x, y, txt, role, i, size, anchor, bold = p
-            px = int(round(size * s))
-            if px < 6:
-                continue
-            fam = serif if size >= 60 else mono
-            canvas.create_text(*v.px(x, y), text=txt, anchor=anchor,
-                               fill=pal(role, i),
-                               font=(fam, -px, "bold" if bold else "normal"))
-        else:
-            raise ValueError(kind)
-        n += 1
-    return n
-
-
-# --------------------------------------------------------------------------
-# demo
-# --------------------------------------------------------------------------
-
-def _demo(argv):
+def show(colourway="reference", seed=7):
+    """Render at the screen's own resolution and show it full screen."""
     import tkinter as tk
-    framing = argv[1] if len(argv) > 1 else "poster"
-    colourway = argv[2] if len(argv) > 2 else "reference"
+    import pythia_v2_raster as raster
+
+    if sys.platform == "win32":
+        # Without this, Windows reports a scaled-down screen on a high-DPI
+        # display and stretches the frame back up — a soft, blurred image.
+        try:
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except (AttributeError, OSError):
+            pass
+
+    roles = COLOURWAYS[colourway]()
     root = tk.Tk()
-    root.title("Pythia v2 — %s / %s" % (framing, colourway))
-    if framing == "face":
-        view, layers = face_view(380, 320), ("figure",)
-    else:
-        h = min(root.winfo_screenheight() - 120, 1936)
-        view, layers = poster_view(int(h * REF_W / REF_H), h), ALL_LAYERS
-    canvas = tk.Canvas(root, width=view.w, height=view.h, highlightthickness=0, bd=0)
-    canvas.pack()
-    draw(canvas, build_scene(view, colourway, layers=layers))
-    root.bind("<Key>", lambda e: root.destroy() if e.keysym in ("q", "Escape") else None)
+    root.title("Pythia")
+    root.configure(bg=roles["bg"], cursor="none")
+    root.attributes("-fullscreen", True)
+    w, h = root.winfo_screenwidth(), root.winfo_screenheight()
+    label = tk.Label(root, bd=0, highlightthickness=0, bg=roles["bg"])
+    label.pack(fill="both", expand=True)
+    root.bind("<Escape>", lambda _e: root.destroy())
+    root.bind("q", lambda _e: root.destroy())
+    root.update()
+
+    img = raster.render(build_scene(screen_view(w, h), colourway, seed))
+    label.image = raster.photo(img)
+    label.configure(image=label.image)
     root.mainloop()
 
 
 if __name__ == "__main__":
-    _demo(sys.argv)
+    show(sys.argv[1] if len(sys.argv) > 1 else "reference",
+         int(sys.argv[2]) if len(sys.argv) > 2 else 7)
