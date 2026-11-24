@@ -26,8 +26,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 from tools import aura, hermes
-from tests._fixtures import (load_real_j1, load_real_open_meteo,
+from tests._fixtures import (ScratchSettings, load_real_j1, load_real_open_meteo,
                              open_meteo_snow_payload)
+
+
+# Settings in a scratch folder: neither this checkout's place nor its PLACE
+# pick is read, so every test asks for Home at Themis's defaults (a pick
+# would add a second fetch). test_aura_place covers the pick.
+_settings = ScratchSettings()
+
+
+def setUpModule():
+    _settings.start()
+
+
+def tearDownModule():
+    _settings.stop()
 
 
 class _FakeResp:
@@ -118,7 +132,7 @@ class TestFailover(_FreshCache):
                         side_effect=_routed(hermes.CertError(),
                                             hermes.Offline())):
             out = aura.handle()
-        self.assertEqual(out["error"], "weather_cert_error")
+        self.assertEqual(out["error"], "cert_error")
 
 
 # ── Shape parity — the contract that keeps panels ignorant of the source ──────
@@ -138,10 +152,6 @@ class TestShapeParity(_FreshCache):
     def test_top_level_keys_match_exactly(self):
         primary, fallback = self._both()
         self.assertEqual(set(primary), set(fallback))
-
-    def test_astronomy_keys_match_exactly(self):
-        primary, fallback = self._both()
-        self.assertEqual(set(primary["astronomy"]), set(fallback["astronomy"]))
 
     def test_forecast_day_keys_match_exactly(self):
         primary, fallback = self._both()
@@ -205,26 +215,6 @@ class TestWmoTranslation(_FreshCache):
         out = aura._from_open_meteo(load_real_open_meteo())
         for day in out["forecast"]:
             self.assertEqual(day["snow_pct"], 0)
-
-
-class TestMissingMoon(unittest.TestCase):
-    """Open-Meteo has no moon data, so the fallback's moon fields are empty.
-    Since V0.03 audit M3 nothing on screen reads them (Selene computes the
-    moon), but get_weather's output must keep the same keys either way."""
-
-    def test_moon_fields_are_present_but_empty(self):
-        out = aura._from_open_meteo(load_real_open_meteo())
-        astro = out["astronomy"]
-        for key in ("moonrise", "moonset", "moon_phase", "moon_illumination"):
-            self.assertEqual(astro[key], "", msg=key)
-
-    def test_sun_fields_survive_in_wttr_clock_format(self):
-        """get_weather's astronomy block reads the same whichever host
-        answered: wttr.in's "07:02 AM" strings, not Open-Meteo's ISO stamps.
-        (Helios no longer reads this block; it computes the sun, M3.)"""
-        out = aura._from_open_meteo(load_real_open_meteo())
-        for key in ("sunrise", "sunset"):
-            self.assertRegex(out["astronomy"][key], r"^\d{2}:\d{2} [AP]M$", msg=key)
 
 
 class TestPlaceName(unittest.TestCase):

@@ -161,7 +161,17 @@ class _AwenCase(unittest.TestCase):
         # the path that must keep behaving exactly as it did before the deep
         # check existed.
         self.describe = self._patch("awen.morpheus.describe",
-                                    return_value={"error": "describe_failed"})
+                                    return_value={"error": "unavailable"})
+
+        # A turn nobody scripted is a turn whose model called no tool, and a
+        # search nobody scripted finds nothing. Tests that want a pick patch
+        # both themselves, inside these. Without the net, the breaker's own
+        # retry turns reached the real Pythia: one test made two real
+        # pythia.ask calls, which read this checkout's settings and, with
+        # Ollama up, asked gemma4 for a song a real yt-dlp search would then
+        # look for (measured 2026-11-18).
+        self.ask = self._patch("awen.pythia.ask", return_value="")
+        self.search = self._patch("awen.morpheus.search", return_value=[])
 
     def _patch(self, target, **kwargs):
         """Start a patch and stop THAT patch on cleanup.
@@ -998,14 +1008,14 @@ class TestGuards(_AwenCase):
 
     def test_a_failed_search_is_refused(self):
         with mock.patch("awen.morpheus.search",
-                        return_value=[{"error": "search_failed"}]):
+                        return_value=[{"error": "unavailable"}]):
             result = awen._guarded_play_music("anything")
         self.assertEqual(result["error"], "no_results")
         self.play.assert_not_called()
 
     def test_an_empty_query_is_refused(self):
         result = awen._guarded_play_music("")
-        self.assertEqual(result["error"], "no_query")
+        self.assertEqual(result["error"], "bad_arguments")
         self.play.assert_not_called()
 
     def test_every_refusal_tells_the_model_to_name_an_artist_AND_a_title(self):
@@ -1223,7 +1233,7 @@ class TestTheDeepCheck(_AwenCase):
     _NONE = {"categories": ["Entertainment"], "channel": "Someone"}
     _MUSIC = {"categories": ["Music"], "track": "In The End",
               "artist": "Linkin Park", "channel": "Linkin Park"}
-    _FAILED = {"error": "describe_failed"}
+    _FAILED = {"error": "unavailable"}
 
     def setUp(self):
         super().setUp()
@@ -1487,6 +1497,23 @@ class TestBreaker(_AwenCase):
         with mock.patch("awen.pythia.ask") as ask:
             self._play_then_end()
         ask.assert_not_called()
+
+
+class TestTheBreakerIsAutoDJs(_AwenCase):
+    """With Auto-DJ OFF, the listener's own failed loads are Morpheus's to
+    report (it logs the ERROR), never the breaker's. Counted, three of them
+    told a listener who never switched it on "Auto-DJ is off, I couldn't get a
+    song to play", and logged a WARNING about turns that were never taken
+    (measured 2026-11-18)."""
+
+    def test_failed_loads_with_auto_dj_off_count_nothing_and_say_nothing(self):
+        self.assertFalse(awen.enabled())
+        for cycle in range(1, 4):
+            self._tick(_PLAYING)
+            payload = self._tick(_FAILED)
+            self.assertEqual(awen._failures, 0, f"cycle {cycle} was counted")
+            self.assertNotIn("say", payload, f"cycle {cycle} spoke")
+        self.assertFalse(awen.enabled())
 
 
 class TestABadTurnIsNotTheEndOfTheNight(_AwenCase):

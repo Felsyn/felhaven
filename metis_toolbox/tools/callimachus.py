@@ -10,7 +10,8 @@ Job:         Ask the web a question and return trimmed text.
              per CONVENTIONS §12, the Zeno/Hypatia/Kepler precedent).
 
 Contract:    First MULTI-TOOL module — exports TOOL_DEFINITIONS (a list of two)
-             instead of the singular TOOL_DEFINITION, and two handlers:
+             instead of the singular TOOL_DEFINITION, TOOL_META, and two
+             handlers:
                • search_web(query) -> {"results": [{title, snippet, url}], ...}
                • fetch_page(url)   -> {"url", "text", "truncated"}
              The split lets a small model run the agentic loop — search, read
@@ -23,7 +24,10 @@ Contract:    First MULTI-TOOL module — exports TOOL_DEFINITIONS (a list of two
              public internet addresses (no loopback, no LAN), checked on every
              redirect hop, with the checked IP the one dialled. Which URLs
              fetch_page may be CALLED with is Pythia's rule, not this module's
-             (pythia._dispatch, URL provenance).
+             (pythia._dispatch, URL provenance). fetch_page reads text only: a
+             page whose Content-Type isn't text (a PDF, an image) is refused
+             before its body is read; it came back as 4,000 characters of
+             binary (measured 2026-11-23).
 
 Source:      Brave Search API — one JSON GET over stdlib urllib (free tier,
              ~2k/mo). SearXNG on Obelisk is the documented sovereignty upgrade,
@@ -36,8 +40,8 @@ Key:         The Brave API key lives ONLY in the Cerberus Vault (the sole
              It is read at call time, never cached to disk, never in this file,
              the repo, an env var, or a gitignored key file. Because vault_get()
              needs an unlocked session, web search only works in a session where
-             Cerberus was unlocked; otherwise search_web returns a search_failed
-             error — a clean degrade, not a crash.
+             Cerberus was unlocked; otherwise search_web returns vault_locked —
+             a clean degrade, not a crash.
 
 Config:      The five tunables the handoff called CALLIMACHUS_* live here as
              module constants. This matches the aether/zeno/eudoxus convention:
@@ -57,18 +61,37 @@ Downstream:  cerberus.py (vault_get for the Brave key); tools/hermes.py (the
              deadline, the dial wrapper and the bounded read, under this
              module's own opener and its address guard).
 
-Requires:    stdlib only — http.client, ipaddress, json, logging, socket,
-             urllib, html.parser. No pip
-             deps (no requests, no beautifulsoup4). Plus cerberus (app-root
-             sibling) for the key.
+Requires:    stdlib only — html.parser, http.client, ipaddress, json, logging,
+             os, socket, sys, typing, urllib. No pip deps (no requests, no
+             beautifulsoup4). Plus cerberus (app-root sibling) for the key and
+             tools/hermes.py.
 
-V0.02:       Audited 2026-07-24 — every search_failed/fetch_failed error dict
+2026-07-24:  walkthrough audit — every search_failed/fetch_failed error dict
              stopped interpolating the caught exception's message (raw text into
              the LLM context — §2); now only type(exc).__name__ travels. That
              covers the guard-flagged bare {exc} AND the two {exc.reason} the
              guard can't see (URLError.reason is a foreign socket/OS message).
              Contract verified never-raise; regression tests added; off the
              output-contract allowlist.
+
+2026-11-16:  the Pythia tool audit (CONVENTIONS §12). fetch_page is the
+             audit's reference for a model-facing cap (T8: truncated), and its
+             description now allows a URL the user gave, as the gate has since
+             2026-09-30; both descriptions follow §3's grammar. TOOL_META says
+             web / live / changes nothing. Its failures use the shared
+             unavailable, timeout and vault_locked (T9, 2026-11-16), and no_key
+             when the vault is open without a Brave key, as Midas says it.
+
+V0.03:       Walked through 2026-11-23 (the V0.03 walkthrough, S33; born
+             2026-07-07). The address guard was tried against every special
+             range: Python counts ::/96, the deprecated IPv4-compatible form
+             (::127.0.0.1), as global, and the guard took it as public; it is
+             refused now (Windows answered "unreachable network", so nothing
+             was reached). fetch_page refuses a page that isn't text instead
+             of handing the model 4,000 characters of a PDF's or an image's
+             bytes; a result's title is capped like its snippet; search_web's
+             catch-all, on the request that carries the Brave key, logs the
+             exception's class only (BACKLOG). Contract and Requires caught up.
 """
 
 import http.client
@@ -76,6 +99,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import sys
 import urllib.error
@@ -109,7 +133,7 @@ _SAFESEARCH         = "moderate"  # Brave 'safesearch' param passthrough
 
 _SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 _USER_AGENT      = "Felhaven/1.0 (Callimachus web search)"   # Aether precedent
-_SNIPPET_CHARS   = 300            # defensive snippet cap (Brave's are short)
+_SNIPPET_CHARS   = 300            # defensive cap on a title and a snippet (Brave's are short)
 _MAX_REDIRECTS   = 5              # fetch_page follows at most this many hops
 
 # The one vault entry name Callimachus reads. See the Key: section above.
@@ -180,6 +204,30 @@ class _NonHttpsRedirect(Exception):
     """A redirect pointed at a non-https URL — rejected (handoff fetch_page)."""
 
 
+class _NotText(Exception):
+    """fetch_page's answer isn't text; `content_type` is what the server said."""
+
+    def __init__(self, content_type: str) -> None:
+        super().__init__(content_type)
+        self.content_type = content_type
+
+
+# What fetch_page will read: text/*, and the XML and JSON types a page may come
+# as. A missing Content-Type is read as text, as a browser would sniff it.
+_TEXT_TYPES = {"application/xhtml+xml", "application/xml", "application/json"}
+
+# A Content-Type shaped like one, so the server's own words are bounded before
+# they go into an error's detail.
+_TYPE_SHAPE = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,40}/[a-z0-9][a-z0-9.+-]{0,60}$")
+
+
+def _is_text(content_type: str) -> bool:
+    """Whether fetch_page may read a body of this Content-Type."""
+    ctype = content_type.split(";", 1)[0].strip().lower()
+    return (not ctype or ctype.startswith("text/") or ctype in _TEXT_TYPES
+            or ctype.endswith(("+xml", "+json")))
+
+
 class _HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
     """Follow redirects, but refuse to leave https and cap the hop count."""
 
@@ -247,6 +295,12 @@ def _is_public(address: str) -> bool:
     except ValueError:
         return False
     if isinstance(ip, ipaddress.IPv6Address):
+        if int(ip) >> 32 == 0:
+            # ::/96, the deprecated IPv4-compatible form (::127.0.0.1), with
+            # :: and ::1 inside it. Python counts it global, but it was never
+            # on the public internet (RFC 4291 §2.5.5.1); measured 2026-11-23,
+            # Windows answers "unreachable network" for ::7f00:1.
+            return False
         inner = _embedded_v4(ip)
         if inner is not None and not _is_public(str(inner)):
             return False
@@ -317,18 +371,24 @@ def _build_opener() -> urllib.request.OpenerDirector:
 _OPENER = _build_opener()
 
 
-def _fetch_bytes(req: urllib.request.Request, cap: int) -> "tuple[bytes, str]":
+def _fetch_bytes(req: urllib.request.Request, cap: int,
+                 text_only: bool = False) -> "tuple[bytes, str]":
     """Open req through the guarded opener and return (body, final_url).
 
     The whole request, connect to last byte, runs inside a hermes deadline
     (hermes.deadline_for: 20 s at these caps), and the body is read by
     hermes.read_bounded: refused by Content-Length, then by reading one byte
-    past the cap. Raises hermes.TooLarge / _NonHttpsRedirect / socket.timeout
-    (hermes.DeadlinePassed is one) / urllib errors for the caller to
-    translate."""
+    past the cap. With text_only, a Content-Type that isn't text raises
+    _NotText before the body is read. Raises hermes.TooLarge /
+    _NonHttpsRedirect / _NotText / socket.timeout (hermes.DeadlinePassed is
+    one) / urllib errors for the caller to translate."""
     with hermes.within(hermes.deadline_for(cap, _TIMEOUT_S), _TIMEOUT_S):
         resp: Any = _OPENER.open(req, timeout=_TIMEOUT_S)
         try:
+            if text_only:
+                content_type = str(resp.headers.get("Content-Type") or "")
+                if not _is_text(content_type):
+                    raise _NotText(content_type)
             return hermes.read_bounded(resp, cap), str(resp.geturl())
         finally:
             resp.close()
@@ -348,7 +408,7 @@ def _brave_key() -> str:
 def _shape_results(data: dict[str, Any]) -> list[dict[str, str]]:
     """Pull up to _RESULT_COUNT {title, snippet, url} out of a Brave response.
     Titles/snippets are HTML-stripped (Brave marks matches with <strong>) and
-    the snippet is hard-capped defensively."""
+    both are hard-capped defensively: Pythia sends a result to the model whole."""
     web = data.get("web")
     items = web.get("results", []) if isinstance(web, dict) else []
     out: list[dict[str, str]] = []
@@ -359,7 +419,7 @@ def _shape_results(data: dict[str, Any]) -> list[dict[str, str]]:
         if not url:
             continue
         out.append({
-            "title":   _strip_html(str(item.get("title", ""))),
+            "title":   _strip_html(str(item.get("title", "")))[:_SNIPPET_CHARS],
             "snippet": _strip_html(str(item.get("description", "")))[:_SNIPPET_CHARS],
             "url":     str(url),
         })
@@ -374,7 +434,8 @@ def search_web(query: str) -> dict[str, Any]:
 
     Success:  {"results": [{"title": str, "snippet": str, "url": str}, ...]}
     Errors:   {"error": "no_results" | "rate_limited" | "timeout"
-                          | "search_failed: <detail>"}
+                          | "vault_locked" | "no_key"
+                          | "unavailable: <detail>"}
     """
     q = (query or "").strip()
     if not q:
@@ -384,7 +445,13 @@ def search_web(query: str) -> dict[str, Any]:
         key = _brave_key()
     except cerberus.VaultError as exc:
         log.warning("Callimachus: Brave key unavailable (vault): %s", exc)
-        return {"error": f"search_failed: {type(exc).__name__}"}
+        # Cerberus's own reason picks the word: sealed, or open with no
+        # Brave key (Midas's words); anything else is the vault failing.
+        if exc.slug == cerberus.ERR_LOCKED:
+            return {"error": "vault_locked"}
+        if exc.slug == cerberus.ERR_NO_ENTRY:
+            return {"error": "no_key"}
+        return {"error": f"unavailable: {type(exc).__name__}"}
 
     params = urllib.parse.urlencode({
         "q":          q,
@@ -406,27 +473,30 @@ def search_web(query: str) -> dict[str, Any]:
     except urllib.error.HTTPError as exc:
         if exc.code == 429:
             return {"error": "rate_limited"}
-        return {"error": f"search_failed: HTTP {exc.code}"}
+        return {"error": f"unavailable: HTTP {exc.code}"}
     except socket.timeout:
         return {"error": "timeout"}
     except hermes.TooLarge:
-        return {"error": "search_failed: response over the size cap"}
+        return {"error": "unavailable: response over the size cap"}
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, socket.timeout):
             return {"error": "timeout"}
         # exc.reason is a FOREIGN message (a socket/OS error) — it can carry a
         # hostname or errno detail, so only its class travels (§2), not its text.
-        return {"error": f"search_failed: {type(exc.reason).__name__}"}
+        return {"error": f"unavailable: {type(exc.reason).__name__}"}
     except Exception as exc:
-        log.warning("Callimachus.search_web: unexpected failure: %s", exc)
-        return {"error": f"search_failed: {type(exc).__name__}"}
+        # The class only: this request carries the Brave key, and a keyed
+        # request's text is never logged unchecked (§12, 2026-11-18).
+        log.warning("Callimachus.search_web: unexpected failure: %s",
+                    type(exc).__name__)
+        return {"error": f"unavailable: {type(exc).__name__}"}
 
     try:
         data = json.loads(raw.decode("utf-8", "replace"))
     except (json.JSONDecodeError, ValueError) as exc:
-        return {"error": f"search_failed: {type(exc).__name__}"}
+        return {"error": f"unavailable: {type(exc).__name__}"}
     if not isinstance(data, dict):
-        return {"error": "search_failed: response was not a JSON object"}
+        return {"error": "unavailable: response was not a JSON object"}
 
     results = _shape_results(data)
     if not results:
@@ -442,7 +512,11 @@ def fetch_page(url: str) -> dict[str, Any]:
 
     Success:  {"url": str, "text": str, "truncated": bool}
     Errors:   {"error": "non_https_url" | "private_address" | "timeout"
-                          | "too_large" | "fetch_failed: <detail>"}
+                          | "too_large" | "unavailable: <detail>"}
+
+    "unavailable: not a text page (application/pdf)": the server said the
+    page isn't text, so its body is never read. The type is named only when
+    it is shaped like one.
 
     private_address: the host, or a host it redirected to, is this computer
     or the local network. Refused at connect time by _GuardedHTTPSConnection,
@@ -458,15 +532,20 @@ def fetch_page(url: str) -> dict[str, Any]:
                                              "Accept-Encoding": "identity"})
 
     try:
-        raw, final_url = _fetch_bytes(req, cap=_MAX_DOWNLOAD_BYTES)
+        raw, final_url = _fetch_bytes(req, cap=_MAX_DOWNLOAD_BYTES, text_only=True)
     except _NonHttpsRedirect:
         return {"error": "non_https_url"}
+    except _NotText as exc:
+        ctype = exc.content_type.split(";", 1)[0].strip().lower()
+        if _TYPE_SHAPE.match(ctype):
+            return {"error": f"unavailable: not a text page ({ctype})"}
+        return {"error": "unavailable: not a text page"}
     except hermes.TooLarge:
         return {"error": "too_large"}
     except _PrivateAddress:                      # urllib wraps it; belt and braces
         return {"error": "private_address"}
     except urllib.error.HTTPError as exc:
-        return {"error": f"fetch_failed: HTTP {exc.code}"}
+        return {"error": f"unavailable: HTTP {exc.code}"}
     except socket.timeout:
         return {"error": "timeout"}
     except urllib.error.URLError as exc:
@@ -475,10 +554,10 @@ def fetch_page(url: str) -> dict[str, Any]:
         if isinstance(exc.reason, _PrivateAddress):
             return {"error": "private_address"}
         # Foreign message (socket/OS error) — class only, never its text (§2).
-        return {"error": f"fetch_failed: {type(exc.reason).__name__}"}
+        return {"error": f"unavailable: {type(exc.reason).__name__}"}
     except Exception as exc:
         log.warning("Callimachus.fetch_page: unexpected failure: %s", exc)
-        return {"error": f"fetch_failed: {type(exc).__name__}"}
+        return {"error": f"unavailable: {type(exc).__name__}"}
 
     text = _strip_html(raw.decode("utf-8", "replace"))
     truncated = len(text) > _PAGE_CHARS
@@ -494,12 +573,12 @@ SEARCH_TOOL_DEFINITION = {
     "function": {
         "name": "search_web",
         "description": (
-            "Search the live web for current, recent, or unknown facts — things "
-            "you don't already know or that change over time. Returns up to 3 "
-            "results as {title, snippet, url}. Read the snippets, then call "
-            "fetch_page on the ONE most promising url only if you need the full "
-            "text. Call this whenever a question needs up-to-date or external "
-            "information rather than guessing."
+            "Searches the live web for current, recent, or unknown facts — "
+            "things you don't already know or that change over time — and "
+            "returns up to 3 results as {title, snippet, url}. Call whenever a "
+            "question needs up-to-date or external information rather than "
+            "guessing. Read the snippets, then call fetch_page on the ONE most "
+            "promising url only if you need the full text."
         ),
         "parameters": {
             "type": "object",
@@ -519,18 +598,20 @@ FETCH_TOOL_DEFINITION = {
     "function": {
         "name": "fetch_page",
         "description": (
-            "Fetch one web page and return its visible text (scripts and styles "
-            "stripped, truncated to about 4000 characters). Call this only AFTER "
-            "search_web, on a single promising https url from those results — "
-            "never invent a url. If the returned 'truncated' is true, the page "
-            "continues past the text you were given."
+            "Fetches one web page and returns its visible text (scripts and "
+            "styles stripped, truncated to about 4000 characters). Call only "
+            "on an https url the user gave you, or on the single most promising "
+            "url a search_web result returned — never invent a url. If the "
+            "returned 'truncated' is true, the page continues past the text you "
+            "were given."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "url": {
                     "type": "string",
-                    "description": "The https:// URL to fetch (from a search result).",
+                    "description": ("The https:// URL to fetch (one the user "
+                                    "gave, or from a search result)."),
                 },
             },
             "required": ["url"],
@@ -542,6 +623,15 @@ FETCH_TOOL_DEFINITION = {
 # registry (pythia.py) splats these in and maps each tool name to the like-named
 # module function (search_web / fetch_page). See CONVENTIONS §2/§3.
 TOOL_DEFINITIONS = [SEARCH_TOOL_DEFINITION, FETCH_TOOL_DEFINITION]
+
+# What the code reads about each tool here; the model never sees it
+# (CONVENTIONS §8, "TOOL_META"). network: none = local only, cached = a poll
+# or TTL cache, live = may reach the network on every call. mutates = it
+# changes state outside the turn.
+TOOL_META: dict[str, dict[str, Any]] = {
+    "search_web": {"domain": "web", "network": "live", "mutates": False},
+    "fetch_page": {"domain": "web", "network": "live", "mutates": False},
+}
 
 
 # ── Standalone test ───────────────────────────────────────────────────────────

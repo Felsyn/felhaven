@@ -22,8 +22,48 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import tkinter as tk
 
+import ast
+import glob
+
 import theme
-from panels.rite_panel import RiteLog, _explain, _format_duration, _order
+from panels.rite_panel import (_ERROR_TEXT, RiteLog, _ScrollFrame, _explain,
+                                _format_duration, _order)
+from tests.test_tool_output_contract import _error_slugs, _module_constants
+
+_APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _slugs_in(path: str) -> set:
+    with open(path, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    return {s for s, _ in _error_slugs(tree, _module_constants(tree))}
+
+
+def _registered_tool_files() -> list:
+    """pythia._TOOL_MODULES, read from Pythia's source rather than imported:
+    importing Pythia imports every tool, and two of them read this checkout's
+    own files at import."""
+    with open(os.path.join(_APP_ROOT, "pythia.py"), encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    for node in tree.body:
+        if (isinstance(node, ast.Assign)
+                and any(getattr(t, "id", None) == "_TOOL_MODULES" for t in node.targets)):
+            return [os.path.join(_APP_ROOT, "tools", f"{elt.id}.py")
+                    for elt in node.value.elts]
+    raise AssertionError("pythia._TOOL_MODULES not found")
+
+
+def _written_slugs() -> set:
+    """Every slug a brain-side module writes: the tools, Pythia's dispatcher
+    (tool_failed, cancelled, …) and Awen's own play_music stand-in."""
+    paths = glob.glob(os.path.join(_APP_ROOT, "tools", "*.py")) + [
+        os.path.join(_APP_ROOT, "pythia.py"), os.path.join(_APP_ROOT, "awen.py")]
+    slugs = set()
+    for path in paths:
+        with open(path, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        slugs |= {s for s, _ in _error_slugs(tree, _module_constants(tree))}
+    return slugs
 
 
 def _record(seq: int, **overrides) -> dict:
@@ -64,6 +104,33 @@ class TestRitePanelHelpers(unittest.TestCase):
         self.assertIn("Cerberus", _explain("vault_locked"))
         # The slug is the stable half; detail after ": " must not defeat lookup.
         self.assertIn("no key", _explain("no_key: finnhub"))
+
+    def test_every_word_is_for_a_slug_a_tool_still_writes(self):
+        # A rename (CONVENTIONS §12, 2026-11-16) must move Rite's words with
+        # it. A key no tool writes any more is a sentence nobody will see, and
+        # the renamed slug would render bare.
+        stale = set(_ERROR_TEXT) - _written_slugs()
+        self.assertFalse(stale, f"Rite has words for slugs no tool writes: {sorted(stale)}")
+
+    def test_the_shared_words_are_explained(self):
+        # The shared core (§2) is what most failures say now, so each one a
+        # tool writes gets a sentence.
+        core = {"offline", "timeout", "unavailable", "not_found", "no_results",
+                "bad_arguments", "unknown_action", "vault_locked"}
+        missing = (core & _written_slugs()) - set(_ERROR_TEXT)
+        self.assertFalse(missing, f"shared slugs Rite cannot explain: {sorted(missing)}")
+
+    def test_every_slug_pythia_or_a_registered_tool_writes_is_explained(self):
+        # The other direction (V0.03 S17, 2026-11-19): nine slugs once rendered
+        # bare, six of them Pythia's own refusals, which are the lines an
+        # operator most needs to read. A helper's slug reaches a rite only
+        # through a registered tool, so those are kept by hand.
+        files = [os.path.join(_APP_ROOT, "pythia.py")] + _registered_tool_files()
+        for path in files:
+            self.assertTrue(os.path.exists(path), path)
+        written = set().union(*(_slugs_in(path) for path in files))
+        missing = written - set(_ERROR_TEXT)
+        self.assertFalse(missing, f"slugs Rite cannot explain: {sorted(missing)}")
 
     def test_an_unknown_slug_renders_bare(self):
         # Silence is correct — a generic "something went wrong" adds nothing
@@ -176,6 +243,19 @@ class TestRitePanelSmoke(unittest.TestCase):
         win.destroy()
         self.assertIsNone(win._flash_after)
 
+    def test_closing_under_the_pointer_gives_the_wheel_back(self):
+        # Escape with the pointer over the list: no <Leave> arrives, and the
+        # app-wide binding used to go on calling a canvas that was gone, a
+        # TclError on every wheel turn anywhere in Felhaven.
+        self.addCleanup(self.root.unbind_all, "<MouseWheel>")
+        win = RiteLog(self.root, _RECORDS)
+        self.root.update_idletasks()
+        (body,) = [w for w in win.winfo_children() if isinstance(w, _ScrollFrame)]
+        body._bind_wheel(None)                   # the pointer entered the list
+        self.assertTrue(self.root.bind_all("<MouseWheel>"))
+        win.destroy()
+        self.assertEqual(self.root.bind_all("<MouseWheel>"), "")
+
     def test_two_windows_can_be_open_at_once(self):
         first = self._open(_RECORDS)
         second = self._open(_RECORDS, focus_failures=True)
@@ -197,6 +277,31 @@ class TestRitePanelSmoke(unittest.TestCase):
     def _all_colors(self, win: RiteLog) -> list:
         return [str(w.cget("fg")) for w in self._walk(win)
                 if isinstance(w, tk.Label)]
+
+    # ── Virgil tooltips ─────────────────────────────────────────────────────
+
+    def test_every_rite_and_field_carries_its_tips(self):
+        """Each rite's status and name, each field caption, and COPY THIS RITE."""
+        from panels import virgil_tooltip
+        shared = virgil_tooltip._shared(self.root)
+        win = self._open(_RECORDS)
+        self.assertEqual(sorted(RiteLog._TIPS), sorted(win.tip_targets))
+        for key, tip in RiteLog._TIPS.items():
+            self.assertEqual(shared._tips.get(str(win.tip_targets[key])), tip, key)
+        found = {key: 0 for key in RiteLog._ROW_TIPS}
+        stack = [win]
+        while stack:
+            widget = stack.pop()
+            stack.extend(widget.winfo_children())
+            tip = shared._tips.get(str(widget))
+            for key, row_tip in RiteLog._ROW_TIPS.items():
+                if tip == row_tip:
+                    found[key] += 1
+        self.assertEqual(found["status"], len(_RECORDS))
+        self.assertEqual(found["select"], len(_RECORDS))
+        self.assertGreaterEqual(found["expand"], len(_RECORDS))   # arguments, at least
+        for name in win._rows.values():
+            self.assertEqual(shared._tips.get(str(name)), RiteLog._ROW_TIPS["select"])
 
 
 if __name__ == "__main__":

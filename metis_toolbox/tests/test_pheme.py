@@ -26,8 +26,12 @@ Covers:
      display date), read_key's normalization, and the read-state file.
   7. Freshness (V0.03 audit T7) — handle() answers from the last good
      fan-out, dated with `as_of`; counted at the _fetch_feed seam.
+  8. The V0.03 walkthrough (S30) — a feed that declares an XML entity is
+     refused, each story field is bounded, the config is checked row by row,
+     and the read state loads on first use, not at import.
 """
 
+import importlib.util
 import json
 import os
 import shutil
@@ -295,17 +299,21 @@ class TestParseAtom(unittest.TestCase):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestFetchFeedErrors(unittest.TestCase):
+    # Each failure is logged as a WARNING; assertLogs holds it to that, and
+    # keeps the line off the console.
     def test_http_failure_carries_the_status_as_detail(self):
         with mock.patch.object(pheme.hermes, "get",
-                               return_value=_resp(b"", status=404)):
+                               return_value=_resp(b"", status=404)), \
+                self.assertLogs("METIS.pheme", "WARNING"):
             self.assertEqual(pheme._fetch_feed(_FEED),
-                             {"error": "http_error: 404"})
+                             {"error": "unavailable: HTTP 404"})
 
     def test_a_feed_over_the_cap_says_so(self):
         with mock.patch.object(pheme.hermes, "get",
-                               side_effect=hermes.TooLarge("over the cap")):
+                               side_effect=hermes.TooLarge("over the cap")), \
+                self.assertLogs("METIS.pheme", "WARNING"):
             self.assertEqual(pheme._fetch_feed(_FEED),
-                             {"error": "feed_too_large"})
+                             {"error": "too_large"})
 
     def test_every_fetch_is_capped(self):
         with mock.patch.object(pheme.hermes, "get", return_value=_resp(b"<rss/>")) as get:
@@ -314,19 +322,22 @@ class TestFetchFeedErrors(unittest.TestCase):
 
     def test_timeout(self):
         with mock.patch.object(pheme.hermes, "get",
-                               side_effect=hermes.Timeout("6s elapsed")):
+                               side_effect=hermes.Timeout("6s elapsed")), \
+                self.assertLogs("METIS.pheme", "WARNING"):
             self.assertEqual(pheme._fetch_feed(_FEED),
-                             {"error": "feed_timeout"})
+                             {"error": "timeout"})
 
     def test_connection_failure(self):
         with mock.patch.object(pheme.hermes, "get",
-                               side_effect=hermes.Offline("refused")):
+                               side_effect=hermes.Offline("refused")), \
+                self.assertLogs("METIS.pheme", "WARNING"):
             self.assertEqual(pheme._fetch_feed(_FEED),
-                             {"error": "network_error"})
+                             {"error": "offline"})
 
     def test_unparseable_xml(self):
         with mock.patch.object(pheme.hermes, "get",
-                               return_value=_resp(b"<html>not a feed")):
+                               return_value=_resp(b"<html>not a feed")), \
+                self.assertLogs("METIS.pheme", "WARNING"):
             self.assertEqual(pheme._fetch_feed(_FEED),
                              {"error": "invalid_feed_xml"})
 
@@ -335,9 +346,10 @@ class TestFetchFeedErrors(unittest.TestCase):
         # the rule is uniform: class name only (§2), because the same handler
         # catches exceptions whose messages carry paths and URLs.
         with mock.patch.object(pheme.hermes, "get",
-                               side_effect=AssertionError("must not be called")):
+                               side_effect=AssertionError("must not be called")), \
+                self.assertLogs("METIS.pheme", "WARNING"):
             self.assertEqual(pheme._fetch_feed({"id": "bad"}),
-                             {"error": "fetch_failed: KeyError"})
+                             {"error": "unavailable: KeyError"})
 
 
 class TestFetchFeedSuccess(unittest.TestCase):
@@ -384,7 +396,7 @@ def _fake_fetch_feed(feed):
     """Deterministic stand-in keyed on feed id: 'dead' errors, others yield
     two stories apiece."""
     if feed["id"] == "dead":
-        return {"error": "feed_timeout"}
+        return {"error": "timeout"}
     return {"stories": [_story_n(feed["id"], n) for n in range(2)]}
 
 
@@ -436,18 +448,19 @@ class TestHandle(_FreshCache):
     def test_an_unknown_feed_id_is_an_error_not_a_quiet_empty_list(self):
         with mock.patch.object(pheme, "_load_config", return_value=_TWO_FEEDS):
             self.assertEqual(pheme.handle(feed="nope"),
-                             {"error": "unknown_feed: nope"})
+                             {"error": "not_found: nope"})
 
     def test_an_unreadable_config_is_an_error(self):
         with mock.patch.object(pheme, "_load_config",
-                               side_effect=FileNotFoundError("gone")):
+                               side_effect=FileNotFoundError("gone")), \
+                self.assertLogs("METIS.pheme", "ERROR"):
             self.assertEqual(pheme.handle(), {"error": "config_unreadable"})
 
     def test_every_feed_failing_is_an_error(self):
         dead = [{"id": "dead", "url": "u", "format": "rss"}]
         with mock.patch.object(pheme, "_load_config", return_value=dead), \
              mock.patch.object(pheme, "_fetch_feed", _fake_fetch_feed):
-            self.assertEqual(pheme.handle(), {"error": "all_feeds_failed"})
+            self.assertEqual(pheme.handle(), {"error": "unavailable: all feeds failed"})
 
     def test_healthy_feeds_with_zero_items_is_not_an_error(self):
         # The one case that legitimately has no stories. It was an exact
@@ -475,7 +488,7 @@ class TestFetch(_FreshCache):
              mock.patch.object(pheme, "_fetch_feed", _fake_fetch_feed):
             result = pheme.fetch()
         self.assertEqual(set(result["feeds"]), {"a", "b", "dead"})
-        self.assertEqual(result["feeds"]["dead"], {"error": "feed_timeout"})
+        self.assertEqual(result["feeds"]["dead"], {"error": "timeout"})
         self.assertEqual(len(result["feeds"]["a"]["stories"]), 2)
 
 
@@ -621,9 +634,12 @@ class _ReadStateTestCase(unittest.TestCase):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, True)
         self.path = os.path.join(d, "pheme_read.json")
-        p = mock.patch.object(pheme, "_READ_PATH", self.path)
-        p.start()
-        self.addCleanup(p.stop)
+        # _read_loaded: the file is read on first use, so each test says when
+        # it is read (by calling _load_read) instead of the first call doing it.
+        for target, value in (("_READ_PATH", self.path), ("_read_loaded", True)):
+            p = mock.patch.object(pheme, target, value, create=True)
+            p.start()
+            self.addCleanup(p.stop)
         self._clear()
         self.addCleanup(self._clear)
 
@@ -706,13 +722,15 @@ class TestReadStateDegrades(_ReadStateTestCase):
     def test_corrupt_json_means_everything_is_unread_and_does_not_raise(self):
         with open(self.path, "w", encoding="utf-8") as f:
             f.write("{not json")
-        pheme._load_read()
+        with self.assertLogs("METIS.pheme", "WARNING"):
+            pheme._load_read()
         self.assertEqual(pheme.read_keys(), set())
 
     def test_a_payload_that_is_not_a_list_is_ignored(self):
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump({"read": {"nope": True}}, f)
-        pheme._load_read()
+        with self.assertLogs("METIS.pheme", "WARNING"):
+            pheme._load_read()
         self.assertEqual(pheme.read_keys(), set())
 
     def test_non_string_entries_are_skipped_not_fatal(self):
@@ -723,7 +741,8 @@ class TestReadStateDegrades(_ReadStateTestCase):
 
     def test_an_unwritable_path_costs_persistence_not_the_render(self):
         with mock.patch.object(pheme, "_atomic_write_json",
-                               side_effect=OSError("read-only")):
+                               side_effect=OSError("read-only")), \
+                self.assertLogs("METIS.pheme", "WARNING"):
             pheme.mark_read("https://a.com/1")      # must not raise
         self.assertIn(pheme.read_key("https://a.com/1"), pheme.read_keys())
 
@@ -748,7 +767,7 @@ class _Feeds:
     def __call__(self, feed):
         self.fetched.append(feed["id"])
         if self.dead:
-            return {"error": "network_error"}
+            return {"error": "offline"}
         return _fake_fetch_feed(feed)
 
 
@@ -790,7 +809,7 @@ class TestNewsOneFetch(_CacheCase):
         self.feeds.dead = True
         answers = self._three_questions()
         self.assertEqual([out.get("error") for out in answers],
-                         ["all_feeds_failed"] * 3)
+                         ["unavailable: all feeds failed"] * 3)
         self.assertEqual(sorted(self.feeds.fetched), ["a", "b"])
 
     def test_after_a_kairos_poll_the_questions_make_no_fetch(self):
@@ -800,7 +819,7 @@ class TestNewsOneFetch(_CacheCase):
 
     def test_an_unknown_feed_costs_no_fetch(self):
         # Answerable from the config alone, so it must not touch the network.
-        self.assertEqual(pheme.handle(feed="nope"), {"error": "unknown_feed: nope"})
+        self.assertEqual(pheme.handle(feed="nope"), {"error": "not_found: nope"})
         self.assertEqual(self.feeds.fetched, [])
 
 
@@ -848,7 +867,7 @@ class TestNewsKey(_CacheCase):
         pheme.handle()
         self.feeds.dead = True
         self.config.return_value = [{"id": "a", "url": "elsewhere", "format": "rss"}]
-        self.assertEqual(pheme.handle(), {"error": "all_feeds_failed"})
+        self.assertEqual(pheme.handle(), {"error": "unavailable: all feeds failed"})
 
 
 class TestNewsStaleOnError(_CacheCase):
@@ -869,13 +888,13 @@ class TestNewsStaleOnError(_CacheCase):
         pheme.handle()
         self.at(_T0 + pheme._STALE_MAX)
         self.feeds.dead = True
-        self.assertEqual(pheme.handle(), {"error": "all_feeds_failed"})
+        self.assertEqual(pheme.handle(), {"error": "unavailable: all feeds failed"})
 
     def test_a_recent_failure_is_not_retried(self):
         self.feeds.dead = True
         pheme.handle()
         self.at(_T0 + pheme._RETRY_AFTER - 1)
-        self.assertEqual(pheme.handle(), {"error": "all_feeds_failed"})
+        self.assertEqual(pheme.handle(), {"error": "unavailable: all feeds failed"})
         self.assertEqual(len(self.feeds.fetched), 2)   # still just the one attempt
 
     def test_a_failure_is_retried_once_the_window_passes(self):
@@ -900,7 +919,7 @@ class TestNewsFetch(_CacheCase):
         pheme.fetch()
         self.feeds.dead = True
         polled = pheme.fetch()
-        self.assertEqual(polled["feeds"]["a"], {"error": "network_error"})
+        self.assertEqual(polled["feeds"]["a"], {"error": "offline"})
         self.at(_T0 + 5)
         out = pheme.handle()
         self.assertNotIn("error", out)
@@ -986,6 +1005,7 @@ class TestNewsLockHasAnEnd(_FreshCache):
                     mock.patch.object(pheme, "_MAX_BYTES", 65536), \
                     mock.patch.object(pheme.hermes, "get",
                                       lambda *a, **k: real_get(*a, allow_http=True, **k)), \
+                    self.assertLogs("METIS.pheme", "WARNING"), \
                     self.assertLogs("METIS.hermes", "WARNING") as logs:
                 t0 = time.monotonic()
                 out = pheme.fetch()
@@ -994,11 +1014,177 @@ class TestNewsLockHasAnEnd(_FreshCache):
                 if free:
                     pheme._lock.release()
 
-        self.assertEqual(out["feeds"]["slow"], {"error": "feed_timeout"})
+        self.assertEqual(out["feeds"]["slow"], {"error": "timeout"})
         self.assertNotIn("error", out["feeds"]["good"])
         self.assertTrue(any("deadline" in line for line in logs.output))
         self.assertLess(elapsed, 0.66 + 1.5)       # one deadline (parallel), CI slack
         self.assertTrue(free, "the cache lock was still held after fetch() returned")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  8. The V0.03 walkthrough (S30, 2026-11-23)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# One entity, expanded ten times: small enough that a parser without the
+# refusal reads it at once and the test fails on the answer, not on a hang.
+_AMPLIFIED = ('<?xml version="1.0"?><!DOCTYPE rss [<!ENTITY a "' + "x" * 100
+              + '">]><rss><channel><item><title>' + "&a;" * 10 + "</title>"
+              "<link>https://example.com/1</link></item></channel></rss>")
+
+
+class TestAFeedThatDeclaresAnEntityIsRefused(unittest.TestCase):
+    """expat 2.8.2 stops a billion laughs, but let one entity expand ~100x: a
+    900 KB feed became a 54,000,000-character title and 108 MB (measured
+    2026-11-23). No feed needs an entity; none of the 7 shipped has a DOCTYPE."""
+
+    def _fetch(self, body):
+        with mock.patch.object(pheme.hermes, "get", return_value=_resp(body)):
+            return pheme._fetch_feed(_FEED)
+
+    def test_an_entity_declaration_is_refused(self):
+        with self.assertLogs("METIS.pheme", "WARNING") as logs:
+            self.assertEqual(self._fetch(_AMPLIFIED.encode()),
+                             {"error": "invalid_feed_xml"})
+        self.assertIn("entity", logs.output[0])
+
+    def test_a_utf16_feed_cant_hide_one(self):
+        # A byte search for "<!ENTITY" would miss this one.
+        body = _AMPLIFIED.replace('version="1.0"',
+                                  'version="1.0" encoding="UTF-16"').encode("utf-16")
+        with self.assertLogs("METIS.pheme", "WARNING"):
+            self.assertEqual(self._fetch(body), {"error": "invalid_feed_xml"})
+
+    def test_a_parameter_entity_is_refused_too(self):
+        body = (b'<!DOCTYPE rss [<!ENTITY % p "x">]><rss><channel><item>'
+                b"<title>t</title></item></channel></rss>")
+        with self.assertLogs("METIS.pheme", "WARNING"):
+            self.assertEqual(self._fetch(body), {"error": "invalid_feed_xml"})
+
+    def test_a_doctype_without_entities_still_reads(self):
+        body = (b'<!DOCTYPE rss PUBLIC "-//Netscape Communications//DTD RSS 0.91//EN" '
+                b'"http://my.netscape.com/publish/formats/rss-0.91.dtd"><rss><channel>'
+                b"<item><title>t</title><link>https://example.com/1</link></item>"
+                b"</channel></rss>")
+        result = self._fetch(body)
+        self.assertNotIn("error", result)
+        self.assertEqual([s["title"] for s in result["stories"]], ["t"])
+
+
+class TestEachStoryFieldIsBounded(unittest.TestCase):
+    """One 1,000,000-character title took the panel 137 s to draw, and would
+    have gone to Pythia whole (measured 2026-11-23)."""
+
+    def _caps(self):
+        return (getattr(pheme, "_MAX_TITLE", 512), getattr(pheme, "_MAX_AUTHOR", 256),
+                getattr(pheme, "_MAX_URL", 1024))
+
+    def test_a_long_title_from_a_feed_is_cut_and_says_so(self):
+        title_cap = self._caps()[0]
+        body = ("<rss><channel><item><title>" + "word " * 20000 + "</title>"
+                "<link>https://example.com/1</link></item></channel></rss>")
+        (story,) = pheme._parse_rss(pheme.ET.fromstring(body))
+        self.assertEqual(len(story["title"]), title_cap)
+        self.assertTrue(story["title"].endswith("…"))
+
+    def test_a_long_author_is_cut(self):
+        author_cap = self._caps()[1]
+        story = pheme._story("t", "https://example.com/1", "a" * 5000, "")
+        self.assertEqual(len(story["author"]), author_cap)
+        self.assertTrue(story["author"].endswith("…"))
+
+    def test_a_url_past_its_cap_is_dropped_not_cut(self):
+        # A cut url is a wrong link; the story just isn't clickable.
+        url_cap = self._caps()[2]
+        story = pheme._story("t", "https://example.com/" + "a" * url_cap, "", "")
+        self.assertEqual((story["url"], story["domain"]), ("", ""))
+
+    def test_fields_at_their_caps_are_kept_whole(self):
+        title_cap, author_cap, url_cap = self._caps()
+        url = "https://example.com/" + "a" * (url_cap - len("https://example.com/"))
+        story = pheme._story("t" * title_cap, url, "a" * author_cap, "")
+        self.assertEqual((story["title"], story["author"], story["url"]),
+                         ("t" * title_cap, "a" * author_cap, url))
+
+
+class TestTheConfigIsCheckedRowByRow(_FreshCache):
+    """A row with no id stopped the panel, and so Felhaven, from opening
+    (measured 2026-11-23). One bad row now costs that feed only (§4)."""
+
+    _GOOD = {"id": "a", "label": "A", "url": "https://a.example/rss", "format": "rss"}
+    _BAD = [{"label": "NO ID", "url": "https://x.example/rss"}, "a string",
+            {"id": "", "url": "https://y.example/rss"},
+            {"id": 5, "url": "https://z.example/rss"}, {"id": "nourl"}]
+
+    def setUp(self):
+        super().setUp()
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        self.path = os.path.join(d, "pheme_rumormill.json")
+        p = mock.patch.object(pheme, "_CONFIG_PATH", self.path)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _write(self, feeds):
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"feeds": feeds}, f)
+
+    def test_a_row_it_cant_use_costs_only_that_feed(self):
+        self._write(self._BAD + [self._GOOD, dict(self._GOOD, url="https://dup.example/rss")])
+        asked = []
+        with mock.patch.object(pheme, "_fetch_feed",
+                               side_effect=lambda f: asked.append(f["url"]) or {"stories": []}), \
+                self.assertLogs("METIS.pheme", "WARNING") as logs:
+            try:
+                out = pheme.fetch()
+            except Exception as e:
+                self.fail(f"fetch() raised {type(e).__name__} over one bad row")
+        self.assertEqual(list(out["feeds"]), ["a"])
+        self.assertEqual(asked, ["https://a.example/rss"])     # the first "a" wins
+        self.assertIn("6 feed row(s)", logs.output[-1])
+
+    def test_the_tool_enum_holds_only_usable_ids(self):
+        # A number in a "string" enum is a schema the model can't be given.
+        self._write(self._BAD + [self._GOOD])
+        with self.assertLogs("METIS.pheme", "WARNING"):
+            self.assertEqual(pheme._feed_ids(), ["a"])
+
+    def test_rows_with_none_usable_are_unreadable(self):
+        # Not an empty news day: handle()'s empty `stories` means the feeds answered.
+        self._write(self._BAD)
+        with mock.patch.object(pheme, "_fetch_feed", return_value={"stories": []}), \
+                self.assertLogs("METIS.pheme", "WARNING"):
+            self.assertEqual(pheme.handle(), {"error": "config_unreadable"})
+
+    def test_feeds_that_arent_a_list_are_unreadable(self):
+        self._write({"a": self._GOOD})
+        with mock.patch.object(pheme, "_fetch_feed", return_value={"stories": []}), \
+                self.assertLogs("METIS.pheme", "WARNING"):
+            self.assertEqual(pheme.handle(), {"error": "config_unreadable"})
+
+    def test_an_empty_list_is_just_no_feeds(self):
+        self._write([])
+        answer = pheme.handle()
+        self.assertEqual(answer.get("stories"), [])
+        self.assertNotIn("error", answer)
+
+
+class TestImportingPhemeReadsNoRuntimeFile(_ReadStateTestCase):
+    """Importing Pythia imports every tool, so a read at import ran before any
+    test could point pheme_read.json elsewhere (BACKLOG, 2026-11-19)."""
+
+    def test_importing_pheme_opens_only_its_config(self):
+        spec = importlib.util.spec_from_file_location("pheme_fresh", pheme.__file__)
+        fresh = importlib.util.module_from_spec(spec)
+        with mock.patch("builtins.open", wraps=open) as opened:
+            spec.loader.exec_module(fresh)
+        self.assertEqual({os.path.abspath(c.args[0]) for c in opened.call_args_list},
+                         {os.path.abspath(pheme._CONFIG_PATH)})
+
+    def test_the_first_use_reads_the_file_where_it_points(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"read": ["fake-read-key"]}, f)
+        with mock.patch.object(pheme, "_read_loaded", False, create=True):
+            self.assertIn("fake-read-key", pheme.read_keys())
 
 
 if __name__ == "__main__":

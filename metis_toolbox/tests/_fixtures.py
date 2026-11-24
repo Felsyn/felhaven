@@ -15,9 +15,36 @@ Leading underscore => unittest's discover() does not collect this as a test modu
 
 import json
 import os
+import tempfile
+from pathlib import Path
+from typing import Any
+from unittest import mock
+
+import themis
 
 _FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "fixtures", "wttr_j1.json")
+
+
+class ScratchSettings:
+    """Themis pointed at a settings file in a fresh scratch folder, for a whole
+    test module: start() in setUpModule, stop() in tearDownModule. The file
+    is never written, so Themis reads its defaults: Home, nothing picked. No
+    test then reads this checkout's own place or PLACE pick."""
+
+    def __init__(self) -> None:
+        self._dir: Any = None
+        self._patch: Any = None
+
+    def start(self) -> None:
+        self._dir = tempfile.TemporaryDirectory(prefix="aura_settings_")
+        self._patch = mock.patch.object(
+            themis, "_DATA_PATH", Path(self._dir.name) / "felhaven_settings.json")
+        self._patch.start()
+
+    def stop(self) -> None:
+        self._patch.stop()
+        self._dir.cleanup()
 
 
 def load_real_j1() -> dict:

@@ -4,9 +4,10 @@ echo.py — Echo, the Scribe of Voices
 Metis Toolbox | Anti-Legion: ONE JOB
 
 Job:         Turn text into an audio file on disk. Typically Markdown, and
-             nothing else. Echo does not PLAY audio (that is Calliope), does not control
-             an audio engine (that is Morpheus), and does not decide WHAT to
-             narrate — it is handed text + a filename and writes one .opus file.
+             nothing else. Echo does not PLAY audio (Calliope speaks Pythia's
+             answers; Orpheus plays Echo's files), does not control an audio
+             engine (that is Morpheus), and does not decide WHAT to narrate —
+             it is handed text + a filename and writes one .opus file.
 
 Contract:    text_to_audio(text, filename, *, voice=None) -> dict
                  Strip the Markdown to readable prose, chunk it, synthesize each
@@ -16,18 +17,37 @@ Contract:    text_to_audio(text, filename, *, voice=None) -> dict
                  narration voice), so rendering a file in a different voice never
                  disturbs how Pythia's answers are read aloud. Returns
                  {"path": "<abs .opus path>"} on success, or {"error": "<code>"}
-                 on any failure. NEVER raises — a missing model, a missing or
-                 mis-built ffmpeg, empty text, or a bad filename all degrade to an
-                 {"error": ...} dict, never an exception and never a partial file.
-             available() -> {"ffmpeg": <path or None>}
+                 on any failure: empty_filename, empty_text, file_exists,
+                 ffmpeg_unavailable, synthesis_failed, ffmpeg_encode_failed, or
+                 echo_failed (the catch-all). NEVER raises, and a failed
+                 conversion leaves no file behind. While ffmpeg encodes, the
+                 file grows in place, so ORPHEUS can list it before it is done
+                 (16 s for a 25-minute file, measured 2026-11-21).
+             available() -> {"ffmpeg": <path or None>, "problem": <slug or None>}
                  Report whether the one external binary is resolvable, mirroring
-                 morpheus.available(). The panel reads this to disable its UI.
+                 morpheus.available(); "problem" is aegis's slug when
+                 bin/ffmpeg.exe was refused. The panel reads this to disable
+                 its UI.
+             sanitize_filename(name) -> str
+                 The bare "<stem>.opus" a typed name becomes, or "" when nothing
+                 usable survives. The panel gates its Send button on it.
+
+Write-once:  Echo never replaces a file in local_audio/. A name already there
+             is refused (file_exists) before any synthesis, and claimed with
+             an exclusive create just before ffmpeg runs, so a name taken
+             during a long synthesis is refused too. A failed encode then
+             removes only the file Echo itself created. Until 2026-11-21
+             ffmpeg overwrote (-y), and a failed encode deleted the old file
+             it had never touched (the owner's pick, CONVENTIONS §12).
 
 Source:      One external binary, zero new pip packages.
-               - ffmpeg : encodes the assembled WAV to .opus (libopus). Resolved
-                          bin/ffmpeg.exe first (flash-drive-portable), then PATH
-                          — the Morpheus precedent. Absent, or present but built
-                          without libopus, both degrade to a clean {"error": ...}.
+               - ffmpeg : encodes the assembled WAV to .opus (libopus).
+                          tools/aegis.py resolves it: bin/ffmpeg.exe when it
+                          matches its manifest entry, else ffmpeg.exe on PATH;
+                          a bin/ copy that doesn't match is refused, never
+                          swapped for PATH's. Absent, refused, or built
+                          without libopus, each degrades to a clean
+                          {"error": ...}.
              TTS itself is NOT owned here: Echo calls calliope.synthesize() and
              reuses calliope.take_chunk() / save_wav(), so there is exactly one
              loaded kokoro model and one WAV writer in the process (save_wav owns
@@ -39,7 +59,7 @@ Markdown:    Echo eats real .md, so its stripper is deliberately MORE thorough
                  aloud is unlistenable and prose is the job. INDENTED code is
                  left AS prose: detecting it without a real Markdown parser risks
                  eating legitimately-indented text, so it is a deliberate,
-                 documented limit (flagged for review).
+                 documented limit.
                - DROPS images ![alt](url) entirely.
                - UNWRAPS links [text](url) -> text.
                - STRIPS heading marks, blockquote marks, list bullets, table
@@ -55,24 +75,48 @@ Contention:  Echo shares Calliope's single kokoro model and its _synth_lock, so 
 
 Flavor:      Request-driven and out-of-LLM-scope for v1: no fetch() (not polled)
              and no handle()/TOOL_DEFINITION (a tool call cannot reach it yet).
-             It is the "Local-only / plain functions" shape (CONVENTIONS §2) — a
-             future narrate_to_file brain tool is left open by this shape, not
-             built.
+             It has the surface of §2's "Local-only ledger / persistence" row
+             (plain functions), though what it keeps is audio files, not a
+             ledger. A future narrate_to_file brain tool is left open by this
+             shape, not built.
 
-Upstream:    panels/echo_panel.py (the paste-and-convert UI); Eos later (an
-             unattended caller).
-Downstream:  calliope.synthesize() (TTS) -> ffmpeg (Opus encode).
+Threads:     text_to_audio() runs on EchoPanel's conversion thread. It keeps
+             no module state; Calliope's own lock guards the model (see
+             Contention).
 
-Requires:    ffmpeg binary (bin/ or PATH). numpy (via calliope). Stdlib otherwise.
+Upstream:    panels/echo_panel.py (the paste-and-convert UI).
+Downstream:  calliope.py (synthesize, take_chunk, save_wav) -> ffmpeg (Opus
+             encode), vouched for by tools/aegis.py. tools/orpheus.py plays
+             what lands in local_audio/.
 
-V0.02:       Audited 2026-07-25 — never-raise contract verified, error slugs
+Requires:    calliope, tools.aegis; numpy; the ffmpeg binary (bin/ or PATH).
+             Stdlib: logging, ntpath, os, re, subprocess, sys, tempfile,
+             pathlib, typing.
+
+2026-07-25:  walkthrough audit — never-raise contract verified, error slugs
              already conformant (never in the output allowlist). echo_panel now
              reads available() at build time to disable the tab when ffmpeg is
              absent (§7); SAMPLE_RATE dropped from the reused-seam list (Echo
              never references it — save_wav owns it).
+
+V0.03:       Walked through 2026-11-21 (the V0.03 walkthrough, CONVENTIONS
+             §3/§12). Built 2026-07-15. Checked: the Markdown strip and
+             chunking against the tests; kokoro-onnx 0.6.1 splits any text
+             into batches of at most 510 phonemes itself, so one create() call
+             has no length ceiling. Changed: a name already in local_audio/ is
+             refused before synthesis and claimed exclusively before ffmpeg,
+             so a failed encode removes only Echo's own file (it had deleted
+             the old file of that name; the owner's pick); a launch that
+             raises cleans up like a failed one; sanitize_filename() refuses
+             every name Windows reserves (ntpath.isreserved: "con .opus",
+             "COM¹", "CONIN$" got through); the Contract lists every error,
+             available()'s "problem" and sanitize_filename(); Upstream dropped
+             "Eos later" (Eos is the space-weather module); Requires names
+             every import.
 """
 
 import logging
+import ntpath
 import os
 import re
 import subprocess
@@ -103,11 +147,11 @@ _LOCAL_AUDIO_DIR = os.path.join(_APP_ROOT, "local_audio")
 # a non-Windows box can't AttributeError (morpheus precedent).
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-# Per-chunk char cap for a single kokoro create() call. Calliope's proven live
-# cap is 240; Echo has no playback-latency budget, so it uses a larger cap to
-# amortize the per-call overhead across a whole document. NOTE: no empirical
-# single-call ceiling for kokoro-onnx has been measured on this project — 400 is
-# a conservative guess above the proven 240; retune if long chunks fail.
+# Per-chunk char cap for a single kokoro create() call. Calliope's live cap is
+# 240, sized for playback latency; Echo has no latency budget, so it uses a
+# larger cap to amortize the per-call overhead across a whole document. There
+# is no ceiling to stay under: kokoro-onnx 0.6.1 splits any text into batches
+# of at most 510 phonemes itself (checked 2026-11-21).
 _CHUNK_MAX_CHARS = 400
 
 # Opus bitrate for speech — 48 kbps is transparent for a single mono voice.
@@ -119,24 +163,26 @@ _OPUS_BITRATE = "48k"
 # reject reserved device names, and force a single .opus extension. Without this
 # a stray "/" or ":" could write outside local_audio/.
 _ILLEGAL = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
-_RESERVED = {"CON", "PRN", "AUX", "NUL",
-             *(f"COM{i}" for i in range(1, 10)),
-             *(f"LPT{i}" for i in range(1, 10))}
 
 
 def sanitize_filename(name: str) -> str:
     """Return a safe bare '<stem>.opus' filename, or '' if nothing usable
     survives (the caller turns '' into an empty_filename error). Strips illegal
-    chars and leading/trailing dots+spaces, rejects reserved device names, and
-    appends .opus unless it is already present."""
+    chars and leading/trailing dots+spaces, appends .opus unless it is already
+    present, and refuses any name Windows reserves for a device.
+
+    ntpath.isreserved, not a hand-kept list: Windows also reserves a device
+    name followed by spaces ("con .opus"), one with a superscript digit
+    ("COM¹"), and CONIN$/CONOUT$, and the old list of twenty-two plain names
+    let all of those through (measured 2026-11-21). ntpath, not os.path, so
+    the rule is Windows's on any machine the tests run on."""
     cleaned = _ILLEGAL.sub("", name).strip().strip(".").strip()
     if not cleaned:
         return ""
-    stem = cleaned.split(".")[0]
-    if not stem or stem.upper() in _RESERVED:
-        return ""
     if not cleaned.lower().endswith(".opus"):
         cleaned += ".opus"
+    if ntpath.isreserved(cleaned):
+        return ""
     return cleaned
 
 
@@ -197,10 +243,15 @@ def _chunk(text: str) -> list[str]:
 
 
 def _encode_opus(ffmpeg: str, wav_path: str, out_path: str) -> dict[str, str]:
-    """Encode wav_path -> out_path (.opus) via ffmpeg/libopus. A missing-libopus
-    build (or any encode failure) surfaces as a nonzero exit -> {"error":
-    "ffmpeg_encode_failed"}, and any partial output is removed so no half-written
-    file survives.
+    """Claim out_path, then encode wav_path into it (.opus) via ffmpeg/libopus.
+
+    The claim is an exclusive create (O_EXCL): if out_path already exists,
+    nothing runs and the answer is {"error": "file_exists"}, so the file
+    ffmpeg then overwrites (-y) is always the empty one Echo just made (see
+    the module "Write-once" section). A missing-libopus build, any other
+    encode failure, or a launch that raises -> {"error":
+    "ffmpeg_encode_failed"}, and Echo's own file is removed, so no
+    half-written file survives.
 
     Both paths must be absolute, or nothing runs (same error). ffmpeg reads an
     argument starting with "-" as an option and one with "name:" before its
@@ -212,17 +263,28 @@ def _encode_opus(ffmpeg: str, wav_path: str, out_path: str) -> dict[str, str]:
     if not (os.path.isabs(wav_path) and os.path.isabs(out_path)):
         log.error("Echo: refused to hand ffmpeg a path that isn't absolute")
         return {"error": "ffmpeg_encode_failed"}
+    try:
+        os.close(os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL))
+    except FileExistsError:
+        log.warning("Echo: %s appeared during synthesis; not replacing it",
+                    os.path.basename(out_path))
+        return {"error": "file_exists"}
     cmd = [ffmpeg, "-y", "-loglevel", "error", "-f", "wav", "-i", wav_path,
            "-c:a", "libopus", "-b:a", _OPUS_BITRATE, out_path]
-    proc = subprocess.run(cmd, capture_output=True, creationflags=_NO_WINDOW)
-    if proc.returncode != 0:
-        log.error("Echo: ffmpeg failed (rc=%s): %s", proc.returncode,
-                  proc.stderr.decode("utf-8", "replace").strip())
-        if os.path.isfile(out_path):
-            try:
-                os.remove(out_path)
-            except OSError:
-                pass
+    try:
+        proc = subprocess.run(cmd, capture_output=True, creationflags=_NO_WINDOW)
+        failed = proc.returncode != 0
+        if failed:
+            log.error("Echo: ffmpeg failed (rc=%s): %s", proc.returncode,
+                      proc.stderr.decode("utf-8", "replace").strip())
+    except OSError as e:
+        log.error("Echo: ffmpeg failed to run: %s", type(e).__name__)
+        failed = True
+    if failed:
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
         return {"error": "ffmpeg_encode_failed"}
     return {"path": os.path.abspath(out_path)}
 
@@ -238,7 +300,11 @@ def text_to_audio(text: str, filename: str, *,
     synthesis_failed like any other synthesis failure — voices.CATALOG is the
     gate, and the panel only ever offers ids from it.
 
-    Error codes: empty_filename, empty_text, ffmpeg_unavailable,
+    A name already in local_audio/ is refused here, before minutes of
+    synthesis, and again by _encode_opus's exclusive create (the module
+    "Write-once" section).
+
+    Error codes: empty_filename, empty_text, file_exists, ffmpeg_unavailable,
     synthesis_failed, ffmpeg_encode_failed, echo_failed (catch-all)."""
     try:
         safe_name = sanitize_filename(filename)
@@ -248,6 +314,10 @@ def text_to_audio(text: str, filename: str, *,
         prose = _strip_markdown(text or "")
         if not prose:
             return {"error": "empty_text"}
+
+        out_path = os.path.join(_LOCAL_AUDIO_DIR, safe_name)
+        if os.path.lexists(out_path):
+            return {"error": "file_exists"}
 
         ffmpeg = _resolve("ffmpeg")
         if not ffmpeg:
@@ -266,10 +336,9 @@ def text_to_audio(text: str, filename: str, *,
         audio = np.concatenate(pcms)
 
         os.makedirs(_LOCAL_AUDIO_DIR, exist_ok=True)
-        out_path = os.path.join(_LOCAL_AUDIO_DIR, safe_name)
 
         # Assemble the WAV in a temp file (stdlib wave via calliope.save_wav),
-        # encode to Opus, then always delete the temp WAV.
+        # claim the name and encode to Opus, then always delete the temp WAV.
         fd, wav_path = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
         try:

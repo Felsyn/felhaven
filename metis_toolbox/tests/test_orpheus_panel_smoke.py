@@ -13,8 +13,11 @@ without ffmpeg actually being installed.
     python -X utf8 -m unittest tests.test_orpheus_panel_smoke
 """
 
+import ast
 import os
 import sys
+import threading
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -119,6 +122,19 @@ class _EnabledPanelCase(unittest.TestCase):
         return [w for w in self.panel._scroll.inner.winfo_children()
                 if isinstance(w, tk.Frame) and str(w.cget("bg")) == theme.C["card"]]
 
+    def _pump_until(self, cond, timeout=3.0):
+        """Drive the Tk event loop (the drain chain's after() callbacks)
+        until cond() holds or the timeout passes."""
+        deadline = time.time() + timeout
+        while not cond() and time.time() < deadline:
+            self.root.update()
+            time.sleep(0.02)
+
+    def _play(self, name):
+        """Click a row's title and wait for the decode to land."""
+        self.panel._on_play(name)
+        self._pump_until(lambda: not getattr(self.panel, "_decoding", False))
+
 
 class TestOrpheusPanelEnabled(_EnabledPanelCase):
     """ffmpeg 'present' (monkeypatched): full transport + file list render."""
@@ -173,7 +189,7 @@ class TestOrpheusPanelEnabled(_EnabledPanelCase):
     def test_click_row_plays_and_sets_now_playing(self):
         self.panel.update({"playing": False, "files": [{"name": "a.opus", "duration": 10.0}]})
         self.root.update_idletasks()
-        self.panel._on_play("a.opus")
+        self._play("a.opus")
         self.assertEqual(self.panel._now_lbl.cget("text"), "playing: a.opus")
         self.assertEqual(self.panel._stop_btn.cget("cursor"), "hand2")
 
@@ -181,7 +197,7 @@ class TestOrpheusPanelEnabled(_EnabledPanelCase):
         orpheus.play_file = lambda name: {"error": "decode_failed"}
         self.panel.update({"playing": False, "files": [{"name": "a.opus", "duration": 10.0}]})
         self.root.update_idletasks()
-        self.panel._on_play("a.opus")
+        self._play("a.opus")
         self.assertEqual(self.panel._status.cget("fg"), theme.C["red"])
 
     def test_stop_click_resets_transport(self):
@@ -190,6 +206,47 @@ class TestOrpheusPanelEnabled(_EnabledPanelCase):
         self.panel._on_stop()
         self.assertEqual(self.panel._now_lbl.cget("text"), "nothing playing")
         self.assertEqual(self.panel._stop_btn.cget("cursor"), "arrow")
+
+
+
+    # ── Virgil tooltips ─────────────────────────────────────────────────────
+
+    def _tip_on(self, widget):
+        from panels import virgil_tooltip
+        return virgil_tooltip._shared(self.root)._tips.get(str(widget))
+
+    def _labels(self, parent, text):
+        found, stack = [], [parent]
+        while stack:
+            w = stack.pop()
+            if isinstance(w, tk.Label) and w.cget("text") == text:
+                found.append(w)
+            stack.extend(w.winfo_children())
+        return found
+
+    def test_stop_keeps_its_tip_through_every_light_and_dim(self):
+        """_set_stop_enabled binds and unbinds <Button-1>, <Enter> and <Leave>
+        with no add="+". The tip rides a bindtag, so none of that reaches it."""
+        from panels import virgil_tooltip
+        from panels.orpheus_panel import OrpheusPanel
+        panel = self.panel
+        self.assertEqual(sorted(OrpheusPanel._TIPS), sorted(panel.tip_targets))
+        self.assertIs(panel.tip_targets["stop"], panel._stop_btn)
+        for enabled in (True, False, True, False):
+            panel._set_stop_enabled(enabled)
+            self.assertEqual(bool(panel._stop_btn.bind("<Button-1>")), enabled)
+            self.assertIn(virgil_tooltip._TAG, panel._stop_btn.bindtags())
+            self.assertEqual(self._tip_on(panel._stop_btn), OrpheusPanel._TIPS["stop"])
+
+    def test_every_file_row_carries_the_remove_tip(self):
+        from panels.orpheus_panel import OrpheusPanel
+        self.panel.update({"playing": False, "files": [
+            {"name": "a.opus", "duration": 75.0},
+            {"name": "b.opus", "duration": None}]})
+        removes = self._labels(self.panel._scroll.inner, "✕")
+        self.assertEqual(len(removes), 2)
+        for glyph in removes:
+            self.assertEqual(self._tip_on(glyph), OrpheusPanel._ROW_TIPS["file_remove"])
 
 
 class TestOrpheusPanelRemove(_EnabledPanelCase):
@@ -282,6 +339,81 @@ class TestOrpheusPanelRemove(_EnabledPanelCase):
         self.panel._status.config(text="something newer")
         self.panel._clear_flash("removed")
         self.assertEqual(self.panel._status.cget("text"), "something newer")
+
+
+class TestOrpheusPanelDecode(_EnabledPanelCase):
+    """A click decodes on one daemon thread, drained by a bounded after()
+    chain (the EchoPanel shape, CONVENTIONS §6). Until 2026-11-21 the decode
+    ran in the click handler and froze Felhaven: 3.2 s for a 25-minute file.
+
+    Each fake play_file waits on an Event with a timeout, so run against the
+    old synchronous panel these fail on their assertions instead of hanging."""
+
+    def setUp(self):
+        super().setUp()
+        self.release = threading.Event()
+        self.calls = []
+
+        def slow_play(name):
+            self.calls.append((name, threading.current_thread() is threading.main_thread()))
+            self.release.wait(timeout=2.0)
+            return {"playing": name}
+
+        orpheus.play_file = slow_play
+        self.addCleanup(self.release.set)
+
+    def test_a_click_decodes_off_the_ui_thread(self):
+        self.release.set()
+        self._play("a.opus")
+        self.assertEqual(self.calls, [("a.opus", False)])
+        self.assertEqual(self.panel._now_lbl.cget("text"), "playing: a.opus")
+
+    def test_the_status_says_decoding_until_the_result_lands(self):
+        self.panel._on_play("a.opus")
+        self.assertEqual(self.panel._status.cget("text"), "decoding a.opus …")
+        self.release.set()
+        self._pump_until(lambda: not getattr(self.panel, "_decoding", False))
+        self.assertEqual(self.panel._status.cget("text"), "")
+        self.assertIsNone(self.panel._drain_after_id)   # the chain stopped itself
+
+    def test_a_second_click_while_one_decodes_is_ignored(self):
+        self.panel._on_play("a.opus")
+        self.panel._on_play("b.opus")
+        self.release.set()
+        self._pump_until(lambda: not getattr(self.panel, "_decoding", False))
+        self.assertEqual([name for name, _ in self.calls], ["a.opus"])
+        self.assertEqual(self.panel._now_lbl.cget("text"), "playing: a.opus")
+
+    def test_destroy_cancels_a_pending_drain(self):
+        from panels.orpheus_panel import OrpheusPanel
+        panel = OrpheusPanel(self.root)
+        panel._on_play("a.opus")
+        pending = getattr(panel, "_drain_after_id", None)
+        panel.destroy()
+        self.assertNotIn(pending, self.root.tk.splitlist(self.root.tk.call("after", "info")))
+
+
+class TestErrorWords(unittest.TestCase):
+    """_ERROR_TEXT has words for exactly the codes play_file() and
+    delete_file() return, read from tools/orpheus.py itself."""
+
+    def test_every_code_has_words_and_every_word_a_code(self):
+        from panels.orpheus_panel import _ERROR_TEXT
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "tools", "orpheus.py")
+        with open(path, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        codes = set()
+        for fn in ast.walk(tree):
+            if isinstance(fn, ast.FunctionDef) and fn.name in ("play_file", "delete_file"):
+                for node in ast.walk(fn):
+                    if isinstance(node, ast.Dict):
+                        codes |= {v.value for k, v in zip(node.keys, node.values)
+                                  if isinstance(k, ast.Constant) and k.value == "error"
+                                  and isinstance(v, ast.Constant)}
+        self.assertEqual(codes, {"bad_name", "ffmpeg_unavailable", "decode_failed",
+                                 "delete_failed"})   # not vacuous
+        self.assertEqual(set(_ERROR_TEXT), codes)
 
 
 if __name__ == "__main__":

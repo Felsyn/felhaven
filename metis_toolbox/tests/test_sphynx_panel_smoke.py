@@ -132,6 +132,45 @@ class TestSphynxPanelSmoke(unittest.TestCase):
         self.assertFalse(p._success)
         self.assertIn("match", p._setup_status.cget("text").lower())
 
+    def test_first_run_says_to_use_a_pin_used_nowhere_else(self):
+        # The gate file's fast hash gives a short PIN away (sphynx.py).
+        p = self._panel()
+        p._begin_first_run()
+        self.assertIn("Use a PIN you use nowhere else", p._log.get("1.0", "end"))
+
+    def test_a_gate_that_cannot_be_written_shows_the_class_not_the_path(self):
+        # §2: an OSError's text names the file's full path.
+        p = self._panel()
+        p._begin_first_run()
+        p._riddle_entry.insert(0, "fake riddle")
+        p._pin_entry.insert(0, "fake-gate-pin")
+        p._confirm_entry.insert(0, "fake-gate-pin")
+        boom = PermissionError(13, "Access is denied", str(sphynx._DATA_PATH))
+        with mock.patch.object(sphynx, "create", side_effect=boom):
+            p._on_create()
+        text = p._setup_status.cget("text")
+        self.assertIn("PermissionError", text)
+        self.assertNotIn(self._dir, text)
+        self.assertFalse(p._success)
+
+    def test_a_skip_that_cannot_be_saved_shows_the_class_not_the_path(self):
+        p = self._panel()
+        p._begin_first_run()
+        boom = PermissionError(13, "Access is denied", str(sphynx._DATA_PATH))
+        with mock.patch.object(sphynx, "create", side_effect=boom):
+            p._on_skip()
+        text = p._setup_status.cget("text")
+        self.assertIn("PermissionError", text)
+        self.assertNotIn(self._dir, text)
+        self.assertFalse(p._success)
+
+    def test_the_entry_boxes_type_with_the_theme_cursor(self):
+        # They set no insertbackground of their own (§7): the theme's option
+        # database gives it, so this holds only while the root inits it.
+        p = self._panel()
+        for entry in (p._entry, p._riddle_entry, p._pin_entry, p._confirm_entry):
+            self.assertEqual(entry.cget("insertbackground"), sphynx_panel.C["text1"])
+
     # ── gate verification (sphynx_panel._on_submit) ─────────────────────
 
     def test_wrong_pin_decrements_and_stays_gated(self):
@@ -154,6 +193,29 @@ class TestSphynxPanelSmoke(unittest.TestCase):
         p.root.update_idletasks()
         self.assertTrue(p._success)
         self._popen.assert_not_called()      # launch is scheduled via after(500)
+
+
+class TestTheGateLogsItsErrors(unittest.TestCase):
+    """Run by Felhaven.bat under pythonw, the gate has no stderr, and it never
+    set up logging, so an exception nothing caught left no trace (BACKLOG,
+    routed to S26). The program block is read, not run: running it opens the
+    real logs/sphynx.log and the gate window."""
+
+    def test_the_program_block_sets_up_logging_and_tk_s_hook(self):
+        import ast
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "sphynx_panel.py")
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        main = next(node for node in tree.body if isinstance(node, ast.If)
+                    and ast.unparse(node.test) == "__name__ == '__main__'")
+        calls = [ast.unparse(node) for stmt in main.body
+                 for node in ast.walk(stmt) if isinstance(node, ast.Call)]
+        self.assertIn("setup_logging('sphynx')", calls)
+        self.assertIn("log_tk_errors(app.root)", calls)
+        setup_at = calls.index("setup_logging('sphynx')")
+        self.assertLess(setup_at, calls.index("SphynxPanel()"),
+                        "logging must be up before the gate is built")
 
 
 if __name__ == "__main__":

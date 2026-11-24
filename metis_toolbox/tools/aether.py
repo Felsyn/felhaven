@@ -9,13 +9,16 @@ Three probes, three answers: the WiFi adapter's state (Windows-only via
 netsh), whether the internet actually answers (Windows' own connectivity
 probe), and whether the local Ollama server that runs Pythia is up.
 
-Contract:    Exposes TOOL_DEFINITION, handle(), and fetch().
+Contract:    Exposes handle() and fetch(). Not a brain tool since 2026-11-14:
+             Asclepius hands handle() to Pythia as get_machine_status part=online.
              Every check handles its own failures and returns a safe label,
              so neither handle() nor fetch() ever raises. fetch() is aliased to
              handle() — the poll path is the read path — so its never-raise is
              §2's brain-tool rule, not an emanon-style watcher exception.
 
-Source:      netsh wlan show interfaces (2 s timeout);
+Source:      netsh wlan show interfaces (2 s timeout), System32's netsh by
+             absolute path: a bare name would run a netsh.exe from the working
+             folder first (measured 2026-11-17, CONVENTIONS §12);
              http://www.msftconnecttest.com/connecttest.txt — the page Windows'
              Network Connectivity Status Indicator reads, whose whole body is
              "Microsoft Connect Test". It is plain HTTP ON PURPOSE: a captive
@@ -28,7 +31,10 @@ Source:      netsh wlan show interfaces (2 s timeout);
              lockstep, since tools/ must not import the brain.
 
 Upstream:    kairos.py — the "aether" worker polls fetch() every 300 s.
-             pythia.py — exposes handle() to the LLM as get_connectivity.
+             tools/asclepius.py — hands handle() to Pythia (get_machine_status,
+             part=online).
+             tools/talos.py — ollama_base_url(), to ask the same Ollama for
+             its models.
 
 Downstream:  panels/hephaestus_panel.py → AetherWidget (embedded in VitalsPanel,
              the HEPHAESTUS tab; registered with Kairos as its own "aether" panel,
@@ -39,7 +45,7 @@ Requires:    tools/hermes.py (the bounded network read; both probes are plain
              os, subprocess, sys, logging (stdlib); netsh is Windows-only and
              degrades to "unknown" off-Windows.
 
-V0.02:       Audited 2026-07-24 — docstring gained Source/Upstream/Downstream;
+2026-07-24:  walkthrough audit — docstring gained Source/Upstream/Downstream;
              first test coverage (tests/test_aether.py,
              tests/test_aether_widget_smoke.py); contract verified — handle()/
              fetch() never raise and emit no error dict, so no §2 slug work.
@@ -51,6 +57,19 @@ V0.02:       Audited 2026-07-24 — docstring gained Source/Upstream/Downstream;
              actually asks: is the internet up, and is Ollama up. The poll went
              from hourly to 300 s — an hour-old "the internet is up" misleads,
              and both new probes are cheap. See CONVENTIONS §12.
+
+2026-11-14:  TOOL_DEFINITION removed. get_connectivity is retired; Pythia
+             reaches handle() through Asclepius's get_machine_status, with
+             Hephaestus and Argus, so the model picks among one tool's parts
+             instead of three near-duplicate tools (CONVENTIONS §12).
+
+V0.03:       Walked through 2026-11-17 (the V0.03 walkthrough, CONVENTIONS
+             §3). netsh ran by bare name, so a netsh.exe in the working folder
+             ran in System32's place every 300 s (measured with a decoy); it
+             now runs by absolute path, and test_process_launches fails any
+             launch that names a bare program. Upstream gained Talos. The
+             probes, the never-raise contract and the captive-portal reading
+             hold as written.
 """
 
 import logging
@@ -86,6 +105,13 @@ _NETSH_TIMEOUT = 2
 # AttributeError. Mirrors tools/argus.py.
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+# netsh by its absolute path. A bare "netsh" is looked for in Python's folder
+# and the working folder before System32, so a netsh.exe left in either would
+# run every 300 s in its place (measured 2026-11-17; CONVENTIONS §12). The
+# same rule as Brontes's nvml.dll.
+_NETSH = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                      "System32", "netsh.exe")
+
 
 def _base_url(host: str) -> str:
     """OLLAMA_HOST is host:port with no scheme; tolerate a stray scheme.
@@ -94,8 +120,13 @@ def _base_url(host: str) -> str:
     return "http://" + host.replace("http://", "").replace("https://", "")
 
 
-_OLLAMA_VERSION_URL = (
-    _base_url(os.environ.get("OLLAMA_HOST", "127.0.0.1:11435")) + "/api/version")
+def ollama_base_url() -> str:
+    """The local Ollama's address, http://host:port. Talos asks the same
+    server for its models; tests/test_aether.py holds this to pythia's."""
+    return _base_url(os.environ.get("OLLAMA_HOST", "127.0.0.1:11435"))
+
+
+_OLLAMA_VERSION_URL = ollama_base_url() + "/api/version"
 
 
 # ── Internals ─────────────────────────────────────────────────────────────────
@@ -111,7 +142,7 @@ def _check_wifi() -> str:
     """
     try:
         result = subprocess.run(
-            ["netsh", "wlan", "show", "interfaces"],
+            [_NETSH, "wlan", "show", "interfaces"],
             capture_output=True, text=True, timeout=_NETSH_TIMEOUT,
             creationflags=_NO_WINDOW,
         )
@@ -182,30 +213,8 @@ def _check_ollama() -> str:
 
 # ── Contract ──────────────────────────────────────────────────────────────────
 
-TOOL_DEFINITION = {
-    "type": "function",
-    "function": {
-        "name": "get_connectivity",
-        "description": (
-            "Returns this machine's connectivity: its WiFi state (connected / "
-            "disconnected / unknown), whether the internet is reachable (online; "
-            "limited, meaning a captive portal or filtered network; offline; or "
-            "unknown), and whether the local Ollama server that runs Pythia is "
-            "up. Call this when the user asks whether they are online, about "
-            "the internet or WiFi, or whether the model server is running. For "
-            "bandwidth, open connections or the firewall, use get_network_summary."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-    },
-}
-
-
 def handle() -> dict[str, Any]:
-    """Brain entry point — never raises."""
+    """Pythia's reading (through Asclepius, part=online) — never raises."""
     return {
         "wifi":     _check_wifi(),
         "internet": _check_internet(),

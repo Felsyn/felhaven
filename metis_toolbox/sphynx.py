@@ -12,8 +12,9 @@ Job:         Verify a PIN against the stored hash, and track how many
 Contract:    preflight()      — validate the hash file loads AND carries a
                                  PIN; raises HashFileError if not. The panel
                                  uses it to tell a normal launch (gate) from
-                                 a first run (no file → setup screen), not to
-                                 fail closed.
+                                 a first run (a missing file, or one with no
+                                 readable PIN → setup screen), not to fail
+                                 closed.
              is_disabled()    — True if the user skipped the gate on first
                                  run. A missing/broken file reads False.
              riddle()         — the stored riddle to pose at the gate, or a
@@ -37,10 +38,21 @@ State:       _ATTEMPTS_REMAINING is a plain module-level int, reset to 3
              bolted on top. Relaunching the app gives a fresh 3 attempts,
              on purpose.
 
-Threat model: this is a flavor gate, not real security. A SHA-256 of a
-             short PIN is trivially brute-forceable by anyone reading the
-             source. That's fine — it only needs to stop a child at the
-             keyboard. Do not add lockout persistence or key stretching.
+Threat model: this is a flavor gate, not real security. It guards one
+             door, Felhaven.bat's launch; `python felhaven.py` runs without
+             it. The PIN is kept as a fast, unsalted SHA-256, so anyone who
+             can read sphynx_data.json can work it out (Python tried every
+             six-digit PIN in 1.2 s, measured 2026-11-17). Hence the setup
+             screen's "use a PIN you use nowhere else". That's fine — it only
+             needs to stop a child at the keyboard. Do not add lockout
+             persistence or key stretching.
+
+Cerberus:    a separate PIN, file and attempt counter. Neither PIN decrypts
+             anything (Cerberus keeps its keys under Windows DPAPI since
+             v2), and passing this gate opens no Cerberus session: Felhaven
+             starts as a new process, sealed. Cerberus's Custody lists
+             sphynx_data.json, so whoever holds Cerberus's PIN can open this
+             file in an editor, and with it reset or skip the gate.
 
 First run:   sphynx_data.json is per-user now (gitignored, no longer shipped
              with the author's PIN), so a fresh clone has no file. create()
@@ -51,15 +63,22 @@ First run:   sphynx_data.json is per-user now (gitignored, no longer shipped
 
 Upstream:    sphynx_panel.py
 Downstream:  config/sphynx_data.json (per-user, gitignored; written by
-             create(), read by verify/riddle/is_disabled)
+             create(), read by preflight/verify/riddle/is_disabled)
 
 Requires:    hashlib, json, os, tempfile, pathlib (stdlib only). No tkinter —
              this module stays independently unit-testable and UI-free.
 
-V0.02:       Audited 2026-07-24 — Contract completed (is_disabled/riddle/
+2026-07-24:  walkthrough audit — Contract completed (is_disabled/riddle/
              create were public but undocumented), the stale "no persistence"
              / preflight-"fail closed" lines corrected, and a read-only
              __main__ status block added (§3.7).
+
+V0.03:       Walked through 2026-11-17 (the V0.03 walkthrough, CONVENTIONS
+             §3). The code is unchanged since July; the words were not. The
+             threat model said the PIN fell to "anyone reading the source",
+             but the hash is in the gate file, not the source. It now says
+             what the gate guards and how its PIN stands beside Cerberus's,
+             which changed under it in v2. No logger: this module never logs.
 """
 
 import hashlib
@@ -110,8 +129,8 @@ def _load_pin_hash() -> str:
 
 def preflight() -> None:
     """Validate the hash file loads AND carries a PIN, without checking it. The
-    panel calls this to tell a normal launch (gate) from a first run (no file →
-    HashFileError → setup screen)."""
+    panel calls this to tell a normal launch (gate) from a first run (a missing
+    file, or one with no readable PIN → HashFileError → setup screen)."""
     _load_pin_hash()
 
 

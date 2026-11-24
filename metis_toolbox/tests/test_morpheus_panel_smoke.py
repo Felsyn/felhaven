@@ -13,9 +13,11 @@ without the binaries actually being installed.
     python -X utf8 -m unittest tests.test_morpheus_panel_smoke
 """
 
+import json
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -226,14 +228,14 @@ class TestMorpheusPanelEnabled(unittest.TestCase):
         self.panel.update(None)
         self.root.update_idletasks()
         # Two result rows + their dividers were rendered into the scroll body.
-        rows = [w for w in self.panel._results.inner.winfo_children()
+        rows = [w for w in self.panel._results.body.winfo_children()
                 if isinstance(w, tk.Frame)]
         self.assertGreaterEqual(len(rows), 2)
 
     def _save_glyphs(self):
         """Every '＋' save glyph in the rendered search results."""
         return [child
-                for row in self.panel._results.inner.winfo_children()
+                for row in self.panel._results.body.winfo_children()
                 for child in row.winfo_children()
                 if isinstance(child, tk.Label) and child.cget("text") == "＋"]
 
@@ -276,6 +278,67 @@ class TestMorpheusPanelEnabled(unittest.TestCase):
         self.panel._reset_save_glyph(glyph)   # must not raise TclError
 
 
+
+    # ── Virgil tooltips ─────────────────────────────────────────────────────
+
+    def _tip_on(self, widget):
+        from panels import virgil_tooltip
+        return virgil_tooltip._shared(self.root)._tips.get(str(widget))
+
+    def _labels(self, parent, text):
+        found, stack = [], [parent]
+        while stack:
+            w = stack.pop()
+            if isinstance(w, tk.Label) and w.cget("text") == text:
+                found.append(w)
+            stack.extend(w.winfo_children())
+        return found
+
+    def test_the_transport_and_save_carry_their_tips(self):
+        from panels.morpheus_panel import MorpheusPanel
+        panel = self.panel
+        self.assertEqual(sorted(MorpheusPanel._TIPS), sorted(panel.tip_targets))
+        for key in ("prev", "play", "next", "stop"):
+            self.assertIs(panel.tip_targets[key], panel._btns[key])
+        for key, tip in MorpheusPanel._TIPS.items():
+            self.assertEqual(self._tip_on(panel.tip_targets[key]), tip, key)
+
+    def test_each_inner_tab_carries_its_tip(self):
+        from panels.morpheus_panel import MorpheusPanel
+        self.assertEqual(sorted(MorpheusPanel._TAB_TIPS), sorted(self.panel._tabs))
+        for key, tip in MorpheusPanel._TAB_TIPS.items():
+            self.assertEqual(self._tip_on(self.panel._tabs[key]), tip, key)
+
+    def test_every_playlist_row_and_search_result_carries_its_glyph_tip(self):
+        from panels.morpheus_panel import MorpheusPanel
+        panel = self.panel
+        removes = self._labels(panel._pl_scroll.body, "✕")
+        self.assertEqual(len(removes), 1)
+        self.assertEqual(self._tip_on(removes[0]),
+                         MorpheusPanel._ROW_TIPS["playlist_remove"])
+        panel._build_result_row({"title": "Result", "channel": "", "duration": None,
+                                 "url": "https://www.youtube.com/watch?v=abc"})
+        saves = self._labels(panel._results.body, "＋")
+        self.assertEqual(len(saves), 1)
+        self.assertEqual(self._tip_on(saves[0]), MorpheusPanel._ROW_TIPS["search_save"])
+
+    def test_a_saved_result_keeps_its_tip_after_it_unbinds_itself(self):
+        """A saved ＋ becomes a tick and unbinds its own click and hover. The
+        tip rides a bindtag, so it stays."""
+        from panels import virgil_tooltip
+        from panels.morpheus_panel import MorpheusPanel
+        panel = self.panel
+        panel._build_result_row({"title": "Result", "channel": "", "duration": None,
+                                 "url": "https://www.youtube.com/watch?v=abc"})
+        glyph = self._labels(panel._results.body, "＋")[0]
+        with mock.patch.object(morpheus, "save_playlist", return_value=True):
+            panel._save_from_search("Result", "https://www.youtube.com/watch?v=abc", glyph)
+        self.assertEqual(glyph.cget("text"), "✓")
+        self.assertFalse(glyph.bind("<Button-1>"))
+        self.assertIn(virgil_tooltip._TAG, glyph.bindtags())
+        self.assertEqual(self._tip_on(glyph), MorpheusPanel._ROW_TIPS["search_save"])
+
+
 class TestMorpheusFormatters(unittest.TestCase):
     def test_fmt_t(self):
         from panels.morpheus_panel import MorpheusPanel
@@ -288,6 +351,114 @@ class TestMorpheusFormatters(unittest.TestCase):
         from panels.morpheus_panel import MorpheusPanel
         self.assertEqual(MorpheusPanel._fmt_dur(None), "")
         self.assertEqual(MorpheusPanel._fmt_dur(245), "4:05")
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  The V0.03 walkthrough (S35, 2026-11-23)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _RealPlaylistsPanel(unittest.TestCase):
+    """The panel over a real (temporary) playlists file, read by Morpheus's
+    own load_playlists, with the binaries faked as present."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tk.Tk()
+        cls.root.withdraw()
+        theme._init_fonts(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+
+    def setUp(self):
+        import tempfile, shutil
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        self.path = os.path.join(d, "morpheus_playlists.json")
+        for target, value in (
+                ("_PLAYLISTS_PATH", self.path),
+                ("available", lambda: {"mpv": "m", "ytdlp": "y", "problem": None})):
+            p = mock.patch.object(morpheus, target, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _write(self, rows):
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"playlists": rows}, f)
+
+    def _build(self, parent=None):
+        from panels.morpheus_panel import MorpheusPanel
+        try:
+            panel = MorpheusPanel(parent or self.root)
+        except Exception as e:
+            self.fail(f"MorpheusPanel() raised {type(e).__name__}: {e}")
+        panel.pack(fill="both", expand=True)
+        self.addCleanup(panel.destroy)
+        return panel
+
+    def _rows(self, panel):
+        return getattr(panel._pl_scroll, "body", None) or panel._pl_scroll.inner
+
+
+class TestAPlaylistRowItCantUse(_RealPlaylistsPanel):
+    """A row that wasn't an object stopped the panel, and so Felhaven, from
+    opening (measured 2026-11-23)."""
+
+    def test_the_row_is_skipped_and_removal_still_hits_the_row_shown(self):
+        self._write(["junk", {"label": "B", "url": "https://e.example/b"},
+                     {"label": "C", "url": "https://e.example/c"}])
+        # Clicks reach only a mapped window: a Toplevel made invisible.
+        top = tk.Toplevel(self.root)
+        top.attributes("-alpha", 0.0)
+        top.overrideredirect(True)
+        top.geometry("500x400+0+0")
+        self.addCleanup(top.destroy)
+        panel = self._build(top)
+        top.update()
+        labels = [w.cget("text") for row in self._rows(panel).winfo_children()
+                  for w in row.winfo_children() if isinstance(w, tk.Label)]
+        self.assertIn("B", labels)
+        self.assertIn("C", labels)
+        # Remove "C" through its own glyph: two clicks, file position 2.
+        c_row = [row for row in self._rows(panel).winfo_children()
+                 if "C" in [w.cget("text") for w in row.winfo_children()]][0]
+        glyph = [w for w in c_row.winfo_children() if w.cget("text") == "✕"][0]
+        glyph.event_generate("<Button-1>")
+        glyph.event_generate("<Button-1>")
+        with open(self.path, encoding="utf-8") as f:
+            left = json.load(f)["playlists"]
+        self.assertEqual(left, ["junk", {"label": "B", "url": "https://e.example/b"}])
+
+
+class TestTheWheelOverThePlaylists(_RealPlaylistsPanel):
+    """The hand-rolled canvas dropped the wheel on <Leave>, which Tk sends as
+    the pointer moves onto a row. Pointer events need a mapped window: a
+    Toplevel made invisible (the sidebar smoke test's way)."""
+
+    def test_the_wheel_stays_bound_while_the_pointer_is_over_a_row(self):
+        self._write([{"label": f"list {n}", "url": f"https://e.example/{n}"}
+                     for n in range(30)])
+        top = tk.Toplevel(self.root)
+        top.attributes("-alpha", 0.0)
+        top.overrideredirect(True)
+        top.geometry("500x400+0+0")
+        self.addCleanup(top.destroy)
+        panel = self._build(top)
+        top.update()
+        scroll = panel._pl_scroll
+        self.addCleanup(scroll.unbind_all, "<MouseWheel>")
+        for widget in (scroll, scroll._canvas):     # the pointer enters the list
+            widget.event_generate("<Enter>")
+        top.update()
+        self.assertTrue(scroll.bind_all("<MouseWheel>"), "the wheel never bound")
+        first = self._rows(panel).winfo_children()[0]
+        over = (first.winfo_rootx() + 5, first.winfo_rooty() + 5)
+        with mock.patch.object(scroll, "winfo_pointerxy", return_value=over):
+            scroll._canvas.event_generate("<Leave>", detail="NotifyInferior")
+            top.update()
+        self.assertTrue(scroll.bind_all("<MouseWheel>"), "the wheel dropped over a row")
 
 
 if __name__ == "__main__":

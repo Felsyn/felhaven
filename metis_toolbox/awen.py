@@ -19,6 +19,13 @@ Contract:    A flavor §2's table did not have: a POLLED ACTOR.
                           ticks: the tick that picks a song says nothing, and
                           the tick that hears it start does the announcing.
                           See "Announcing".
+               enabled() / set_enabled() / toggle()
+                        — the on/off flag. Runtime only, off at every launch.
+               status_line()
+                        — what Home's status line says about Auto-DJ, a free read.
+               queue_view() / queue_revision() / remove_queued(entry_id)
+                        — the queue window's rows, its change counter, and
+                          taking one waiting pick off (it is then declined).
 
 Reads, does  The ledger (tools/euterpe.py) is the LISTENER'S list — the songs
 not write:   they chose, which they curate in Vox Array's TUNES tab. This job
@@ -44,8 +51,6 @@ not write:   they chose, which they curate in Vox Array's TUNES tab. This job
              "user" is a permanent row in the list this job reads to decide what
              to play next. The two ways of being wrong are not the same size, so
              the doubt goes the cheap way.
-               enabled() / set_enabled() / toggle()
-                        — the on/off flag. Runtime only, off at every launch.
 
              What makes it a new flavor rather than a watcher: a
              dashboard-only watcher REPORTS, and this one ACTS. It plays audio
@@ -315,6 +320,12 @@ Breaker:     Three turns in a row that end with no song playing and Auto-DJ
 
              "No song playing" means AUDIBLE. A play() call is a request.
 
+             And it is Auto-DJ's breaker: the listener's own failed loads count
+             only while the flag is on. Counted with it off (until 2026-11-18),
+             three of them told someone who never switched it on "Auto-DJ is
+             off, I couldn't get a song to play", and logged a WARNING about
+             turns that were never taken.
+
              The held introduction rides the queue entry, which is the same
              invariant one stage earlier: the sentence lives on the record for
              the pick it describes, so dropping that pick anywhere takes the
@@ -378,12 +389,28 @@ Taper:       The seam between two songs used to be a cut. With a queue there is
              re-dips for it.
 
 Upstream:    kairos.py (calls fetch), panels/vox_controls.py (the toggle),
-             panels/home_panel.py (the rider that speaks the payload)
-Downstream:  pythia.py (the turn), tools/morpheus.py (search + play),
-             tools/euterpe.py (history), harmonia.py (is anything audible)
+             panels/home_panel.py (the rider that speaks the payload, the
+             status line, and the queue window's rows, counter and removal)
+Downstream:  pythia.py (the turn), tools/morpheus.py (the cached snapshot,
+             search, describe, play and the taper), tools/euterpe.py (the
+             listener's list and what a song is), harmonia.py (is anything
+             audible)
 
 Requires:    logging, threading, time (stdlib); pythia, harmonia, and the two
              tool modules above. No new pip dependencies.
+
+V0.03:       Walked through 2026-11-18 (the V0.03 walkthrough, CONVENTIONS
+             §3), its first audit (landed 2026-09-25 in #21; the thinking
+             switch #58, the shared slugs #88). Every claim in the docstring
+             was checked against the code it names. fetch() never raises,
+             every _lock region stays clear of the model, yt-dlp and mpv, the
+             DJ gets play_music alone, and its picks never reach the ledger.
+             Fixed: a listener's failed load counted toward the breaker with
+             Auto-DJ off, so three of them spoke the breaker's line to someone
+             who never switched it on (see "Breaker"). The Contract names the
+             status line and the queue's three; Upstream and Downstream are
+             complete. test_awen stubs Pythia and the search by default: one
+             test made two real pythia.ask calls.
 """
 
 import logging
@@ -758,7 +785,7 @@ def _guarded_play_music(query: str = "") -> dict[str, Any]:
     """
     query = (query or "").strip()
     if not query:
-        return {"error": "no_query",
+        return {"error": "bad_arguments",
                 "detail": "Name an artist and a song title."}
 
     with _lock:
@@ -1007,6 +1034,13 @@ def _observe(snapshot: dict[str, Any]) -> Optional[dict[str, Any]]:
         # is the point: a song WAS playing, so this is the LISTENER's next track
         # failing to load, with them sitting right there watching it fail.
         # Jumping in with a song of our own is the DJ talking over a person.
+        #
+        # Counted only while Auto-DJ is on: the breaker is Auto-DJ's, and with
+        # it off a failed load is Morpheus's to report (it logs the ERROR).
+        # Counted regardless, three of them told a listener who never switched
+        # it on "Auto-DJ is off, I couldn't get a song to play" (2026-11-18).
+        if not _enabled:
+            return None
         return _spoken(_count_failure(), "notice")
 
     if snapshot.get("pl_n") == 0:

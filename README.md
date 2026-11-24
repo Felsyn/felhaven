@@ -48,11 +48,11 @@ gothic-imperial, the code keeps the deity module names.
 | **Felhaven** | Home: Pythia's chat, with per-answer narration, session token/tool tallies, and the Auto-DJ toggle |
 | **Chronometry** | Clock, date, season badges; hosts the Ammit timer |
 | **Moderati** | Seven tabs: system vitals, log tail, network awareness, the Cerberus secrets gate, settings, Pythia's editable system prompt, and Daedalus — a map of Felhaven's own modules and their docstrings |
-| **Atmospherics** | Current conditions and a 3-day forecast, with sun and moon sub-widgets |
+| **Atmospherics** | Current conditions, a 3-day forecast and the Weather Service's warnings, with sun, moon and space-weather rows; a place picker for a cached map area |
 | **Celestarium** | Zenith star map with clickable constellations, the five classical planets, and observing conditions |
 | **Cartograph** | Offline local map around your fix — terrain, water and roads, with a searchable place lookup |
 | **Dynastic Vault** | Live watchlist prices and a manual holdings ledger (behind the Cerberus PIN) |
-| **Scriptorium** | RSS/Atom news aggregator, one tab per feed |
+| **Scriptorium** | RSS/Atom news: one river across every feed, newest first, and each feed on its own |
 | **Vox Array** | Four tabs: YouTube playback, text-to-audio-file, playback of those files, and the song ledger Auto-DJ picks from |
 | **Cogitator** | Three utility tabs: tasks and notes, a calculator, a unit converter |
 

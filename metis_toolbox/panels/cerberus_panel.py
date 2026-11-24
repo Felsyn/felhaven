@@ -8,10 +8,9 @@ Job:         Draw Cerberus's UI: a PIN gate, then the Vault, Custody and Ledger.
              row per key, masked, with reveal and REPLACE, plus a generic add
              form), Custody (the manifest's config files, handed to the OS
              editor) and Ledger (the access log, newest first). Above both
-             faces, a red banner for any
-             tamper alarm. All logic — the PIN check, DPAPI, the ledger, the
-             manifest — lives in cerberus.py; this module only draws and hands
-             off.
+             faces, a red banner for any tamper alarm. All logic — the PIN
+             check, DPAPI, the ledger, the manifest — lives in cerberus.py;
+             this module only draws and hands off.
 
 Placement:   A bare tk.Frame tab body inside ModeratiPanel (the CERBERUS tab).
              Kairos's `cerberus` worker (cerberus.fetch, every 2 s) calls
@@ -35,7 +34,7 @@ Custody:     Rows come from cerberus.manifest_configs(); a click goes through
              cerberus.custody_open(), which refuses anything that isn't a
              listed .json inside config/. Refused rows can't be clicked.
 
-Lamp:        CerberusLamp is the Home status row's at-a-glance state (dim
+Lamp:        CerberusLamp is the Home status bar's at-a-glance state (dim
              sealed, amber open, red alarm). It lives here, with the rest of
              Cerberus's face; panels/home_panel.py places it and felhaven.py
              registers it on the `cerberus` worker.
@@ -43,14 +42,21 @@ Lamp:        CerberusLamp is the Home status row's at-a-glance state (dim
 Upstream:    panels/moderati_panel.py (hosts this as a tab), kairos.py
              (`cerberus` worker → update), panels/home_panel.py (the lamp),
              panels/midas_panel.py (LOCK_REASON_TEXT)
-Downstream:  cerberus.py (all logic), theme.py (colors/fonts)
+Downstream:  cerberus.py (all logic), theme.py (colors/fonts), tools/virgil.py
+             and panels/virgil_tooltip.py (the section headers' tips)
 
 Requires:    tkinter, os, platform, subprocess (stdlib). No crypto here.
 
-V0.02:       Audited 2026-07-24 — reads cerberus.py's now-thread-safe Ledger on
+2026-07-24:  walkthrough audit — reads cerberus.py's now-thread-safe Ledger on
              the main thread (safe against Midas's write pool via cerberus's
              atomic writes). Dropped the unused _NO_WINDOW constant. Draw-only
              contract verified.
+
+V0.03:       Walked through 2026-11-17 (the V0.03 walkthrough, CONVENTIONS
+             §3). Still draw-only, its one after() a cancelled one-shot (§6),
+             its tips in _SECTION_TIPS. A failed open and a PIN that can't be
+             saved now show the error's class, never its text, which carried
+             the file's path onto the screen (§2). Downstream gained Virgil.
 """
 
 import os
@@ -59,7 +65,9 @@ import subprocess
 import tkinter as tk
 from typing import Any
 
+from panels import virgil_tooltip
 from theme import C, FONTS, PhosphorScroll
+from tools import virgil
 
 import cerberus
 
@@ -127,10 +135,11 @@ def _alarm_text(alarm: str) -> str:
 
 
 def _open_path(path: str) -> str | None:
-    """Open a file or folder in the OS default handler. Returns an error string
-    on failure, or None on success. Windows uses os.startfile; macOS/Linux fall
-    back to open/xdg-open (R1). Only cerberus.custody_open()'s paths and the
-    contained config folder ever reach it."""
+    """Open a file or folder in the OS default handler. Returns the error's
+    class name on failure (§2: an OSError's text carries the path), or None on
+    success. Windows uses os.startfile; macOS/Linux fall back to open/xdg-open
+    (R1). Only cerberus.custody_open()'s paths and the contained config folder
+    ever reach it."""
     try:
         system = platform.system()
         if system == "Windows":
@@ -140,7 +149,7 @@ def _open_path(path: str) -> str | None:
         else:
             subprocess.Popen(["xdg-open", path])
     except OSError as e:
-        return str(e)
+        return type(e).__name__
     return None
 
 
@@ -196,7 +205,7 @@ class _Section(tk.Frame):
 
         tk.Frame(self, bg=C["border"], height=1).pack(fill="x", pady=(6, 4))
 
-        header = tk.Frame(self, bg=C["card"])
+        header = self.header = tk.Frame(self, bg=C["card"])
         header.pack(fill="x")
         self._title = tk.Label(header, text=title, font=FONTS["card_header"],
                                fg=C["text3"], bg=C["card"], anchor="w", cursor="hand2")
@@ -276,6 +285,14 @@ class CerberusLamp(tk.Label):
 class CerberusPanel(tk.Frame):
     """PIN gate + Vault / Custody / Ledger, under an alarm banner. Updated by
     Kairos's `cerberus` worker; everything else is request-driven."""
+
+    # Each section header's hover tooltip (Virgil): what the section holds, a
+    # glossary entry (CONVENTIONS §7). Keys are the keys of self._sections.
+    _SECTION_TIPS = {
+        "vault": virgil.term("vault_keys"),
+        "custody": virgil.term("vault_custody"),
+        "ledger": virgil.term("vault_ledger"),
+    }
 
     def __init__(self, parent):
         super().__init__(parent, bg=C["card"])
@@ -415,7 +432,7 @@ class CerberusPanel(tk.Frame):
                  bg=C["card"]).pack(side="left", padx=(0, 6))
         self._entry = tk.Entry(
             prompt, show="*", font=FONTS["body"], width=14,
-            bg=C["bar_bg"], fg=C["text1"], insertbackground=C["text1"],
+            bg=C["bar_bg"], fg=C["text1"],
             highlightbackground=C["border"], highlightcolor=C["purple"],
             highlightthickness=1, borderwidth=0,
         )
@@ -436,7 +453,7 @@ class CerberusPanel(tk.Frame):
                  bg=C["card"]).pack(side="left", padx=(0, 6))
         self._confirm_entry = tk.Entry(
             self._confirm_frame, show="*", font=FONTS["body"], width=14,
-            bg=C["bar_bg"], fg=C["text1"], insertbackground=C["text1"],
+            bg=C["bar_bg"], fg=C["text1"],
             highlightbackground=C["border"], highlightcolor=C["purple"],
             highlightthickness=1, borderwidth=0,
         )
@@ -517,7 +534,8 @@ class CerberusPanel(tk.Frame):
         try:
             cerberus.set_pin(pin)
         except OSError as e:
-            self._gate_status.config(text=f"Could not save the PIN: {e}", fg=C["red"])
+            self._gate_status.config(text=f"Could not save the PIN ({type(e).__name__}).",
+                                     fg=C["red"])
             return
         self._first_run = False
         self._confirm_frame.pack_forget()
@@ -579,6 +597,7 @@ class CerberusPanel(tk.Frame):
                            on_show=lambda k=key: self._render_section(k))
             sec.pack(fill="x")
             self._sections[key] = sec
+            virgil_tooltip.attach(sec.header, self._SECTION_TIPS[key])
 
     def _lock(self) -> None:
         cerberus.lock(cerberus.LOCK_MANUAL)
@@ -693,7 +712,7 @@ class CerberusPanel(tk.Frame):
         decrypted for this."""
         entry = tk.Entry(
             line, show="•", font=FONTS["small"],
-            bg=C["bar_bg"], fg=C["text1"], insertbackground=C["text1"],
+            bg=C["bar_bg"], fg=C["text1"],
             highlightbackground=C["border"], highlightcolor=C["purple"],
             highlightthickness=1, borderwidth=0,
         )
@@ -749,7 +768,7 @@ class CerberusPanel(tk.Frame):
                  bg=C["card"]).pack(side="left", padx=(0, 4))
         name_entry = tk.Entry(
             name_row, font=FONTS["small"],
-            bg=C["bar_bg"], fg=C["text1"], insertbackground=C["text1"],
+            bg=C["bar_bg"], fg=C["text1"],
             highlightbackground=C["border"], highlightcolor=C["purple"],
             highlightthickness=1, borderwidth=0,
         )
@@ -761,7 +780,7 @@ class CerberusPanel(tk.Frame):
                  bg=C["card"]).pack(side="left", padx=(0, 4))
         value_entry = tk.Entry(
             value_row, show="•", font=FONTS["small"],
-            bg=C["bar_bg"], fg=C["text1"], insertbackground=C["text1"],
+            bg=C["bar_bg"], fg=C["text1"],
             highlightbackground=C["border"], highlightcolor=C["purple"],
             highlightthickness=1, borderwidth=0,
         )

@@ -6,9 +6,9 @@ Metis Toolbox | Anti-Legion: ONE JOB
 Job:         Own the local-chart cache: its projection, area manifest and
              shared vector format. It also holds the county reference.
              Named for Artemis, goddess of the hunt and the wild country the
-             chart depicts. The layer modules (Hecate roads, later Poseidon
-             water and Demeter elevation) know about formats; Artemis knows
-             about the cache and the maths between lat/lon and local metres.
+             chart depicts. The layer modules (Hecate roads, Poseidon water,
+             Demeter elevation) know about formats; Artemis knows about the
+             cache and the maths between lat/lon and local metres.
              Neither resolves location — the fix belongs to Themis.
 
 Contract:    Exposes fetch() for Kairos (status-only: never raises, no
@@ -19,13 +19,22 @@ Contract:    Exposes fetch() for Kairos (status-only: never raises, no
                • bbox(lat, lon)              -> ingest square (radius+margin)
                • project()/unproject()       -> constant-cos local metres
                • clip_polyline()             -> Liang-Barsky clip to the square
+               • clip_polygon()              -> Sutherland-Hodgman, for rings
                • write_vec()/read_vec()      -> the FVEC vector container
+               • ensure_index()/query()      -> the spatial index and the
+                                                nearest feature to a point
                • read_manifest()             -> a cached area's manifest
+               • download()/read_member()    -> the one bounded ingest
+                                                download, and a capped zip
+                                                member, for every layer
                • ensure_reference()          -> county-FIPS lookup bootstrap
                • counties_for_bbox()         -> which TIGER files cover a box
                • ingest_area(lat, lon, cancel, progress) -> orchestrated fetch
                • set_label()/label_of()      -> an area's optional human name
                • delete_area()               -> recycle a cached area
+               • nearest_cached()            -> cached areas by distance
+               • place_of()/is_area_id()     -> a cached area's centre and
+                                                name, for Atmospherics' PLACE
              ingest_area raises IngestError (slug-first message, the
              themis.SettingsError precedent); everything it half-wrote is
              discarded. load-side readers raise FileNotFoundError / ValueError
@@ -33,13 +42,12 @@ Contract:    Exposes fetch() for Kairos (status-only: never raises, no
              invariant's API teeth: ingest is online, slow and explicit;
              load is offline, fast and pure.
 
-             Deliberately NOT a Pythia brain tool in v1: the chart answers
-             spatial questions through the panel; an LLM-facing describe()
-             is a possible later addition, out of scope until the render
-             stack is whole.
+             Deliberately NOT a Pythia brain tool: the chart answers spatial
+             questions through the panel. An LLM-facing describe() was left
+             out of v1 by decision (spec §15), not by omission.
 
 Cache:       <app root>/artemis_cache/<area_id>/ — one directory per cached
-             area (manifest.json, roads.vec, later water.vec + terrain.bin +
+             area (manifest.json, roads.vec, water.vec, terrain.bin and
              derived/), gitignored personal STATE (§9). Ingest writes into
              <area_id>.partial/ and promotes with one os.replace, so a
              half-downloaded area can never be loaded. artemis_cache/
@@ -72,13 +80,30 @@ Bounds:      Every census download states a byte cap (download(cap=...)),
 
 Upstream:    kairos.py — the "artemis" worker polls fetch() every 600 s.
              panels/artemis_panel.py — runs ingest_area on its worker thread.
-Downstream:  tools/hecate.py (and later poseidon/demeter) — import this
-             module for projection, clipping and the FVEC writer. themis.py
-             is read at fetch time for the fix, never at import time.
+             tools/aura.py, panels/aura_panel.py — Atmospherics' PLACE pick
+             reads place_of() and nearest_cached(); never ingests.
+Downstream:  tools/hecate.py, tools/poseidon.py, tools/demeter.py —
+             ingest_area() runs each layer's ingest(), and each imports this
+             module for projection, clipping, the download and the FVEC
+             writer. tools/cadmus.py decodes the county reference's
+             shapefile. themis.py is read at fetch time for the fix, never at
+             import time.
 
 Requires:    tools/hermes.py (the bounded network read), and ctypes (Recycle
-             Bin), io, json, logging, math, os, shutil, struct, tempfile,
-             threading, zipfile (stdlib).
+             Bin), datetime, io, json, logging, math, os, re, shutil, struct,
+             sys, tempfile, threading, zipfile (stdlib).
+
+V0.03:       Walked through 2026-11-17 (the V0.03 walkthrough, CONVENTIONS
+             §3), its first audit (born 2026-08-09). fetch() never raises and
+             never fetches; every census read goes through Hermes with a
+             measured cap and every zip member through read_member(); writes
+             are atomic; delete_area() recycles a direct child of the cache
+             only; ingest's catch-all log can't carry Demeter's key (its
+             network errors keep only the type name). read_vec() now refuses
+             a cut-short name table, which clipped a name or escaped as
+             struct.error. The docstring's three "later"s (the layers landed
+             2026-08-09) went; the Contract gained the functions the layers
+             and the panels share; Requires gained datetime, re and sys.
 """
 
 import ctypes
@@ -87,6 +112,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import struct
 import sys
@@ -464,9 +490,18 @@ def read_vec(path: str) -> list[Feature]:
     names = []
     pos = names_off + 2
     for _ in range(name_count):
+        # Each length and name is checked against the end first: a short read
+        # escaped as struct.error, and a short last name came back clipped.
+        if pos + 2 > len(data):
+            raise ValueError("bad_vec: truncated name table")
         (length,) = struct.unpack_from("<H", data, pos)
         pos += 2
-        names.append(data[pos:pos + length].decode("utf-8"))
+        if pos + length > len(data):
+            raise ValueError("bad_vec: truncated name table")
+        try:
+            names.append(data[pos:pos + length].decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise ValueError("bad_vec: a name is not UTF-8") from exc
         pos += length
 
     features: list[Feature] = []
@@ -827,7 +862,8 @@ def delete_area(area: str) -> bool:
 # ── Manifest ──────────────────────────────────────────────────────────────────
 
 def read_manifest(area: str) -> dict[str, Any]:
-    """A cached area's manifest — pure read, raises FileNotFoundError."""
+    """A cached area's manifest — pure read. Raises FileNotFoundError when the
+    area isn't cached, ValueError when the file isn't JSON."""
     with open(os.path.join(area_dir(area), "manifest.json"),
               encoding="utf-8") as fh:
         payload: dict[str, Any] = json.load(fh)
@@ -896,6 +932,50 @@ def cached_areas() -> list[dict[str, Any]]:
         manifest["area_id"] = entry
         out.append(manifest)
     return out
+
+
+# An area id's exact shape, as area_id() makes it. themis.py keeps its own copy
+# for the atmos_place setting, because it cannot import this module (Artemis
+# imports Themis); a test holds the two in lockstep with area_id(). fullmatch,
+# never a `$` anchor, which lets a trailing newline through.
+_AREA_ID = re.compile(r"[ns][0-9]{2}p[0-9]{3}_[ew][0-9]{3}p[0-9]{3}")
+
+
+def is_area_id(area: object) -> bool:
+    """True for a string shaped exactly like an area_id() result. A stray
+    folder in the cache can have any name; only these are ever offered or
+    opened by name from outside this module."""
+    return isinstance(area, str) and _AREA_ID.fullmatch(area) is not None
+
+
+def place_of(area: str) -> "dict[str, Any] | None":
+    """Where a cached area is and what it is called, {"lat", "lon", "label"},
+    for Atmospherics' PLACE pick. None when `area` is not an area id's shape
+    (checked BEFORE the disk is touched, since the id comes from the settings
+    file), is not cached, or has no readable centre. Never raises."""
+    if not is_area_id(area):
+        log.warning("Artemis: refusing place %r: not an area id", area)
+        return None
+    try:
+        manifest = read_manifest(area)
+    except FileNotFoundError:
+        return None                         # recycled since it was picked
+    except (OSError, ValueError) as exc:
+        log.warning("Artemis: unreadable manifest for %s: %s", area, exc)
+        return None
+    centre = manifest.get("center") if isinstance(manifest, dict) else None
+    try:
+        if not isinstance(centre, list) or len(centre) != 2:
+            raise ValueError("no [lat, lon] centre")
+        lat, lon = float(centre[0]), float(centre[1])
+    except (TypeError, ValueError) as exc:
+        log.warning("Artemis: bad centre in the manifest for %s: %s", area, exc)
+        return None
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        log.warning("Artemis: centre out of range in the manifest for %s", area)
+        return None
+    manifest["area_id"] = area
+    return {"lat": lat, "lon": lon, "label": label_of(manifest)}
 
 
 # ── Ingest downloads ──────────────────────────────────────────────────────────

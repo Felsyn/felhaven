@@ -29,25 +29,17 @@ Sections are ordered by what an item needs before work can start.
 
 ## Needs a gemma4 probe first (changes what the model sees)
 
-- **Aura's `astronomy` block is still in `get_weather`'s output**, though no
-  panel reads it since Helios/Selene compute the sun and moon. The model can see
-  wttr.in's sunrise beside Helios's, usually within a minute of each other.
-  — needs: probe, then remove · found 2026-09-28 (PR #28, §12)
-- **The default Machine Spirit prompt keeps a hand-made tool inventory that has
-  drifted.** It is missing music, sky, sun, moon, the archive and Daedalus. Its
-  position ahead of the style rules is what keeps `write_document` callable
-  under the no-Markdown rule (measured 2026-07-31), so don't edit it blind.
-  — needs: probe · found 2026-09-27 (V0.03 audit M1)
-- **Tool description grammar varies.** Some open "Returns…", some are
-  imperative, and `get_time_context` has two overlapping when-clauses. It
-  touches every schema. — needs: probe · found 2026-09-27 (V0.03 audit L1/T2)
 - **Pythia narrates a stale reading as current.** gemma4:e2b ignored `stale` in
   every form tried (§12, 2026-09-28). The next thing to try is a Machine Spirit
   rule or a bigger model. — needs: probe · found 2026-09-28 (PR #27)
-- **`fetch_page`'s description still says to fetch only search results**, though
-  the dispatch gate now also opens a URL the user wrote (§12, 2026-09-30). A
-  model that obeys the text may search for a link it was already given.
-  — needs: probe · found 2026-09-30 (dispatch gate)
+- **Routing probe row 4 now picks a part that doesn't exist.** "What is
+  this PC connected to right now?" calls `get_machine_status(part='argus')`
+  4 times in 4, on master and on S17's branch alike (it passed at the
+  2026-11-16 baseline, 52/56; today 49/56). `argus` is a Daedalus module
+  name, glossed "what this computer is communicating with", not a part;
+  the handler refuses it and the answer costs a round. Argus's own text
+  hasn't changed since. — needs: probe (what in the prefix moved) · found
+  2026-11-19 (V0.03 walkthrough S17)
 - **How gemma4 relays the gate's refusals is unmeasured** (`untrusted_url`,
   `not_confirmed`, `no_confirmation`, `private_address`). The gate holds either
   way; what's unknown is whether the model tells the user plainly or retries
@@ -58,50 +50,35 @@ Sections are ordered by what an item needs before work can start.
   Every write now shows a `pythia asks ›` block, so a missing block is the
   tell; the claim itself is still false. — needs: probe · found 2026-09-30
   (live gate check)
-- **Tool results reach the model as ASCII-escaped JSON.** `ask()` sends
-  `json.dumps(result)` with the default `ensure_ascii=True`, so `—` arrives as
-  `—`. The model copied `—`, `×` and `\"` literally into an
-  `edit_document` of a fetched page. `ensure_ascii=False` is a one-word fix,
-  but it changes every tool message the model reads (and probably its token
-  count). — needs: probe · found 2026-09-30 (live gate check)
 - **The word "archive" steers Pythia to Herodotus even when it names a
   website.** "search the archives of nethys for …" ran `search_documents` on
-  the local archive and found nothing. — needs: probe · found 2026-09-30 (live
-  gate check)
+  the local archive and found nothing; since 2026-11-15 it runs
+  `read_archive(search)` the same way (probe row 16). — needs: probe · found
+  2026-09-30 (live gate check)
+- **Pythia picks °F or °C on its own when it talks temperature.**
+  `get_weather` hands the model both (`temp_f`/`temp_c`, highs, lows,
+  feels-like), while the panels follow Settings' `themis.temperature_unit()`,
+  so a spoken answer can disagree with the screen. Either `handle()` sends
+  only the chosen unit, or the reading says which one to use. — needs: probe ·
+  found 2026-11-15 (owner's live test of the sky merge)
+- **"Weather, sunset and moon?" sometimes skips the weather.** About one run
+  in eight calls only `get_sky_report` and answers without `get_weather`, on
+  both prompts and on master as well as the archive branch (probe row 9,
+  rechecked 2026-11-15). Perhaps one sky report reads as "the outdoors"; the
+  sky description could say it carries no weather. — needs: probe · found
+  2026-11-15 (Phase 3 recheck)
 
 ## Code, ready to start
 
-- **A music load that fails after `play_music` returns never reaches the
-  chat.** `play_music` fires the load and answers `now_playing` at once. When
-  mpv then goes idle with nothing loaded (e.g. YouTube refusing the stream
-  with HTTP 403), Kairos's Morpheus worker logs an ERROR, which Emanon shows,
-  and the MORPHEUS tab says so. But the chat keeps the call as a success, and
-  Pythia has already said the song is playing. There were 22 such failures
-  in the logs from 2026-09-17 to 2026-09-30. The same happens when `play()`
-  does nothing at all: it returns None whether mpv failed to start or (since
-  2026-10-03) the URL wasn't http(s), and `play_music` still answers
-  `now_playing` (seen 2026-10-03, tracing `play()`). Fix options: `play_music`
-  waits out the load grace before answering, or a late failure posts a line
-  into the chat. — needs: a choice between those, then change + tests · found
-  2026-09-30 (live check, reported by the owner)
-- **Error slugs have no shared core.** The same condition has several
-  spellings (`weather_offline` / `network_error` / `network_unavailable`;
-  `no_results` / `no_matches`; five `*_unavailable`), and a small model
-  generalizes better from one. Rite's `_ERROR_TEXT` moves with them.
-  — needs: medium change · found 2026-09-27 (V0.03 audit L2/T9)
-- **No `TOOL_META`** (mutates / network / domain) on any brain tool. It is the
-  Tool Broker's prerequisite, and on its own it would generate the module
-  intros' "Network / Pythia access" lines that are now hand-written.
-  — needs: large change · found 2026-09-27 (V0.03 audit M6/T1)
+- **The module intros' "Network / Pythia access" lines are still written by
+  hand**, though `TOOL_META` (2026-11-16) now holds what they say. A small
+  generator could print them; it needs the owner's line format first.
+  — needs: owner · found 2026-09-27 (V0.03 audit M6)
 - **Cancelling an Artemis ingest waits out the current download.** The cancel
   flag is read between downloads, and one census zip or terrain grid can take
   minutes (the terrain grid's deadline is ~18 min). hermes could check a cancel
   event before each socket read. — needs: small change + tests · found
   2026-10-01 (bounded network reads)
-- **Artemis's cached-areas list never scrolls.** The overlay is a plain frame
-  pinned to the chart's lower left, one row per area, so every new area makes
-  it taller over the map. The owner wants it to scroll once it holds 5 areas.
-  — needs: small change + a smoke test · found 2026-10-06 (owner request)
 - **Artemis downloads again what it already has.** CACHE AREA never checks
   whether the area is cached: it reads CACHE AREA either way and re-downloads
   every layer, though a row's refresh glyph already is the deliberate update.
@@ -112,12 +89,16 @@ Sections are ordered by what an item needs before work can start.
   cached area. — needs: a design (what CACHE AREA does on a cached area;
   whether and where to keep county files), then change + tests · found
   2026-10-06 (owner request, live check)
-- **Demeter's raster stage now costs more memory than its parse.**
-  `write_bin` (46 MB) and `write_derived` (95.5 MB) build Python lists over
-  the 1024 x 1024 grid on every terrain ingest, with the download still held
-  (measured 2026-10-03). Fixed by `GRID`, not by the server, so not a bound to
-  enforce; tercile cuts and a PPM built over arrays would cut it.
-  — needs: small change + tests · found 2026-10-03 (bounded parsing)
+- **The Cartograph's address lookup can freeze Felhaven for up to 20 s.**
+  `ArtemisPanel._on_search` calls `eratosthenes.resolve()` on the Tk thread,
+  and the Census request runs under hermes's default deadline, twice its
+  10 s timeout. A live answer took 0.15 to 0.21 s (2026-11-18), but a hung
+  connection stops the clock, the music controls and every other view until
+  it gives up. Typed coordinates and waypoints never wait: they resolve
+  before any request, and a mistyped coordinate is now refused offline.
+  — needs: a design (the search on the panel's ingest worker and queue,
+  which widens ArtemisPanel's §6 exception), then change + tests · found
+  2026-11-18 (V0.03 walkthrough S11)
 - **Auto-DJ's picks are written nowhere that outlives the process.** Since
   2026-09-17 they live in `_session_plays` (memory) and a DEBUG line, and
   `awen.py` logs nothing at INFO on purpose, so "what did it play while I was
@@ -128,126 +109,115 @@ Sections are ordered by what an item needs before work can start.
   file, kept apart from `euterpe_ledger.json` and not read back as taste.
   — needs: a choice of file and format, then change + tests · found 2026-10-02
   (afk run, reported by the owner)
-- **Emanon's time looks wrong.** The owner left for work around 07:00 on
-  2026-10-02 and reports the times Emanon shows don't match that. Not yet
-  looked at: could be the displayed timestamps, the "last N" tail ordering, or
-  the log's own clock. — needs: reproduce against `felhaven.log` timestamps,
-  then diagnose · found 2026-10-02 (owner report)
-- **`test_clio_layout`'s drawn-text tests never run from a worktree.** They
-  skip when `aegis.resolve("ffmpeg")` finds nothing, and a worktree has no
-  `bin/` of its own, so they run only from the main checkout (CI skips them
-  too). Every session works in a worktree, so a change to the drawn text can
-  pass there untested. `test_bin_manifest` already finds the main checkout's
-  `bin/` from a worktree, and the same lookup would fit here. — needs: small
-  change to the test · found 2026-11-09 (fresh-clone run, bin manifest PR)
-- **`felhaven.py`'s banner docstring has gone stale.** It says "Python
-  3.10+" and `pip install psutil requests`, where the stack now runs on 3.13
-  from a hashed lock (SETUP §2), says Aura uses wttr.in only, and lists seven
-  of the toolbox's modules. It keeps its prose shape by design (its V0.02
-  note), so the fix is the facts, not a `Job:` field. — needs: small docstring
-  edit · found 2026-11-09 (Virgil gloss audit)
-- **Fourteen panels have no `Job:` field** (CONVENTIONS §0): Argus, Artemis,
-  Aura, Echo, Emanon, Eudoxus, Hephaestus, Horai, Hypatia, Midas, Morpheus,
-  Orpheus, Scribe and Zeno's. Their gloss falls back to the docstring's first
-  line ("Zeno panel — calculator for the Felhaven dashboard."), which keeps
-  §0's shape but not its form. `_NO_JOB_FIELD_YET` in `tests/test_daedalus.py`
-  lists them, and each comes off as it gains one. — needs: a `Job:` field per
-  panel · found 2026-11-09 (Virgil gloss audit)
 
 ## Features (need a design first)
 
-- **Hephaestus can't show the GPU or what Ollama has loaded.** The HEPHAESTUS
-  tab is three bars (CPU, RAM, the drive Felhaven lives on) above Aether's
-  dots. psutil can't see a GPU, so VRAM, GPU load and temperature are
-  missing, and nothing shows which model Ollama holds, how much of it is on
-  the GPU, or its context size (`/api/ps`). That one line would have shown
-  the prewarm loading a second runner, which went unseen for six weeks
-  (fixed 2026-08-19). The boot drive, the one that fills up, isn't shown
-  either. The owner wants this depth here, likely as tabs. — needs: a
-  design (tab layout; NVML through `nvidia-ml-py` or ctypes, not
-  `nvidia-smi` every 5 s), then change and tests · found 2026-11-09 (owner
-  request)
-- **Pythia's model can only be changed through an environment variable.**
-  `PYTHIA_MODEL` is read once at import, so trying another model means a
-  shell setting and a restart. The owner wants a dropdown on the MACHINE
-  SPIRIT tab, saved by Themis. It has to unload the old model first
-  (`keep_alive=-1` keeps it resident), list only models whose `/api/show`
-  capabilities include `tools` (a model without them loses every tool,
-  silently), and say that a switch costs a cold load. Every probe in this
-  file was measured on gemma4:e2b, so a switch is also how "a bigger model"
-  gets tried. — needs: a design, then change and tests · found 2026-11-09
-  (owner request)
 - **A fresh clone has no way to get a model.** Pythia answers nothing until
-  the user installs Ollama and pulls one by hand. The owner wants a download
-  option on the dropdown above for a short tested list (gemma4:e2b first),
-  each with its requirements beside it (measured here: ~7.2 GB disk, ~1.7 GB
-  VRAM once loaded, about a minute to load). Pull through Ollama's
-  `/api/pull` for progress; check free space on the model store's drive
+  the user installs Ollama and pulls one by hand, and the MACHINE SPIRIT
+  MODEL row lists only what is installed. The owner wants a download option
+  there for a short tested list, each with its requirements beside it.
+  Candidates were tested 2026-11-10 (CONVENTIONS §12): gemma4:e2b chose
+  every tool right, and neither gemma4:e4b nor qwen3.5:4b did, so the
+  tested list is gemma4:e2b alone for now, its November build (re-pulled
+  and tested the same day). Its requirements, measured: a 4.6 GB download,
+  about 3.1 GB of GPU memory at Felhaven's 16k context (NVML; Ollama's own
+  figure says 0.3), about 20 s to load. For the download itself: pull
+  through Ollama's `/api/pull`
+  for progress; check free space on the model store's drive
   (`OLLAMA_MODELS`, not Felhaven's); stop on no progress rather than on a
   whole-request deadline; and make Cancel work (the Artemis cancel item
-  above is the same gap). — needs: the dropdown, then a design, then change
-  and tests · found 2026-11-09 (owner request)
-- **Felhaven shows no weather warnings and no space weather.** Atmospherics
-  polls every 30 min and carries no alerts. The owner wants emergency
-  weather alerts and space weather (solar flares, geomagnetic storms).
-  Free, keyless sources answered on 2026-11-09: NWS active alerts by point
-  (US only; 233 B with none active), SWPC `noaa-scales.json` (R/S/G levels
-  now and for 3 days, 1.1 KB), `alerts.json` (48 KB of bulletins) and the
-  planetary Kp index (4.8 KB). The design has to settle: "couldn't check"
-  never looks like "no alerts"; a 1–2 min worker of its own; which
-  severities pop up (Ammit-style, read aloud); whether dismissing a warning
-  still in effect turns the displays green; new modules, not more Aura.
-  Panel first, brain tool after the stale-reading item above. — needs: a
-  design and the owner's decisions, then new modules and tests · found
+  above is the same gap). — needs: a design, then change and tests · found
   2026-11-09 (owner request)
-- **Atmospherics only shows the weather at home.** Aura reads its place from
-  Themis on every fetch, so the weather at another place means changing
-  Settings. The owner wants a dropdown in the Atmospherics header: Home, then
-  the places saved for Artemis (`eratosthenes.waypoints()`). A pick changes
-  NOW and FORECAST and leaves Themis alone. Aura's cache key is already the
-  place, so a passed-in lat/lon needs no second cache. To settle: whether
-  alerts follow the pick (suggested: pop-ups stay on Home, so looking at a
-  camp never hides a warning at the house), and whether the pick survives a
-  restart. No saved-places file exists on the Obelisk yet, and adding one is
-  a JSON edit, so the menu would read only Home; a "save this place" in
-  Artemis (a new file write for `test_file_writes`) may need to come first.
-  — needs: a design, then change and tests · found 2026-11-09 (owner
-  request)
+- **No brain tool for weather warnings or space weather.** Iris and Eos
+  (2026-11-10) are panels only: Pythia can't answer "any weather warnings?"
+  or "will I see the aurora tonight?". It waits on the stale-reading item
+  above, since both answers go stale in minutes. — needs: the stale-reading
+  fix first, then a design · found 2026-11-09 (owner request)
 
 ## Audits
 
-- **Daedalus never had its V0.02 audit** (no marker), and its schema is 37% of
-  the tool budget. — needs: an audit per the module walkthrough protocol
-  · found 2026-09-27 (V0.03 audit M7)
-- **`V0.03:` markers on every module the V0.03 work touched.** Do this last.
-  — needs: chore · found 2026-09-27 (V0.03 audit T11)
-- **The semgrep tripwire hasn't run over Clio's five new launches** (the face
-  renderer, gdigrab and three ffmpeg calls). `test_process_launches` lists
-  each one with its sources, but the tripwire is the by-hand check that
-  catches a source changing inside a listed call, and its venv isn't
-  installed on the Obelisk. — needs: the venv, then the run in the rule's
-  header · found 2026-10-28 (Clio)
+
+- **`fetch_page` decodes every page as UTF-8** (`tools/callimachus.py`),
+  whatever charset the server's Content-Type names, so a Latin-1 or
+  Windows-1252 page reads with replacement characters where its accents
+  were. Not measured on a live page yet. — needs: one non-UTF-8 page
+  measured, then decode by the header's charset (falling back to UTF-8 for
+  a name Python doesn't know) · found 2026-11-23 (V0.03 walkthrough S33)
+- **Other files saved with `os.replace` and read on another thread may race
+  on Windows the way Themis's did** (§12, 2026-11-21): Windows refuses the
+  rename while a reader has the file open, and the open while the rename
+  runs. `machine_spirit_config.json` is one: Pythia's request thread reads
+  it every question while MACHINE SPIRIT's SAVE renames it on the Tk thread
+  (a lost read answers one question with the default prompt). Ammit's
+  state raced too and is locked (S28, §12). Plutus's ledger can't: only the
+  Tk thread reads or writes it (S29), and the same holds for Pheme's read
+  list and the Scriptorium's open sections (S30). Cerberus's files weren't
+  checked. — needs: a check per file, and Themis's lock where one races ·
+  found 2026-11-21 (V0.03 walkthrough S24)
+- **Home's layout tests hang when more copies run than the PC has cores.**
+  Eight copies of `TestTheHomeLayoutAtRealWidths` at once on a 6-core PC:
+  every one sat in `top.update()` inside `_bar_at` past 60 s, on master
+  too and with Home's poll stopped; four at once finished 24 runs in 24.
+  A serial run (CI, the full suite, the publish script) isn't affected.
+  Likely a timer that comes due again before a starved process empties
+  the queue, so `update()` never returns. — needs: which timer (a stack
+  or `after info` from a stuck copy), then a bounded settle · found
+  2026-11-23 (public snapshot review)
 
 ## Decisions (the owner's call)
 
-- **Horai: a logger, or a written exemption?** It reads only the clock and
-  Themis, so it has no failure path to log. It is allowlisted in
-  `tests/test_tool_loggers.py`. — needs: decision · found 2026-09-28 (V0.03 audit L5)
-- **Golden hour: keep ±1 h, or use sun elevation (−4° to +6°)?** The math is
-  there now, but switching changes what the row means.
-  — needs: decision · found 2026-09-28 (helios.py docstring)
+- **A second ORPHEUS click while a file plays queues it, under the wrong
+  label.** Harmonia appends every `play()` to one buffer, so clicking file B
+  while A plays starts B only when A ends, but the transport says "playing:
+  B" at once; clicking A twice plays it twice. Stopping first would also cut
+  Pythia off mid-answer, since Harmonia has no channels. — needs: decision
+  (replace what plays, refuse while something plays, or keep the queue and
+  say so) · found 2026-11-21 (V0.03 walkthrough S23)
 - **Clio's captures can't show Felhaven's popups.** gdigrab records the
   window by title, and menus and dropdowns are windows of their own, so a
   walkthrough that opens one won't show it. A screen-region mode would record
   them, but also anything lying on top of Felhaven. — needs: decision (add the
   mode, or keep walkthroughs off popups) · found 2026-10-28 (Clio capture)
 - **More tooltip surfaces.** Virgil covers the nav rail, the Moderati,
-  Cogitator and Vox Array tabs, and the Hephaestus readouts. Not yet: the tab
-  bars inside Pheme, Morpheus and the Dynastic Vault, Home's Scraptoken Flux
-  and Cerberus lamp, and the Rite Log. Tips are pointer-only, too: a widget
-  with keyboard focus shows none. Each is one `_TIPS` table and, for a term,
-  a glossary entry (CONVENTIONS §7). — needs: decision, one per surface
-  · found 2026-11-09 (Virgil)
+  Cogitator and Vox Array tabs, the Hephaestus readouts, every tab and
+  readout in Atmospherics, Home, the glyph controls (transports, remove
+  and save glyphs, the Ammit controls, headline arrows, Cartograph's zoom and
+  HOME), the inner tab bars and section headers (Dynastic Vault,
+  Scriptorium, Morpheus, Ammit, Aether, Argus, Cerberus), and the jargon
+  readouts and controls a newcomer can't guess (phase 4, priority A), and
+  both secondary windows, the Auto-DJ queue and the Rite Log (phase 5).
+  Not yet: the priority B rows outside Home, left out by the owner's choice
+  and listed in `specs/virgil_tooltip_surfaces.md`; take one up only
+  if a newcomer stumbles on it. Tips are pointer-only,
+  too: a widget with keyboard focus shows none. Each is one `_TIPS` table
+  and, for a term, a glossary entry (CONVENTIONS §7). — needs: build, one
+  phase at a time · found 2026-11-09 (Virgil)
+- **Sixty-six glossary entries are stand-in drafts, not the owner's
+  words.** `tools/virgil.py` calls the glossary "the owner's words", and
+  these were written by a session so the tips could ship: Home's thirteen
+  (`vox_response`, `vox_end`, `auto_dj`, `reset_session`, `cerberus_lamp`,
+  `scraptoken_flux`, `rites`, `ammit_badge`, `status_line`, `foe_version`,
+  `speak_aloud`, `answer_stats`, `file_change`) and the glyph controls' sixteen
+  (`transport_prev`, `transport_play`, `transport_next`, `transport_stop`,
+  `playlist_save`, `playlist_remove`, `search_save`, `file_remove`,
+  `task_check`, `task_delete`, `ammit_minutes`, `ammit_run`, `ammit_reset`,
+  `open_story`, `map_zoom`, `map_home`), and the tabs' and section headers'
+  thirteen (`scrapstream`, `source_fonts`, `playlists_tab`, `search_tab`,
+  `net_connections`, `net_listening`, `net_traffic`, `net_dns`,
+  `net_firewall`, `net_timeline`, `vault_keys`, `vault_custody`,
+  `vault_ledger`), and the jargon readouts' fifteen (`sky_preset`,
+  `sky_clarity`, `map_cache_status`, `cache_area`, `ledger_action`,
+  `base_copy`, `base_restore`, `base_take`, `calc_ans`, `log_status`,
+  `network_summary`, `import_legend`, `llm_model`, `llm_thinking`,
+  `llm_temperature`), the queue window's `queue_remove`, the Rite Log's
+  four (`rite_status`, `rite_select`, `rite_expand`, `rite_copy`), and the
+  Cartograph's cached-areas four (`cached_areas`, `area_rename`,
+  `area_refresh`, `area_delete`). Each says what
+  the code does; none
+  has had a human read. Edit `config/virgil_glossary.json` while Felhaven
+  runs and the next hover shows the change. Later phases add to this list.
+  — needs: the owner's edit, entry by entry · found 2026-11-10 (Virgil
+  phases 1 to 5)
 
 ## Parked, until a trigger
 
@@ -272,8 +242,9 @@ Sections are ordered by what an item needs before work can start.
   2026-10-05). — needs: its trigger (a write path built from such a value
   inside one function), then sinks generated from `tests/test_file_writes.py`
   · found 2026-10-05 (file-write guard)
-- **Cerberus's Ledger has no cap.** It grows about 4 KB a day (21 KB since
-  2026-09-30), and every vault read rewrites the whole file to bump a count.
+- **Cerberus's Ledger has no cap.** It held 21 KB by 2026-10-05 and 27.8 KB on
+  2026-11-14, about 0.2 KB a day since, and every vault read rewrites the whole
+  file to bump a count.
   Years before that matters, and capping an access log trades away its
   history. — needs: its trigger (the Ledger past ~1 MB), then a rollover that
   keeps the history · found 2026-10-05 (file-write guard)
@@ -285,6 +256,12 @@ Sections are ordered by what an item needs before work can start.
   tool would add prompt tokens to every chat turn on gemma4:e2b. — needs: its
   trigger (other people in the household start using Felhaven), then a
   design session · found 2026-11-09 (Virgil)
+- **`read_archive(list)` returns every document.** One entry is about 100 to
+  150 characters of JSON, so past ~50 documents the listing passes Pythia's
+  8,000-character tripwire, and Pythia sends a tool result to the model
+  whole. The archive holds 6 today (2026-11-23). — needs: its trigger (the
+  archive past ~50 documents), then a design (the newest N plus a total,
+  say) and the probe · found 2026-11-23 (V0.03 walkthrough S32)
 - **Freshness cache helper.** Aura and Pheme carry two deliberately parallel
   copies; extract a helper when a third polled tool adopts the pattern (§12,
   2026-09-28). — needs: its trigger · found 2026-09-28 (PR #27)

@@ -7,19 +7,23 @@ Job:         Report the moon's phase, illumination, moonrise, and moonset.
              Computes them from the Settings location and this computer's
              clock (with a phase glyph). No network.
 
-Contract:    Polled + brain tool, the Horai shape: TOOL_DEFINITION, handle(),
-             and fetch = handle for Kairos. Both take no arguments and return a
-             dict. fetch() never raises, deliberately (§2 asks why): there is
-             no I/O to fail, and a day with no moonrise is a fact ("—"), not a
-             failure. An unexpected math error is logged and becomes the slug.
+Contract:    §2's dashboard-only watcher: fetch() for Kairos and no
+             TOOL_DEFINITION (since 2026-11-14). fetch is handle(), and Ptolemy
+             hands that same handle() to Pythia as part of get_sky_report.
+             Both take no arguments and return a dict. fetch() never raises,
+             deliberately (§2 asks why): there is no I/O to fail, and a day
+             with no moonrise is a fact ("—"), not a failure. An unexpected
+             math error is logged and comes back as
+             `unavailable: moon computation raised <class>`.
 
              compute(lat, lon, when) is the pure core that handle() wraps, and
              the thing the tests pin.
 
              The panel (SeleneWidget and Hypatia's moon row, via Kairos's
-             `selene` worker) and the get_moon_phase tool call the same
-             function, so they cannot disagree. There is no `as_of`: nothing is
-             fetched (T7 dates readings), so the answer is as old as the call.
+             `selene` worker) and the get_sky_report tool (through Ptolemy)
+             call the same function, so they cannot disagree. There is no
+             `as_of`: nothing is fetched (T7 dates readings), so the answer is
+             as old as the call.
 
 Source:      The Astronomical Almanac's low-precision series for the moon
              (valid 1900–2100: ~0.3° in longitude, ~0.2° in latitude), taken to
@@ -46,18 +50,20 @@ Source:      The Astronomical Almanac's low-precision series for the moon
              A quarter is therefore named only in the hour or so around it.
              That is USNO's convention, kept rather than improved.
 
-Upstream:    themis.py (latitude/longitude and the 24-hour clock, read per
-             call), kairos.py (fetch),
-             tools/hypatia.py (_julian_date, _altaz), tools/helios.py
-             (_sun_position, _clock, _pretty)
-Downstream:  panels/aura_panel.py → SeleneWidget; panels/hypatia_panel.py →
-             ConditionsWidget's moon row
+Upstream:    kairos.py (the `selene` worker calls fetch every 300 s),
+             tools/ptolemy.py (handle, as get_sky_report)
+Downstream:  themis.py (latitude/longitude and the 24-hour clock, read per
+             call), tools/hypatia.py (_julian_date, _altaz), tools/helios.py
+             (_sun_position, _clock, _pretty), panels/aura_panel.py →
+             SeleneWidget and panels/hypatia_panel.py → ConditionsWidget's
+             moon row (Kairos hands both fetch()'s answer)
 
-Requires:    stdlib only (math, datetime, logging)
+Requires:    themis.py (app root), tools/helios.py, tools/hypatia.py; logging,
+             math, os, sys, datetime, typing (stdlib)
 
 Time zone:   Times are in THIS COMPUTER's zone; see helios.py's note for why.
 
-V0.02:       Audited 2026-07-25 — tag-only. Pure interpreter verified never-raise
+2026-07-25:  walkthrough audit — tag-only. Pure interpreter verified never-raise
              (interpret / _moon_time / _illumination, and handle() degrades to the
              slug moon_unavailable; an unknown phase → 🌙, never a KeyError).
              Thorough existing coverage (test_selene + test_tool_handles); no dead
@@ -70,6 +76,21 @@ V0.02:       Audited 2026-07-25 — tag-only. Pure interpreter verified never-ra
 
 2026-10-31:  writes moonrise and moonset on the 24-hour clock when Settings
              picks it, as Helios and Horai do.
+
+2026-11-14:  TOOL_DEFINITION removed. get_moon_phase is retired; Pythia reaches
+             handle() through Ptolemy's get_sky_report, with Helios and Hypatia
+             (CONVENTIONS §12).
+
+V0.03:       Walked through 2026-11-20 (the V0.03 walkthrough, CONVENTIONS
+             §3/§12). In the repo since 2026-06-10 as wttr.in's interpreter,
+             local since 2026-09-28. Checked: the moon series' stated accuracy
+             and h0 (Meeus ch. 15); every USNO and JPL case in the tests;
+             never-raise at the poles and the date line. Changed: an unexpected
+             failure says the shared `unavailable` (§2) where it said
+             moon_unavailable; the Contract names its §2 row; Upstream and
+             Downstream swapped where they were crossed; Requires names the
+             three modules it imports; _STEP's comment admits the grazing
+             moon it can miss.
 """
 
 import logging
@@ -106,7 +127,9 @@ PHASES = {
 _NO_TIME = "—"
 
 # Seconds between altitude samples when scanning a day. The moon's altitude
-# changes by at most ~15°/h, so two horizon crossings can't hide in one step.
+# changes by at most ~15°/h, ~2.5° a step, so two horizon crossings hide in
+# one step only when the moon barely grazes the horizon. A moonrise that
+# short reads as none.
 _STEP = 600.0
 _BISECTIONS = 20                 # 600 s / 2**20: far below a displayed minute
 
@@ -267,21 +290,6 @@ def compute(lat: float, lon: float, when: datetime, *,
 
 # ── LLM tool contract ─────────────────────────────────────────────────────────
 
-TOOL_DEFINITION = {
-    "type": "function",
-    "function": {
-        "name": "get_moon_phase",
-        "description": (
-            "Returns the current moon phase (with illumination percent) plus "
-            "tonight's moonrise and moonset for the dashboard's location. Call "
-            "when the user asks about the moon, its phase, how full it is, or "
-            "moonrise/moonset."
-        ),
-        "parameters": {"type": "object", "properties": {}, "required": []},
-    },
-}
-
-
 def _now() -> datetime:
     """Injectable clock seam, aura._now()'s convention: naive LOCAL time, the
     clock on the wall. compute() reads a naive datetime as this zone."""
@@ -291,15 +299,14 @@ def _now() -> datetime:
 def handle() -> dict[str, Any]:
     """Toolbox entry, and Kairos's (fetch = handle): the moon now, and today's
     moonrise and moonset, for the Settings location, on the Settings clock.
-    Never raises: an
-    unexpected failure comes back as the slug with the exception's type name,
-    logged."""
+    Never raises: an unexpected failure comes back as `unavailable` with the
+    exception's type name, logged."""
     try:
         return compute(themis.latitude(), themis.longitude(), _now(),
                        clock_24h=themis.clock_24h())
     except Exception as e:
         log.error(f"Selene: moon computation failed: {type(e).__name__}")
-        return {"error": f"moon_unavailable: {type(e).__name__}"}
+        return {"error": f"unavailable: moon computation raised {type(e).__name__}"}
 
 
 fetch = handle  # Kairos entry point: the same answer the model gets, no I/O

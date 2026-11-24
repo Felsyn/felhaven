@@ -26,7 +26,12 @@
 #
 # Known hits, each reviewed (their lines in tests/test_process_launches.py say
 # why they are safe): PhemePanel._build_story_row._open, morpheus.search,
-# morpheus.describe. Anything else is new: trace it before trusting it.
+# morpheus.describe; and, since 2026-11-17, the four System32 programs named
+# from %SystemRoot% (aether._check_wifi, argus._firewall, argus._dns,
+# DaedalusPanel._open_in_notepad; CONVENTIONS §11): the variable is Windows'
+# own, and whoever can change Felhaven's environment already runs as the
+# owner. Last run 2026-11-19, semgrep 1.178.0: these seven, nothing else.
+# Anything else is new: trace it before trusting it.
 rules:
   - id: felhaven-untrusted-into-process-or-opener
     mode: taint

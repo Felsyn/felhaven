@@ -96,6 +96,20 @@ class TestZenoPanelSmoke(unittest.TestCase):
     def tearDownClass(cls):
         cls.root.destroy()
 
+    def test_the_ans_tip_shows_only_once_ans_has_a_value(self):
+        from panels import virgil_tooltip
+        shared = virgil_tooltip._shared(self.root)
+        panel = self.panel
+        self.assertEqual(sorted(ZenoPanel._TIPS), sorted(panel.tip_targets))
+        for key, tip in ZenoPanel._TIPS.items():
+            self.assertEqual(shared._tips.get(str(panel.tip_targets[key])), tip, key)
+        when = shared._when[str(panel._ans_lbl)]
+        self.assertFalse(when())
+        panel._entry.delete(0, "end")
+        panel._entry.insert(0, "2 + 2")
+        panel._evaluate()
+        self.assertTrue(when())
+
     def setUp(self):
         self.panel = ZenoPanel(self.root)
         self.panel.pack()
@@ -220,6 +234,22 @@ class TestZenoPanelSmoke(unittest.TestCase):
         self._enter("2 + 2")
         self.panel._recall("2 + 2")
         self.assertEqual(self.panel._entry.get(), "2 + 2")
+
+    # ── ANS keeps the value as Zeno returned it (S31, 2026-11-23) ───────────
+
+    def test_ans_reads_a_big_integer_digit_for_digit(self):
+        # It stored float(result): 2**100 read 1.26765e+30 as ANS.
+        self._enter("2**100")
+        self.assertEqual(self.panel._ans_lbl.cget("text"),
+                         "ANS = 1267650600228229401496703205376")
+
+    def test_an_integer_past_a_float_still_draws(self):
+        # float(2**1100) raised OverflowError out of the Return key.
+        try:
+            self._enter("2**1100")
+        except OverflowError:
+            self.fail("_evaluate raised OverflowError on an integer past 1e308")
+        self.assertEqual(self.panel._val_lbl.cget("text"), str(2 ** 1100))
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@ euterpe.py — Song Ledger
 =========================
 Metis Toolbox | Anti-Legion: ONE JOB
 
-Job:         Remember what music has played, and what the listener seems to
+Job:         Remember the songs the listener chose, and what they seem to
              like. It answers two questions: "have we heard this recently?"
              and "what does the listener actually like?". One row per song,
              plus the views over it. It
@@ -68,10 +68,16 @@ Contract:    Local-only ledger / persistence flavor (§2) — the plutus.py
                was_recently_played(...) — the guard's question, by id or title.
                taste_anchor(limit=None) — the listener's OWN recent picks.
                normalize(title, channel) — the dedupe key.
+               pretty(title, channel)   — the same string with the case kept.
+               same_song(key_a, key_b)  — the one judgment of what one song is.
+               is_a_song(title, duration, details=None) — None, or why not.
+               has_music_evidence(details) — does its metadata say music?
                video_id(url)            — the YouTube id, when there is one.
                settings()               — the config, with defaults applied.
+               not_music_phrases(), not_music_categories() — the two denylists.
+               SOURCES                  — ("user", "dj").
 
-             And the editor's three, which no other caller uses:
+             And the editor's five, which no other caller uses:
 
                raw_text()               — the file's literal text.
                stamp()                  — its mtime; the editor's staleness token.
@@ -128,7 +134,7 @@ song?         it: this module deciding what counts as a prior, and Awen's guard
               becomes a prior the DJ can never match, and the reverse lets it
               play what the ledger then refuses to remember.
 
-              Three tests, all config (§4):
+              Four tests, all config (§4):
                 - too short: below min_song_seconds. A 26 s room-echo demo is
                   not a track, and one steered a real evening.
                 - too long, or NO DURATION: above max_song_seconds, or a live
@@ -139,6 +145,9 @@ song?         it: this module deciding what counts as a prior, and Awen's guard
                   evening measured 2026-09-16 produced a user manual, a hardware
                   review, a documentary and a reaction video, every one of which
                   passed a cap-only guard.
+                - not music by YouTube's category, only when the caller passes
+                  the video's metadata (Awen's guard does; the ledger never
+                  can): see _DEFAULT_NOT_MUSIC_CATEGORIES.
 
               The title half is a DENYLIST and is therefore config rather than
               code: every denylist is eventually wrong about something, and when
@@ -205,18 +214,34 @@ Base copy:   euterpe_ledger.json.base is a SECOND kind of safety net and not a
              take_base() reads the ledger from DISK rather than from anything
              typed, so a base copy is always a state that was saved.
 
-Config:      config/euterpe_config.json (§4) — the two window sizes and the
-             duration cap, so they are tuned by editing JSON rather than code.
+Config:      config/euterpe_config.json (§4) — the two window sizes, the
+             duration band and the two denylists, so they are tuned by editing
+             JSON rather than code.
              That matters more than it looks: a stable taste anchor plus a
              fixed window lets a small model settle into a loop the length of
              the window, and widening it trades that for more misses. It is a
              dial, not a constant to get right once.
 
-Upstream:    awen.py (records plays, reads the views)
+Upstream:    awen.py (records the listener's plays, reads the views, asks
+             is_a_song()), panels/euterpe_panel.py (the TUNES editor: the
+             editor's five, and entries() for its counts)
 Downstream:  euterpe_ledger.json, config/euterpe_config.json
 
 Requires:    json, logging, os, re, shutil, tempfile, time, unicodedata
              (stdlib only).
+
+V0.03:       Walked through 2026-11-18 (the V0.03 walkthrough, CONVENTIONS
+             §3), its first audit (landed 2026-09-25 in #21, written from
+             2026-09-16; Daedalus #22, Virgil #57). Every write is
+             atomic and listed, record() never raises, no test reads the real
+             ledger, and the model still has no handle. take_base() now
+             removes its temp file when a write fails, and a ledger it cannot
+             READ is read_failed (it said write_failed; the owner's pick). The
+             words caught up: Job says the songs the listener chose, not all
+             music played (the owner's pick: it is the TUNES tab's tooltip);
+             the Contract names every public function and five editor calls,
+             not three; "Is it a song?" has four tests; Config names the
+             denylists; Upstream gained the TUNES editor.
 """
 
 import json
@@ -577,9 +602,11 @@ def _clean(title: str, channel: str, *, fold: bool) -> str:
 
 
 def same_song(key_a: str, key_b: str) -> bool:
-    """Are these two keys the same song? ONE judgment, three callers — the
-    guard, record()'s move-on-replay, and replace_all()'s duplicate check. If
-    they could disagree, a song the guard refused could still be filed twice.
+    """Are these two keys the same song? ONE judgment: Awen's guard, record()'s
+    move-on-replay, recent_titles(), was_recently_played() and taste_anchor()
+    ask it, and replace_all()'s duplicate check compares the same _halves().
+    If they could disagree, a song the guard refused could still be filed
+    twice.
 
     Order-insensitive across the dash, because YouTube ships the same song both
     ways round and normalize() cannot tell which half is the artist:
@@ -688,7 +715,7 @@ def is_a_song(title: str, duration: Optional[float],
     could never match, and the reverse would let the DJ play what the ledger
     then refuses to remember.
 
-    Three tests, all config-driven (§4):
+    Four tests, all config-driven (§4), the last only with `details`:
       - too short: below min_song_seconds. A 26 s room-echo demo is not a track.
       - too long, or NO DURATION AT ALL: above max_song_seconds, or a live
         stream, which yt-dlp reports as None and which never ends.
@@ -984,7 +1011,7 @@ def _save(plays: list[dict[str, Any]]) -> bool:
         return False
 
 
-# ── Mutation (the only write path) ────────────────────────────────────────────
+# ── Recording a play (the automatic write path) ───────────────────────────────
 
 def record(title: str,
            *,
@@ -1005,7 +1032,8 @@ def record(title: str,
 
     Declined, returning None and writing nothing:
       - a blank title, or one that normalizes to nothing
-      - no duration, or one over max_song_seconds (see "Duration")
+      - anything is_a_song() refuses: no duration, too short, too long, or
+        not music by its title (see "Is it a song?")
       - an unknown source
     None is not an error — the log line says which of these it was at debug
     level, because an excluded hour-long lore video is routine, not a fault.
@@ -1061,6 +1089,8 @@ def record(title: str,
     if not _save(plays):
         return None
     return entry
+
+
 # ── Whole-file replace (the operator's write path, not the model's) ───────────
 
 def replace_all(text: str) -> Optional[str]:
@@ -1215,7 +1245,7 @@ def base_snapshot() -> Optional[dict[str, Any]]:
 
 def take_base() -> Optional[str]:
     """Make the ledger ON DISK the new base copy. None on success, a slug on
-    refusal — no_ledger, or one of _validate's, or write_failed.
+    refusal — no_ledger, read_failed, one of _validate's, or write_failed.
 
     From disk, never from the editor's text, and that is the whole point of the
     distinction: a base copy is a state that was actually validated and saved,
@@ -1232,8 +1262,10 @@ def take_base() -> Optional[str]:
     except FileNotFoundError:
         return "no_ledger"
     except (OSError, UnicodeDecodeError) as exc:
+        # Its own slug: nothing was written, so write_failed would send the
+        # operator after a disk problem that isn't there.
         log.error("euterpe: could not read the ledger to base it: %s", exc)
-        return "write_failed"
+        return "read_failed"
 
     _, error = _validate(text)
     if error is not None:
@@ -1241,15 +1273,25 @@ def take_base() -> Optional[str]:
 
     destination = _LEDGER_PATH + _BASE_SUFFIX
     try:
-        directory = os.path.dirname(destination)
         handle_fd, temp_path = tempfile.mkstemp(
-            dir=directory, prefix=".euterpe-base-", suffix=".tmp")
+            dir=os.path.dirname(destination), prefix=".euterpe-base-",
+            suffix=".tmp")
+    except OSError as exc:
+        log.error("euterpe: could not write the base copy: %s", exc)
+        return "write_failed"
+    try:
         with os.fdopen(handle_fd, "w", encoding="utf-8") as out:
             out.write(text)
         os.replace(temp_path, destination)
         return None
     except OSError as exc:
+        # The temp file goes with the failure, as in _save(), or it is litter
+        # beside the ledger that nothing else will ever remove.
         log.error("euterpe: could not write the base copy: %s", exc)
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
         return "write_failed"
 
 

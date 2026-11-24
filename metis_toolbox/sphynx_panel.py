@@ -10,11 +10,14 @@ Job:         Draw the Sphynx boot sequence, take the PIN, and open Felhaven on
              computes a hash or touches the attempt counter directly.
 
 First run:   When sphynx_data.json is absent (a fresh clone — the file is
-             per-user now, no longer shipped), the gate can't verify anything,
-             so instead of failing closed this panel shows a SETUP screen: the
-             user writes their own riddle + PIN (or skips the gate entirely).
-             sphynx.create() persists the choice; later launches gate normally
-             against the stored riddle, or bypass if the user skipped.
+             per-user now, no longer shipped) or holds no readable PIN, the
+             gate can't verify anything, so instead of failing closed this
+             panel shows a SETUP screen: the user writes their own riddle +
+             PIN (or skips the gate entirely), and is told to pick a PIN they
+             use nowhere else, since the gate file gives it away (sphynx.py,
+             Threat model). sphynx.create() persists the choice; later
+             launches gate normally against the stored riddle, or bypass if
+             the user skipped.
 
 Entry point: launched by Felhaven.bat in place of felhaven.py. On a correct
              PIN (or a skipped/just-created gate) it spawns felhaven.py as its
@@ -26,13 +29,28 @@ Kairos-registered — it runs once per launch and exits, it doesn't tick.
 
 Upstream:    Felhaven.bat
 Downstream:  sphynx.py (verification + create), felhaven.py (spawned on
-             success), theme.py (colors/fonts)
+             success), theme.py (colors/fonts), metis_logging.py (its log
+             and error hooks, when run as a program)
 
 Requires:    tkinter (stdlib), subprocess, sys, os.
 
-V0.02:       Audited 2026-07-24 — dropped the stale "v1.0" from the boot
+2026-07-24:  walkthrough audit — dropped the stale "v1.0" from the boot
              litany (an unmaintained version string in the UI is the retired
              "(FOE v.01)" scar, §12); logic unchanged.
+
+V0.03:       Walked through 2026-11-17 (the V0.03 walkthrough, CONVENTIONS
+             §3). A gate file that couldn't be written showed the OSError's
+             text, which carries the file's full path, on screen (§2); it now
+             shows the class. The setup screen says to use a PIN used nowhere
+             else (the owner's pick). Its entry boxes no longer repeat the
+             theme's text cursor (§7). No tooltips, by Virgil's design;
+             no logger, since this process has no log handler to write to.
+             2026-11-21 (the V0.03 walkthrough's S26): it has one now. Run as
+             a program, it calls setup_logging("sphynx") and log_tk_errors on
+             its root, so an exception nothing caught (a click handler's, a
+             thread's, or one that ends the gate) reaches logs/sphynx.log.
+             Under pythonw it had gone nowhere. Downstream gains
+             metis_logging.py.
 """
 
 import os
@@ -41,9 +59,10 @@ import sys
 import tkinter as tk
 
 import sphynx
+from metis_logging import log_tk_errors, setup_logging
 from theme import C, FONTS, _init_fonts, _init_widget_defaults
 
-# felhaven.py lives next to this file — anchor to __file__ (CONVENTIONS §11),
+# felhaven.py lives next to this file — anchor to __file__ (CONVENTIONS §1),
 # so this resolves correctly regardless of cwd.
 _APP_ROOT        = os.path.dirname(os.path.abspath(__file__))
 _FELHAVEN_SCRIPT = os.path.join(_APP_ROOT, "felhaven.py")
@@ -101,7 +120,7 @@ class SphynxPanel:
                  fg=C["text1"], bg=C["bg"]).pack(side="left", padx=(16, 4))
         self._entry = tk.Entry(
             self._entry_frame, show="*", font=FONTS["body"],
-            bg=C["card"], fg=C["text1"], insertbackground=C["text1"],
+            bg=C["card"], fg=C["text1"],
             highlightbackground=C["border"], highlightcolor=C["text1"],
             highlightthickness=1, borderwidth=0,
         )
@@ -188,7 +207,7 @@ class SphynxPanel:
                      bg=C["bg"], anchor="w", width=16).pack(side="left")
             entry = tk.Entry(
                 row, show=show, font=FONTS["body"], bg=C["card"], fg=C["text1"],
-                insertbackground=C["text1"], highlightbackground=C["border"],
+                highlightbackground=C["border"],
                 highlightcolor=C["text1"], highlightthickness=1, borderwidth=0,
             )
             entry.pack(side="left", fill="x", expand=True)
@@ -227,6 +246,8 @@ class SphynxPanel:
         self._print("Write a riddle or statement and choose a PIN to guard the")
         self._print("gate, or skip it (it's soft 'family-misclick' theater, not")
         self._print("real security — a solo user may not want it).")
+        self._print("Use a PIN you use nowhere else: anyone who can read the")
+        self._print("gate file can work out a short one in seconds.")
         self._print("")
         self._setup_frame.pack(side="bottom", fill="x")
         self._riddle_entry.focus_set()
@@ -248,7 +269,10 @@ class SphynxPanel:
         try:
             sphynx.create(pin, riddle)
         except OSError as e:
-            self._setup_status.config(text=f"Could not write the gate: {e}")
+            # The class, never the text: an OSError's text names the file's
+            # full path (§2).
+            self._setup_status.config(
+                text=f"Could not write the gate ({type(e).__name__}).")
             return
         self._setup_frame.pack_forget()
         self._print("")
@@ -260,7 +284,8 @@ class SphynxPanel:
         try:
             sphynx.create("", disabled=True)
         except OSError as e:
-            self._setup_status.config(text=f"Could not save your choice: {e}")
+            self._setup_status.config(
+                text=f"Could not save your choice ({type(e).__name__}).")
             return
         self._setup_frame.pack_forget()
         self._print("")
@@ -284,4 +309,9 @@ class SphynxPanel:
 
 
 if __name__ == "__main__":
-    sys.exit(SphynxPanel().run())
+    # Here, not in __init__: the smoke tests build the panel, and must not
+    # open logs/sphynx.log or replace the process's hooks.
+    setup_logging("sphynx")
+    app = SphynxPanel()
+    log_tk_errors(app.root)
+    sys.exit(app.run())

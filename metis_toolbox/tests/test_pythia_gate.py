@@ -35,6 +35,19 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pythia
+from tests._pythia_sandbox import PythiaSandbox
+
+_sandbox = PythiaSandbox()
+
+
+def setUpModule():
+    """Every ask() here reads the owner's settings, prompt and, with thinking
+    on, Ollama itself. The sandbox points all three away from this checkout."""
+    _sandbox.start()
+
+
+def tearDownModule():
+    _sandbox.stop()
 
 
 def _stream(*chunks) -> mock.Mock:
@@ -242,7 +255,7 @@ class TestTheGateLeavesMeaningToTheHandler(_GateCase):
         handler.assert_called_once_with(action="volume", level=150)
 
     def test_an_empty_string_for_a_required_parameter_is_present(self):
-        # Awen's own no_query guard owns what an empty query means.
+        # Awen's own empty-query guard owns what an empty query means.
         handler = self._mock("play_music")
         pythia._dispatch("play_music", {"query": ""})
         handler.assert_called_once_with(query="")

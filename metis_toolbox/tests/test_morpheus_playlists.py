@@ -17,6 +17,7 @@ restores it in tearDown.
 """
 
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -26,6 +27,12 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tools import morpheus
+
+# Several cases here reach a branch that logs a WARNING or an ERROR on purpose.
+# No test entry point calls setup_logging (§5), so logging's last-resort
+# handler would print each one to stderr; a NullHandler stops that (the
+# tests/test_zeno.py precedent). assertLogs still sees every record.
+logging.getLogger("METIS.morpheus").addHandler(logging.NullHandler())
 
 
 class _PatchedPlaylists(unittest.TestCase):
@@ -115,6 +122,28 @@ class TestAtomicWrite(_PatchedPlaylists):
     def test_no_tmp_residue_on_success(self):
         morpheus.save_playlist("A", "url1")
         self.assertFalse(os.path.exists(morpheus._PLAYLISTS_PATH + ".tmp"))
+
+
+
+class TestAPlaylistsFileItCantUse(_PatchedPlaylists):
+    """A "playlists" that wasn't a list stopped the MORPHEUS tab, and so
+    Felhaven, from opening (measured 2026-11-23)."""
+
+    def _write(self, data):
+        with open(morpheus._PLAYLISTS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+    def test_playlists_that_arent_a_list_are_none_and_logged(self):
+        self._write({"playlists": {"a": {"label": "x", "url": "https://e.example/"}}})
+        with self.assertLogs("METIS.morpheus", "ERROR"):
+            self.assertEqual(morpheus.load_playlists(), [])
+
+    def test_rows_come_back_at_their_file_positions(self):
+        # remove_playlist() deletes by position, so a bad row must not be
+        # dropped here: every row after it would shift onto the wrong entry.
+        self._write({"playlists": ["junk", {"label": "B", "url": "https://e.example/b"}]})
+        self.assertEqual(morpheus.load_playlists(),
+                         ["junk", {"label": "B", "url": "https://e.example/b"}])
 
 
 if __name__ == "__main__":

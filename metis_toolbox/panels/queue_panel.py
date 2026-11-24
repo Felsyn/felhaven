@@ -46,16 +46,32 @@ Removing:    ONE click, no confirm. §6 does permit the two-click arm/disarm wit
              Red rather than §7's amber because the click DESTROYS. Amber is
              the informational channel, and this row is not informing.
 
-Upstream:    panels/home_panel.py (opens and refreshes it)
-Downstream:  theme.py (colors, fonts)
+Tooltip:     Each row carries a Virgil tip (a glossary entry, CONVENTIONS §7)
+             saying the click removes it at once and why there is no confirm.
+             Virgil is not awen: the box still knows nothing of where its rows
+             came from.
+
+Upstream:    panels/home_panel.py (opens it, and on its 60 ms drain chain
+             redraws it when awen.queue_revision() moves)
+Downstream:  theme.py (colors, fonts), panels/virgil_tooltip.py +
+             tools/virgil.py (the row tip)
 
 Requires:    tkinter (stdlib). No pip dependency.
+
+V0.03:       Walked through 2026-11-18 (the V0.03 walkthrough, CONVENTIONS
+             §3), its first audit (landed 2026-09-25 in #21; the row tip #66).
+             Pure display as promised: it imports nothing from awen, holds no
+             timer, keys rows by id, and its one window is lifted rather than
+             doubled. Found clean; the Tooltip paragraph moved above Upstream,
+             which now says how Home keeps it current.
 """
 
 import tkinter as tk
 from typing import Any, Callable, Optional
 
+from panels import virgil_tooltip
 from theme import C, FONTS
+from tools import virgil
 
 # Nothing lined up is a STATE, not a reason to close. A queue draining while the
 # box is open must not make the window vanish under the pointer.
@@ -63,6 +79,12 @@ _EMPTY_LINE = "Nothing lined up yet."
 
 
 class QueueBox(tk.Toplevel):
+
+    # Hover tooltip (Virgil) for each row, a glossary entry (CONVENTIONS §7).
+    # _build_row attaches it.
+    _ROW_TIPS = {
+        "remove": virgil.term("queue_remove"),
+    }
 
     def __init__(self, parent: tk.Widget,
                  rows: "list[dict[str, Any]]",
@@ -154,6 +176,7 @@ class QueueBox(tk.Toplevel):
             widget.bind("<Button-1>", lambda _e, i=entry_id: self._drop(i))
             widget.bind("<Enter>", enter)
             widget.bind("<Leave>", leave)
+        virgil_tooltip.attach(frame, self._ROW_TIPS["remove"])
 
     # ── Acting ───────────────────────────────────────────────────────────────
 

@@ -90,17 +90,17 @@ class TestHeliosHandle(_ComputedCase):
         self.place(69.6492, 18.9553)                  # Tromsø
         self.at(datetime(2026, 12, 15, 12, tzinfo=timezone(timedelta(hours=1))))
         self.assertEqual(helios.handle(),
-                         {"error": "sun_times_unavailable: the sun does not rise today"})
+                         {"error": "unavailable: the sun does not rise today"})
 
     def test_a_math_failure_degrades_to_the_slug_and_is_logged(self):
         with mock.patch("tools.helios.compute", side_effect=ZeroDivisionError()), \
                 self.assertLogs("METIS.helios", "ERROR"):
             self.assertEqual(helios.handle(),
-                             {"error": "sun_times_unavailable: ZeroDivisionError"})
+                             {"error": "unavailable: sun computation raised ZeroDivisionError"})
 
     def test_the_panel_polls_the_same_answer(self):
         # Kairos's helios worker calls fetch(); the model calls handle(). One
-        # function, so the Helios panel and get_sun_times cannot disagree.
+        # function, so the Helios panel and get_sky_report cannot disagree.
         self.assertIs(helios.fetch, helios.handle)
 
 
@@ -137,7 +137,7 @@ class TestSeleneHandle(_ComputedCase):
         with mock.patch("tools.selene.compute", side_effect=ZeroDivisionError()), \
                 self.assertLogs("METIS.selene", "ERROR"):
             self.assertEqual(selene.handle(),
-                             {"error": "moon_unavailable: ZeroDivisionError"})
+                             {"error": "unavailable: moon computation raised ZeroDivisionError"})
 
     def test_the_panel_polls_the_same_answer(self):
         self.assertIs(selene.fetch, selene.handle)
@@ -164,7 +164,8 @@ class TestArgusHandle(unittest.TestCase):
 
     def test_fetch_failure_degrades(self):
         with mock.patch("tools.argus.fetch", side_effect=OSError("no sockets")):
-            self.assertEqual(argus.handle(), {"error": "network_unavailable"})
+            self.assertEqual(argus.handle(),
+                             {"error": "unavailable: network snapshot raised OSError"})
 
 
 class TestHypatiaHandle(unittest.TestCase):
@@ -192,7 +193,8 @@ class TestHypatiaHandle(unittest.TestCase):
     def test_empty_catalog_degrades(self):
         with mock.patch("tools.hypatia._build_snapshot",
                         side_effect=RuntimeError("empty catalog")):
-            self.assertEqual(hypatia.handle(), {"error": "sky_unavailable"})
+            self.assertEqual(hypatia.handle(),
+                             {"error": "unavailable: sky snapshot raised RuntimeError"})
 
 
 class TestMorpheusHandle(unittest.TestCase):
@@ -209,17 +211,17 @@ class TestMorpheusHandle(unittest.TestCase):
         play.assert_called_once_with("https://youtu.be/abc")   # actually played the hit
 
     def test_empty_query_degrades(self):
-        self.assertEqual(morpheus.play_music("")["error"], "no_query")
+        self.assertEqual(morpheus.play_music("")["error"], "bad_arguments")
 
     def test_missing_binaries_degrades(self):
         with mock.patch("tools.morpheus.available",
                         return_value={"mpv": None, "ytdlp": None}):
-            self.assertEqual(morpheus.play_music("anything")["error"], "player_unavailable")
+            self.assertEqual(morpheus.play_music("anything")["error"], "unavailable")
 
     def test_no_results_degrades(self):
         with mock.patch("tools.morpheus.available", return_value=self._AVAIL), \
                 mock.patch("tools.morpheus.search",
-                           return_value=[{"error": "search_failed"}]), \
+                           return_value=[{"error": "unavailable"}]), \
                 mock.patch("tools.morpheus.play") as play:
             self.assertEqual(morpheus.play_music("obscure")["error"], "no_results")
             play.assert_not_called()               # never play when search fails
@@ -247,7 +249,7 @@ class TestMorpheusReplay(unittest.TestCase):
         with mock.patch("tools.morpheus.available",
                         return_value={"mpv": None, "ytdlp": "yt-dlp.exe"}):
             self.assertEqual(morpheus.control_music("replay")["error"],
-                             "player_unavailable")
+                             "unavailable")
 
     def test_resumes_last_played_url(self):
         morpheus._last_url = "https://youtu.be/abc"
@@ -275,9 +277,11 @@ class TestMorpheusReplay(unittest.TestCase):
 
 class TestNewToolsRegisteredWithPythia(unittest.TestCase):
     def test_new_handles_reach_pythia(self):
-        for name in ("get_network_summary", "get_sun_times", "get_sky_tonight",
-                     "get_moon_phase", "play_music", "control_music",
-                     "search_web", "fetch_page"):
+        # get_network_summary left 2026-11-14 for get_machine_status
+        # (tests/test_asclepius.py); get_sun_times, get_sky_tonight and
+        # get_moon_phase the same day for get_sky_report (tests/test_ptolemy.py).
+        for name in ("get_machine_status", "get_sky_report", "play_music",
+                     "control_music", "search_web", "fetch_page"):
             self.assertIn(name, pythia._DISPATCH)
 
     def test_tools_and_dispatch_stay_in_lockstep(self):

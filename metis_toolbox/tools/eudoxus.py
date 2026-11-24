@@ -10,7 +10,7 @@ Job:         Convert between units of length, volume, weight, temperature,
              and mathematician who developed the theory of proportions —
              the mathematical foundation of unit conversion.
 
-Contract:    Exposes TOOL_DEFINITION, handle() and convert().
+Contract:    Exposes TOOL_DEFINITION, TOOL_META, handle() and convert().
              handle(value, from_unit, to_unit) is the brain tool; convert()
              parses an expression and calls it. Neither raises — a brain tool
              that throws crashes Pythia's dispatcher (§2) — and every failure
@@ -39,17 +39,32 @@ US-customary defaults (for brain/panel consumers):
 
 Fractions are not supported — use decimals (0.5 cup, not 1/2 cup).
 
-Upstream:    pythia.py (registration + dispatch)
-Downstream:  panels/eudoxus_panel.py (EudoxusPanel)
+Upstream:    pythia.py (registration + dispatch, handle());
+             panels/eudoxus_panel.py (EudoxusPanel, convert())
+Downstream:  tools/zeno.py (format_number())
 
 Requires:    stdlib: re, os, sys, logging, typing. Plus tools/zeno.py for
              format_number() — the kepler→hypatia precedent (§12). Eudoxus
              kept its own copy of those rules until 2026-07-23, marked "kept
              in sync with tools/zeno.py", which is a promise no file can keep.
 
-V0.02:       Audited 2026-07-23 — error sentences normalized to §2 slugs, the
+2026-07-23:  walkthrough audit — error sentences normalized to §2 slugs, the
              duplicated number formatter replaced by zeno's public one, the
              " in " separator no longer mis-split "3 in in cm", first tests.
+
+2026-11-16:  the Pythia tool audit (CONVENTIONS §12). The description opens
+             with what it converts, units included, since those words route a
+             question here (§3); that names and abbreviations both work moved
+             onto from_unit and to_unit. The gate coerces a numeric-string
+             `value` (T3). TOOL_META says math / local / changes nothing. Its
+             slugs name unit failures, which T9 leaves module-specific.
+
+V0.03:       Walked through 2026-11-23 (the V0.03 walkthrough, S31; born
+             2026-06-10). Every table, alias and path was read against the
+             slugs. convert() now reads "5. cups", "+5 m" and "1,000 ft": each
+             was "unknown unit: . cups" and the like, the number's tail taken
+             for the unit (measured). Upstream and Downstream said who calls
+             whom backwards; fixed.
 """
 
 import os
@@ -275,7 +290,13 @@ def handle(value: float, from_unit: str, to_unit: str) -> dict[str, Any]:
 
 # ── Expression parser ─────────────────────────────────────────────────────────
 
-_LEFT_RE = re.compile(r'^(-?\d*\.?\d+(?:[eE][+-]?\d+)?)\s*(.*)$')
+# The number: an optional sign; digits, maybe in comma groups of three, with
+# an optional fraction (a bare trailing point too), or a fraction alone; an
+# optional exponent. The old pattern, -?\d*\.?\d+..., took "5." as "5" and
+# ". cups" as the unit, and read "+5" and "1,000" not at all (measured).
+_LEFT_RE = re.compile(
+    r'^([+-]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)'
+    r'\s*(.*)$')
 
 
 def convert(expression: str) -> dict[str, Any]:
@@ -292,8 +313,12 @@ def convert(expression: str) -> dict[str, Any]:
         "1e3 m to km"             ✓  (scientific notation)
         "-40 f to c"              ✓  (negative value)
         "3 in in cm"              ✓  ("in" is also a unit — see below)
+        "5. cups to ml", "+5 m to km", "1,000 ft to m"
+                                  ✓  (a trailing point, a plus sign, and
+                                      commas between groups of three)
     Not supported:
         "1/2 cup to ml"           — use 0.5 cup instead
+        "1,5 m to cm"             — a decimal comma; use 1.5
     """
     try:
         s   = expression.lower().strip()
@@ -310,7 +335,7 @@ def convert(expression: str) -> dict[str, Any]:
 
         m = _LEFT_RE.match(left)
         if m and m.group(2).strip():
-            value    = float(m.group(1))
+            value    = float(m.group(1).replace(",", ""))
             from_str = m.group(2).strip()
         elif m and not m.group(2).strip():
             return {"error": "missing_source_unit", "expression": expression}
@@ -335,16 +360,18 @@ TOOL_DEFINITION = {
     "function": {
         "name": "convert_unit",
         "description": (
-            "Convert a value from one unit to another. Call when the user asks "
-            "how much one unit is in another, or to restate a measurement in "
-            "different units. "
-            "Supports length (in/ft/yd/mi/mm/cm/m/km), "
+            "Converts a value from one unit to another: length "
+            "(in/ft/yd/mi/mm/cm/m/km), "
             "volume (tsp/tbsp/cup/fl_oz/pint/quart/gallon/ml/l), "
             "weight (oz/lb/st/mg/g/kg), "
-            "temperature (f/c/k), "
-            "and time (s/min/hr/day/week). "
-            "Unit names or common abbreviations both work ('miles', 'mi')."
+            "temperature (f/c/k) "
+            "and time (s/min/hr/day/week). Call when the user asks how much "
+            "one unit is in another, or to restate a measurement in different "
+            "units."
         ),
+        # The unit list stays in sentence one (what it converts) because its
+        # words are what route "how many tbsp in a cup?" here. That unit names
+        # and abbreviations both work is said on from_unit and to_unit.
         # The US-customary reference values (gallon = 3.785 L, cup = 236.6 mL,
         # US pint/quart) live in this module's header docstring. They are how the
         # conversion behaves, not something the model can act on when deciding to
@@ -358,16 +385,26 @@ TOOL_DEFINITION = {
                 },
                 "from_unit": {
                     "type": "string",
-                    "description": "Source unit (e.g. 'miles', 'mi', 'kilograms', 'kg').",
+                    "description": ("Source unit, a name or an abbreviation "
+                                    "(e.g. 'miles', 'mi', 'kilograms', 'kg')."),
                 },
                 "to_unit": {
                     "type": "string",
-                    "description": "Target unit (e.g. 'km', 'kilometers', 'lb').",
+                    "description": ("Target unit, a name or an abbreviation "
+                                    "(e.g. 'km', 'kilometers', 'lb')."),
                 },
             },
             "required": ["value", "from_unit", "to_unit"],
         },
     },
+}
+
+# What the code reads about each tool here; the model never sees it
+# (CONVENTIONS §8, "TOOL_META"). network: none = local only, cached = a poll
+# or TTL cache, live = may reach the network on every call. mutates = it
+# changes state outside the turn.
+TOOL_META: dict[str, dict[str, Any]] = {
+    "convert_unit": {"domain": "math", "network": "none", "mutates": False},
 }
 
 

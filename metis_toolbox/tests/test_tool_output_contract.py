@@ -32,9 +32,14 @@ Run from the package root:
 import ast
 import os
 import re
+import subprocess
+import sys
 import unittest
 
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _APP_ROOT)
+
+from tools.daedalus import _AUDIT_MARKER  # noqa: E402  (after the path)
 
 # A bare slug, or a slug followed by human detail. The slug is the stable
 # contract (panels and the model branch on it); the text after ": " is for
@@ -55,14 +60,29 @@ _SLUG_PREFIX = re.compile(r"^[a-z][a-z0-9_]*: ")
 # entries guards it against silently going stale (mirrors the version set below).
 _EXPECTED_VIOLATIONS: set[str] = set()
 
-# Files naming a version other than V0.02 in their header docstring. Emptied
+# The audit versions a marker may name (CONVENTIONS §3). It held both "0.02"
+# and "0.03" while the V0.03 walkthrough marked one session's files at a time;
+# its finale (S36, 2026-11-23) found all 92 source files at V0.03 and closed
+# it to that one. A newer audit starts as one more entry, and leaves when the
+# last file has its new marker.
+_ALLOWED_VERSIONS = {"0.03"}
+
+# Files naming a version outside _ALLOWED_VERSIONS in their docstring. Emptied
 # 2026-07-24 (session 6): ammit was tagged V0.02, the last non-audit version
 # line in the toolbox. Kept as a named (typed) set so a future stray version
 # line has a home — and test_version_allowlist_has_no_stale_entries guards it
 # against silently going stale, exactly as the slug allowlist above is guarded.
 _EXPECTED_VERSION_VIOLATIONS: set[str] = set()
 
-_VERSION_LINE = re.compile(r"^\s*[Vv](\d+\.\d+):", re.MULTILINE)
+# What counts as an audit marker is Daedalus's pattern, the one FOE's version
+# on Home's status bar is read with (daedalus.audit_version), so this guard and
+# the bar can never disagree about what a marker is. It splits the version
+# into its two numbers; _version() puts them back together.
+_VERSION_LINE = _AUDIT_MARKER
+
+
+def _version(m: "re.Match[str]") -> str:
+    return f"{m.group(1)}.{m.group(2)}"
 
 
 def _source_files():
@@ -248,10 +268,10 @@ class TestErrorIdentifiersAreSlugs(unittest.TestCase):
 
 
 class TestVersionTagIsSingular(unittest.TestCase):
-    """A module names one version, and it is the audit's.
+    """A module names one version, and it is an audit's.
 
-    Deliberately does NOT assert every module *has* V0.02 — that would be red
-    for the whole audit and tell you nothing you didn't already know.
+    Deliberately does NOT assert every module *has* a marker — that would be
+    red for the whole audit and tell you nothing you didn't already know.
     """
 
     def test_no_module_names_another_version(self):
@@ -261,15 +281,36 @@ class TestVersionTagIsSingular(unittest.TestCase):
             with open(path, encoding="utf-8") as fh:
                 doc = ast.get_docstring(ast.parse(fh.read())) or ""
             for m in _VERSION_LINE.finditer(doc):
-                if m.group(1) != "0.02":
+                if _version(m) not in _ALLOWED_VERSIONS:
                     bad.append((rel, m.group(0).strip()))
         unexpected = [(rel, tag) for rel, tag in bad
                       if rel not in _EXPECTED_VERSION_VIOLATIONS]
         self.assertFalse(
             unexpected,
-            f"a module's docstring names a version other than V0.02: "
-            f"{unexpected} — the audit tag replaces any other version a file "
-            f"carries")
+            f"a module's docstring names a version no audit has reached "
+            f"({sorted(_ALLOWED_VERSIONS)}): {unexpected} — the audit tag "
+            f"replaces any other version a file carries")
+
+    def test_a_module_names_one_version_once(self):
+        # One file, one version (the audit's T11): a V0.03 marker replaces the
+        # V0.02 one, whose notes become a dated paragraph. Two markers would
+        # leave the file claiming two audits at once. Panels included: the
+        # rule is §3's, not the error vocabulary's.
+        panels = os.path.join(_APP_ROOT, "panels")
+        files = _source_files() + [f"panels/{n}" for n in sorted(os.listdir(panels))
+                                   if n.endswith(".py") and n != "__init__.py"]
+        doubled = []
+        for rel in files:
+            path = os.path.join(_APP_ROOT, rel.replace("/", os.sep))
+            with open(path, encoding="utf-8") as fh:
+                doc = ast.get_docstring(ast.parse(fh.read())) or ""
+            tags = [m.group(0).strip() for m in _VERSION_LINE.finditer(doc)]
+            if len(tags) > 1:
+                doubled.append((rel, tags))
+        self.assertFalse(
+            doubled,
+            f"a module names more than one audit marker: {doubled} — keep the "
+            f"newest and turn the older one into a dated paragraph (§3)")
 
     def test_version_allowlist_has_no_stale_entries(self):
         named_bad = set()
@@ -277,15 +318,163 @@ class TestVersionTagIsSingular(unittest.TestCase):
             path = os.path.join(_APP_ROOT, rel.replace("/", os.sep))
             with open(path, encoding="utf-8") as fh:
                 doc = ast.get_docstring(ast.parse(fh.read())) or ""
-            if any(m.group(1) != "0.02" for m in _VERSION_LINE.finditer(doc)):
+            if any(_version(m) not in _ALLOWED_VERSIONS
+                   for m in _VERSION_LINE.finditer(doc)):
                 named_bad.add(rel)
         stale = _EXPECTED_VERSION_VIOLATIONS - named_bad
         self.assertFalse(
             stale,
             f"these are listed as expected version violations but now name no "
-            f"non-V0.02 version: {sorted(stale)} — delete them from "
+            f"version outside the allowed set: {sorted(stale)} — delete them from "
             f"_EXPECTED_VERSION_VIOLATIONS. A stale allowlist is the same drift "
             f"this audit exists to remove (mirrors the slug guard above)")
+
+
+# One marker per file, in the module docstring (CONVENTIONS §3). Daedalus,
+# Home's status bar and the version tests above read only that docstring, so
+# a marker on a class or a function is invisible to all three: the file reads
+# as unaudited. Files listed here would still carry theirs on classes; the
+# last (aura_panel) folded its three in the V0.03 walkthrough's S08, so none
+# is left, and a stale line fails.
+_CLASS_MARKERS_YET: set[str] = set()
+
+
+def _tracked_sources():
+    """Every tracked source file at the app root, in tools/ and in panels/,
+    from `git ls-files` (§10): a new file counts once it is staged."""
+    out = subprocess.run(["git", "ls-files", "*.py"], cwd=_APP_ROOT,
+                         capture_output=True, text=True, check=True).stdout
+    return sorted(p for p in out.split()
+                  if "/" not in p or p.split("/")[0] in ("tools", "panels"))
+
+
+def inner_markers(source):
+    """[(name, line, marker)] for each audit marker in a class or function
+    docstring."""
+    out = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            for m in _AUDIT_MARKER.finditer(ast.get_docstring(node) or ""):
+                out.append((node.name, node.lineno, m.group(0).strip()))
+    return out
+
+
+class TestOneMarkerInTheModuleDocstring(unittest.TestCase):
+
+    def _inner(self):
+        found = {}
+        for rel in _tracked_sources():
+            with open(os.path.join(_APP_ROOT, rel), encoding="utf-8") as fh:
+                markers = inner_markers(fh.read())
+            if markers:
+                found[rel] = markers
+        return found
+
+    def test_no_marker_sits_on_a_class_or_function(self):
+        bad = {rel: m for rel, m in self._inner().items()
+               if rel not in _CLASS_MARKERS_YET}
+        self.assertFalse(
+            bad, f"audit markers outside the module docstring: {bad} — fold "
+                 f"them into one module-level marker, the old notes becoming "
+                 f"dated paragraphs (CONVENTIONS §3)")
+
+    def test_the_allowlist_has_no_stale_entries(self):
+        stale = sorted(_CLASS_MARKERS_YET - set(self._inner()))
+        self.assertFalse(stale, f"_CLASS_MARKERS_YET lists files with no class "
+                                f"or function marker left: {stale} — delete them")
+
+    def test_the_walk_sees_every_folder(self):
+        folders = {rel.split("/")[0] if "/" in rel else "" for rel in _tracked_sources()}
+        self.assertEqual(folders, {"", "tools", "panels"})
+
+    def test_the_check_reads_classes_and_functions_only(self):
+        src = ('"""Module.\n\nV0.03:  the module\'s own marker."""\n'
+               'class Widget:\n'
+               '    """A widget.\n\n    V0.02:  a class tag."""\n'
+               'def helper():\n'
+               '    """v0.03: a function tag."""\n')
+        self.assertEqual([(name, marker) for name, _, marker in inner_markers(src)],
+                         [("Widget", "V0.02:"), ("helper", "v0.03:")])
+
+
+# Spellings of a shared condition that the shared core replaced (CONVENTIONS
+# §2, "The error vocabulary"; §12, 2026-11-16). A module drops them when it
+# reaches V0.03 — the audit's T9: "a module adopts the core vocabulary the next
+# time it's audited". The last five belonged to Helios, Selene, Hypatia, Argus
+# and Hephaestus at V0.02; this test retires each the day its module is marked
+# (Hephaestus's on 2026-11-17; Hypatia's, Helios's and Selene's on 2026-11-20;
+# Argus's on 2026-11-21).
+_RETIRED_SLUGS = {
+    "weather_offline", "weather_timeout", "weather_unavailable",
+    "weather_cert_error", "network_error", "feed_timeout", "http_error",
+    "fetch_failed", "all_feeds_failed", "news_failed", "unknown_feed",
+    "feed_too_large", "no_data", "search_failed", "describe_failed",
+    "player_unavailable", "no_query", "no_level", "no_matches",
+    "missing_query", "missing_target", "missing_content", "target_not_found",
+    "heading_not_found", "bad_operation", "list_failed", "unknown_module",
+    "daedalus_failed",
+    "sun_times_unavailable", "moon_unavailable", "sky_unavailable",
+    "network_unavailable", "vitals_unavailable",
+}
+
+
+def _error_slugs(tree, consts):
+    """[(slug, lineno)] for every error a module writes: {"error": ...} dicts
+    and `x["error"] = ...` assignments, read through module constants."""
+    values = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            values += [v for k, v in zip(node.keys, node.values)
+                       if isinstance(k, ast.Constant) and k.value == "error"]
+        elif isinstance(node, ast.Assign):
+            values += [node.value for t in node.targets
+                       if isinstance(t, ast.Subscript)
+                       and isinstance(t.slice, ast.Constant) and t.slice.value == "error"]
+    out = []
+    for v in values:
+        text = None
+        if isinstance(v, ast.Constant) and isinstance(v.value, str):
+            text = v.value
+        elif isinstance(v, ast.JoinedStr) and v.values and isinstance(v.values[0], ast.Constant):
+            text = v.values[0].value
+        elif isinstance(v, ast.Name):
+            text = consts.get(v.id)
+        if text:
+            out.append((text.partition(": ")[0].strip(), getattr(v, "lineno", 0)))
+    return out
+
+
+class TestSharedSlugs(unittest.TestCase):
+    """A V0.03 module says a shared condition with the shared word."""
+
+    def test_a_v003_module_uses_no_retired_spelling(self):
+        bad = []
+        for rel in _source_files():
+            path = os.path.join(_APP_ROOT, rel.replace("/", os.sep))
+            with open(path, encoding="utf-8") as fh:
+                tree = ast.parse(fh.read())
+            doc = ast.get_docstring(tree) or ""
+            if not any(_version(m) == "0.03" for m in _VERSION_LINE.finditer(doc)):
+                continue
+            bad += [(rel, line, slug)
+                    for slug, line in _error_slugs(tree, _module_constants(tree))
+                    if slug in _RETIRED_SLUGS]
+        self.assertFalse(
+            bad,
+            f"a V0.03 module still spells a shared condition its own way: {bad} "
+            f"— use the shared word (offline, timeout, unavailable, not_found, "
+            f"no_results, bad_arguments, unknown_action, vault_locked; CONVENTIONS "
+            f"§2) and keep the detail after ': '")
+
+    def test_the_walk_sees_v003_modules(self):
+        # Not vacuous: at least the 13 brain-tool modules carry V0.03.
+        marked = 0
+        for rel in _source_files():
+            path = os.path.join(_APP_ROOT, rel.replace("/", os.sep))
+            with open(path, encoding="utf-8") as fh:
+                doc = ast.get_docstring(ast.parse(fh.read())) or ""
+            marked += any(_version(m) == "0.03" for m in _VERSION_LINE.finditer(doc))
+        self.assertGreaterEqual(marked, 13)
 
 
 if __name__ == "__main__":

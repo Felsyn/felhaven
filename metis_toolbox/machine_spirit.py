@@ -11,10 +11,13 @@ Contract:    Root-level persistence flavor (themis.py precedent): no
                effective_prompt() — override if present & non-empty, else
                                     DEFAULT_SYSTEM_PROMPT. Never raises.
                save(text)         — persist an override (atomic write).
-                                    Blank/whitespace-only text CLEARS the
+                                    Blank/whitespace-only text, or the
+                                    default text itself, CLEARS the
                                     override instead of storing it.
+                                    Raises OSError if the write fails.
                revert()           — clear the override; effective_prompt()
-                                    falls back to DEFAULT.
+                                    falls back to DEFAULT. Raises OSError
+                                    if the file is there but can't go.
 
 Storage:     machine_spirit_config.json beside this file, holding only the
              custom prompt when one exists — the default text is NEVER
@@ -26,12 +29,20 @@ Upstream:    panels/machine_spirit_panel.py (the MACHINE SPIRIT tab), pythia.py
              (reads effective_prompt() at ask() time — no restart needed).
 Downstream:  machine_spirit_config.json
 
-Requires:    json, logging, os, tempfile, pathlib (stdlib only).
+Requires:    json, logging, os, tempfile, pathlib, typing (stdlib only).
 
-V0.02:       Audited 2026-07-24 — effective_prompt()'s never-raise (which makes
+2026-07-24:  walkthrough audit — effective_prompt()'s never-raise (which makes
              Pythia's own contract honest), the default-never-persisted rule,
              the atomic write, and the gitignored per-user config all verified
              honest; the module needed no code change, only this marker.
+
+V0.03:       Walked through 2026-11-19 (the V0.03 walkthrough's S18). The
+             default-never-persisted rule had a hole: the panel's REVERT TO
+             DEFAULT then SAVE handed save() the default text, which it wrote
+             as an override, so that install kept today's default through any
+             later change to it (measured with a scratch file). save() now
+             clears the override for the default text, as it does for blank
+             text. The Contract says what save() and revert() raise.
 """
 
 import json
@@ -45,12 +56,13 @@ log = logging.getLogger("METIS.machine_spirit")
 
 _DATA_PATH = Path(__file__).with_name("machine_spirit_config.json")
 
+# No list of the tools: the schemas are that list, and a copy here drifted
+# (it never learned music, the sky, the archive or Daedalus). The call
+# directive stays AHEAD of the style rules on purpose: in July, the
+# no-Markdown sentence with nothing before it stopped write_document being
+# called at all, and order is what fixed it (CONVENTIONS §12, 2026-11-16).
 DEFAULT_SYSTEM_PROMPT = (
-    "You are Pythia, Felhaven's Resident AI. You have tools "
-    "that fetch live local data — weather, time, system vitals, a countdown "
-    "timer, market prices, network status, news headlines, math, and unit "
-    "conversions — plus web search: use search_web for current or unknown "
-    "facts, then fetch_page on one promising result if you need its full text. "
+    "You are Pythia, Felhaven's Resident AI. "
     "Call a tool whenever the question needs current or computed data rather "
     "than guessing. Keep answers concise and plain-spoken. "
     "Reply in plain prose — complete sentences and short paragraphs. Do NOT use "
@@ -83,10 +95,13 @@ def effective_prompt() -> str:
 
 def save(text: str) -> None:
     """Persist `text` as the override. Blank/whitespace-only text CLEARS the
-    override (same as revert()) rather than storing an empty string. Atomic
-    write: tempfile in the same dir + os.replace (the themis.py pattern)."""
+    override (same as revert()) rather than storing an empty string, and so
+    does the default text itself: stored, it would stop the next change to
+    DEFAULT_SYSTEM_PROMPT from ever reaching this install. That is what the
+    panel's REVERT TO DEFAULT then SAVE sends. Atomic write: tempfile in the
+    same dir + os.replace (the themis.py pattern)."""
     stripped = text.strip()
-    if not stripped:
+    if not stripped or stripped == DEFAULT_SYSTEM_PROMPT.strip():
         revert()
         return
 

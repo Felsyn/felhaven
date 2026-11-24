@@ -27,6 +27,7 @@ Run from the package root:
 """
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -36,6 +37,12 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tools import morpheus
+
+# Several cases here reach a branch that logs a WARNING or an ERROR on purpose.
+# No test entry point calls setup_logging (§5), so logging's last-resort
+# handler would print each one to stderr; a NullHandler stops that (the
+# tests/test_zeno.py precedent). assertLogs still sees every record.
+logging.getLogger("METIS.morpheus").addHandler(logging.NullHandler())
 
 _URL = "https://www.youtube.com/watch?v=aaaaaaaaaaa"
 
@@ -138,7 +145,7 @@ class TestOnlyAWatchUrlReachesYtDlp(_DescribeCase):
         for url in self._REFUSED:
             with self.subTest(url=url), \
                     mock.patch("tools.morpheus.subprocess.run") as run:
-                self.assertEqual(morpheus.describe(url), {"error": "describe_failed"})
+                self.assertEqual(morpheus.describe(url), {"error": "unavailable"})
                 run.assert_not_called()
 
     def test_the_url_comes_last_right_after_a_double_dash(self):
@@ -193,7 +200,7 @@ class TestItNeverRaises(_DescribeCase):
     fails for a reason that has nothing to do with the music."""
 
     def _assert_failed(self, result):
-        self.assertEqual(result, {"error": "describe_failed"})
+        self.assertEqual(result, {"error": "unavailable"})
 
     def test_a_non_zero_exit(self):
         result, _ = self._run(returncode=1)
@@ -225,7 +232,7 @@ class TestItNeverRaises(_DescribeCase):
         """yt-dlp's stderr contains signed URLs (§2: no raw external text)."""
         result, _ = self._run(returncode=1)
         self.assertEqual(list(result), ["error"])
-        self.assertEqual(result["error"], "describe_failed")
+        self.assertEqual(result["error"], "unavailable")
 
 
 if __name__ == "__main__":

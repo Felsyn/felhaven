@@ -19,6 +19,7 @@ Run from the package root:
     python -X utf8 -m unittest tests.test_morpheus_control
 """
 
+import logging
 import os
 import sys
 import unittest
@@ -28,6 +29,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pythia
 from tools import morpheus
+
+# Several cases here reach a branch that logs a WARNING or an ERROR on purpose.
+# No test entry point calls setup_logging (§5), so logging's last-resort
+# handler would print each one to stderr; a NullHandler stops that (the
+# tests/test_zeno.py precedent). assertLogs still sees every record.
+logging.getLogger("METIS.morpheus").addHandler(logging.NullHandler())
 
 _PLAYING = {"running": True, "title": "Clair de Lune", "paused": False,
             "pos": 12.0, "dur": 300.0, "pl_pos": 0, "pl_n": 1}
@@ -202,7 +209,7 @@ class TestReplay(_ControlCase):
                            return_value={"mpv": None, "ytdlp": "yt-dlp.exe"}), \
                 mock.patch("tools.morpheus.play") as play:
             self.assertEqual(morpheus.control_music(action="replay")["error"],
-                             "player_unavailable")
+                             "unavailable")
         play.assert_not_called()
 
 
@@ -227,7 +234,7 @@ class TestVolumeAction(_ControlCase):
     def test_no_level_is_a_slug_and_changes_nothing(self):
         with self._playing():
             out = morpheus.control_music(action="volume")
-        self.assertTrue(out["error"].startswith("no_level:"), out["error"])
+        self.assertTrue(out["error"].startswith("bad_arguments:"), out["error"])
         self.assertEqual(morpheus._user_volume, self._saved_volume)
         self.assertEqual(self._commands(), [])
 

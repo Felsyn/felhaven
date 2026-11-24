@@ -10,16 +10,24 @@ Job:         Manage a local archive of Markdown documents.
              CONVENTIONS §12, the Zeno/Hypatia/Kepler/Callimachus precedent).
 
 Contract:    MULTI-TOOL module (second after callimachus) — exports
-             TOOL_DEFINITIONS (a list of five) and five like-named handlers:
+             TOOL_DEFINITIONS (a list of three), TOOL_META, and three
+             like-named handlers:
+               • read_archive(action, query="",
+                              filename="", offset=0)  -> one of the three reads below
+               • write_document(filename, content,
+                                source="")             -> {"filename", "size", "overwrote"}
+               • edit_document(filename, operation,
+                               target="", content="")  -> {"filename", "size", "operation"}
+             read_archive's action picks a read, each still a public function:
                • list_documents()                      -> {"documents": [...]}
                • search_documents(query)               -> {"matches": [...]}
                • read_document(filename, offset=0)     -> {"filename", "content", "size",
                                                            "offset", "truncated"
                                                            [, "next_offset"]}
-               • write_document(filename, content,
-                                source="")             -> {"filename", "size", "overwrote"}
-               • edit_document(filename, operation,
-                               target="", content="")  -> {"filename", "size", "operation"}
+             Until 2026-11-14 those three were tools of their own; one read
+             tool keeps the model's choice to read / write / edit (§12). The
+             two writers stay separate tools on purpose: a change to a file is
+             never one action among reads.
              Request-driven (the zeno/eudoxus row of CONVENTIONS §2): no
              fetch(), no Kairos worker, no panel. No handler ever raises; every
              failure is an {"error": ...} dict with a stable identifier first,
@@ -43,7 +51,12 @@ Archive:     One flat directory of UTF-8 .md files at <app root>/
 Law:         The five rails, enforced on every operation:
                1. Hardcoded root — every path resolves inside _ARCHIVE_ROOT or
                   is refused (resolve-then-contain, belt and braces on top of
-                  the filename allowlist).
+                  the filename allowlist). list and search skip an entry that
+                  resolves elsewhere, a symlink out (search had read through
+                  one, measured 2026-11-23), as read and edit refuse it. A hard
+                  link is the file itself and can't be told apart; making
+                  either needs write access to the archive folder, which is
+                  outside what these rails defend.
                2. Bare .md filenames only — no separators, no traversal, no
                   dotfiles, no Windows reserved device names (CON, NUL, ...).
                3. UTF-8 only, both directions — a non-UTF-8 file reads as a
@@ -51,12 +64,13 @@ Law:         The five rails, enforced on every operation:
                4. 1 MB cap per document, read and write.
                5. Atomic writes — tempfile in the same directory + os.replace,
                   so a crash mid-write can never leave a half-document.
-             No shell, no subprocess, no network — pathlib and open() only.
+             No shell, no subprocess, no network — pathlib, os and open() only.
 
 Front matter: write_document prepends a YAML front-matter block (title /
              created / updated / source / tags) when the content doesn't
              already start with one; edit_document bumps the updated: line if a
-             leading block has one. Hand-rolled emit and line-scan — simple
+             leading block has one. `source` is kept to one line: a newline in
+             it closed the block early (measured 2026-11-23). Hand-rolled emit and line-scan — simple
              enough that a YAML dependency would be a §11 violation for no gain.
 
 Not:         No web search (Callimachus), no encryption or PIN (Cerberus), no
@@ -71,14 +85,40 @@ Upstream:    pythia.py (registration + dispatch — the sole registry consumer;
              was retired with voice input, exactly like callimachus).
 Downstream:  none. Herodotus knows nothing about the rest of the stack.
 
-Requires:    stdlib only — datetime, logging, os, pathlib, re, tempfile.
+Requires:    stdlib only — datetime, logging, os, pathlib, re, tempfile, typing.
 
-V0.02:       Audited 2026-07-24 — the four read/write/list error dicts stopped
+2026-07-24:  walkthrough audit — the four read/write/list error dicts stopped
              interpolating the caught OSError (its message carries the absolute
              archive path into the LLM context — §2); now only the class name
              travels, the path stays in the log. search_documents grew the same
              OSError guard list_documents already had, so its "never raises" is
              now whole. Regression tests added; off the output-contract allowlist.
+
+2026-11-14:  list_documents, search_documents and read_document stop being
+             tools and become read_archive's three actions (CONVENTIONS §12).
+             The functions, their slugs and read_document's paging are
+             unchanged; only what the model is shown is merged.
+
+2026-11-16:  the Pythia tool audit (CONVENTIONS §12). read_document reads a
+             long document in parts (T8: truncated, next_offset; the audit's
+             H3); its three reads became read_archive's actions (2026-11-14,
+             above); write_document and edit_document run only after the user
+             says yes (Pythia's confirm gate, CONVENTIONS §8). All three
+             descriptions follow §3's grammar. TOOL_META says archive / local,
+             and the two writers change state. Its slugs use the shared
+             no_results, not_found, bad_arguments and unknown_action (T9,
+             2026-11-16); a failed listing or search joins read_failed.
+
+V0.03:       Walked through 2026-11-23 (the V0.03 walkthrough, S32; born
+             2026-07-07). Each rail was tried against the code. One document
+             dated before 1970 or past year 9999 failed the whole listing
+             (Windows can't convert its time), so a document now lists with
+             "modified": "" instead; a document list_documents can't stat is
+             skipped, as search skips one it can't read. search read a file
+             outside the archive through a symlink; list and search now skip
+             what resolves elsewhere. An infinite offset raised out of
+             read_document, and a newline in `source` broke the front matter.
+             Contract, Law and Requires caught up.
 """
 
 import datetime
@@ -143,6 +183,29 @@ def _root() -> Path:
     """The archive root as a Path. Read at call time so tests can patch
     _ARCHIVE_ROOT."""
     return Path(_ARCHIVE_ROOT)
+
+
+def _listable(p: Path, root: Path) -> bool:
+    """Whether list and search may show this directory entry: an .md file
+    that resolves inside the archive (`root` already resolved). A symlink out
+    is skipped, as _resolve refuses it for read and edit; search had read the
+    file at the far end of one (measured 2026-11-23)."""
+    try:
+        return (p.is_file() and p.suffix.lower() == ".md"
+                and p.resolve().parent == root)
+    except (OSError, RuntimeError):     # a symlink loop, or a vanished entry
+        return False
+
+
+def _modified(mtime: float) -> str:
+    """A document's modification time as local ISO, or "" when the platform
+    can't convert it. On Windows a time before 1970 or past year 9999 raises
+    OSError (ValueError or OverflowError elsewhere), and one such document
+    failed the whole listing (measured 2026-11-23)."""
+    try:
+        return datetime.datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
+    except (OSError, OverflowError, ValueError):
+        return ""
 
 
 def _resolve(filename: str) -> "Path | dict[str, Any]":
@@ -266,14 +329,14 @@ def _find_heading(lines: "list[str]", target: str) -> "int | dict[str, Any]":
     and surrounding whitespace ignored, case-insensitive), or an error dict."""
     want = target.lstrip("#").strip().lower()
     if not want:
-        return {"error": "missing_target: heading operations need a heading text in 'target'"}
+        return {"error": "bad_arguments: heading operations need a heading text in 'target'"}
     hits = []
     for i, line in enumerate(lines):
         m = _HEADING_RE.match(line)
         if m and m.group(2).strip().lower() == want:
             hits.append(i)
     if not hits:
-        return {"error": f"heading_not_found: no heading matches {target!r}"}
+        return {"error": f"not_found: no heading matches {target!r}"}
     if len(hits) > 1:
         return {"error": f"heading_ambiguous: {len(hits)} headings match {target!r}"}
     return hits[0]
@@ -286,7 +349,7 @@ def _apply_edit(
     the new text, or an error dict. Deterministic on purpose — same inputs,
     same output, no cleverness."""
     if operation != "replace" and not content:
-        return {"error": f"missing_content: {operation} needs non-empty 'content'"}
+        return {"error": f"bad_arguments: {operation} needs non-empty 'content'"}
 
     if operation == "append":
         joiner = "" if (not text or text.endswith("\n")) else "\n"
@@ -307,10 +370,10 @@ def _apply_edit(
 
     if operation == "replace":
         if not target:
-            return {"error": "missing_target: replace needs the exact text to replace in 'target'"}
+            return {"error": "bad_arguments: replace needs the exact text to replace in 'target'"}
         n = text.count(target)
         if n == 0:
-            return {"error": "target_not_found: that exact text is not in the document"}
+            return {"error": "not_found: that exact text is not in the document"}
         if n > 1:
             return {"error": f"target_ambiguous: text appears {n} times; include more surrounding context"}
         return text.replace(target, content, 1)
@@ -332,37 +395,46 @@ def _apply_edit(
         return "\n".join(new_lines)
 
     return {"error": (
-        f"bad_operation: {operation!r} — must be one of {', '.join(_EDIT_OPERATIONS)}"
+        f"unknown_action: {operation!r} — must be one of {', '.join(_EDIT_OPERATIONS)}"
     )}
 
 
-# ── Public API — five tools, one job ──────────────────────────────────────────
+# ── Public API — one job: three reads and two writers ─────────────────────────
+# The reads are reached through read_archive (below); the writers are tools.
 
 def list_documents() -> "dict[str, Any]":
     """List every document in the archive. Never raises.
 
     Success:  {"documents": [{"filename", "size", "modified"}, ...]}  (sorted;
-              empty list for an empty or not-yet-created archive)
-    Errors:   {"error": "list_failed: <detail>"}
+              empty list for an empty or not-yet-created archive; "modified"
+              is "" for a time the platform can't convert)
+    Errors:   {"error": "read_failed: <detail>"}   (the folder can't be listed)
+
+    A document it can't stat is skipped and logged, the way search skips one
+    it can't read, so one bad file never hides the rest.
     """
     root = _root()
     if not root.is_dir():
         return {"documents": []}
     docs: "list[dict[str, Any]]" = []
     try:
+        inside = root.resolve()
         for p in sorted(root.iterdir(), key=lambda q: q.name.lower()):
-            if p.is_file() and p.suffix.lower() == ".md":
+            if not _listable(p, inside):
+                continue
+            try:
                 st = p.stat()
-                docs.append({
-                    "filename": p.name,
-                    "size": st.st_size,
-                    "modified": datetime.datetime.fromtimestamp(
-                        st.st_mtime
-                    ).isoformat(timespec="seconds"),
-                })
+            except OSError as exc:
+                log.warning("Herodotus.list: skipping %s (%s)", p.name, type(exc).__name__)
+                continue
+            docs.append({
+                "filename": p.name,
+                "size": st.st_size,
+                "modified": _modified(st.st_mtime),
+            })
     except OSError as exc:
         log.warning("Herodotus.list_documents: %s", exc)
-        return {"error": f"list_failed: {type(exc).__name__}"}
+        return {"error": f"read_failed: {type(exc).__name__}"}
     return {"documents": docs}
 
 
@@ -370,19 +442,20 @@ def search_documents(query: str) -> "dict[str, Any]":
     """Case-insensitive substring search across every document. Never raises.
 
     Success:  {"matches": [{"filename", "matches", "snippets": [str, ...]}, ...]}
-    Errors:   {"error": "no_matches" | "missing_query" | "search_failed: ..."}
+    Errors:   {"error": "no_results" | "bad_arguments: ..." | "read_failed: ..."}
     """
     q = (query or "").strip().lower()
     if not q:
-        return {"error": "missing_query"}
+        return {"error": "bad_arguments: search needs a query"}
     root = _root()
     if not root.is_dir():
-        return {"error": "no_matches"}
+        return {"error": "no_results"}
 
     out: "list[dict[str, Any]]" = []
     try:
+        inside = root.resolve()
         for p in sorted(root.iterdir(), key=lambda r: r.name.lower()):
-            if not (p.is_file() and p.suffix.lower() == ".md"):
+            if not _listable(p, inside):
                 continue
             body = _read_utf8(p)
             if isinstance(body, dict):    # unreadable file degrades to a skip
@@ -405,9 +478,9 @@ def search_documents(query: str) -> "dict[str, Any]":
         # search must too, or its "never raises" is a half-truth. Per-file read
         # errors above still degrade to a skip — this is whole-scan failure.
         log.warning("Herodotus.search_documents: %s", exc)
-        return {"error": f"search_failed: {type(exc).__name__}"}
+        return {"error": f"read_failed: {type(exc).__name__}"}
     if not out:
-        return {"error": "no_matches"}
+        return {"error": "no_results"}
     return {"matches": out}
 
 
@@ -435,7 +508,7 @@ def read_document(filename: str, offset: int = 0) -> "dict[str, Any]":
         return body
     try:
         start = max(0, int(offset))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):   # OverflowError: int(inf)
         return {"error": "bad_arguments: offset must be a whole number"}
     if start and start >= len(body):
         return {"error": f"bad_arguments: offset {start} is past the end of "
@@ -452,27 +525,49 @@ def read_document(filename: str, offset: int = 0) -> "dict[str, Any]":
     return out
 
 
+_READ_ACTIONS = ("list", "search", "read")
+
+
+def read_archive(action: str, query: str = "", filename: str = "",
+                 offset: int = 0) -> "dict[str, Any]":
+    """The one read tool (read_archive): `action` picks list_documents,
+    search_documents or read_document, and their own answers and slugs come
+    back unchanged, so a missing query is still bad_arguments and a missing
+    filename still invalid_filename. Arguments another action uses are
+    ignored. An action outside the enum reaches here (the gate leaves enum
+    membership to handlers, §8) and gets unknown_action. Never raises."""
+    if action == "list":
+        return list_documents()
+    if action == "search":
+        return search_documents(query)
+    if action == "read":
+        return read_document(filename, offset)
+    return {"error": f"unknown_action: {action!r} is not one of "
+                     f"{', '.join(_READ_ACTIONS)}"}
+
+
 def write_document(filename: str, content: str, source: str = "") -> "dict[str, Any]":
     """Create or overwrite one document, atomically. Never raises.
 
     When the content doesn't already begin with a '---' front-matter fence, a
     block is prepended: title (from the filename), created/updated (now),
     source (the optional provenance argument — e.g. the URL a Callimachus
-    fetch came from), empty tags.
+    fetch came from — kept to one line, since a newline in it closed the
+    block early), empty tags.
 
     Success:  {"filename": str, "size": int, "overwrote": bool}
-    Errors:   {"error": "invalid_filename: ..." | "missing_content"
+    Errors:   {"error": "invalid_filename: ..." | "bad_arguments: ..."
                        | "too_large: ..." | "write_failed: ..."}
     """
     path = _resolve(filename)
     if isinstance(path, dict):
         return path
     if not (content or "").strip():
-        return {"error": "missing_content"}
+        return {"error": "bad_arguments: content is empty"}
 
     text = content
     if not text.lstrip().startswith("---"):
-        text = _front_matter(path.stem, (source or "").strip()) + text
+        text = _front_matter(path.stem, " ".join((source or "").split())) + text
     if not text.endswith("\n"):
         text += "\n"
 
@@ -500,10 +595,9 @@ def edit_document(
 
     Success:  {"filename": str, "size": int, "operation": str}
     Errors:   {"error": "invalid_filename: ..." | "not_found" | "not_utf8: ..."
-                       | "too_large: ..." | "bad_operation: ..."
-                       | "missing_target: ..." | "missing_content: ..."
-                       | "target_not_found: ..." | "target_ambiguous: ..."
-                       | "heading_not_found: ..." | "heading_ambiguous: ..."
+                       | "too_large: ..." | "unknown_action: ..."
+                       | "bad_arguments: ..." | "not_found: ..."
+                       | "target_ambiguous: ..." | "heading_ambiguous: ..."
                        | "write_failed: ..."}
     """
     path = _resolve(filename)
@@ -536,57 +630,37 @@ def edit_document(
 
 # ── Tool definitions — the plural export (CONVENTIONS §2/§3) ──────────────────
 
-LIST_TOOL_DEFINITION: "dict[str, Any]" = {
+# One read tool over the three reads. Its description keeps the retired three's
+# trigger words ("saved", "what the archive contains", "something they saved
+# earlier") — a merged description that drops them loses routing (§12,
+# 2026-11-14, the sky merge) — and read_document's paging steering word for word.
+READ_ARCHIVE_TOOL_DEFINITION: "dict[str, Any]" = {
     "type": "function",
     "function": {
-        "name": "list_documents",
+        "name": "read_archive",
         "description": (
-            "List every Markdown document in the local knowledge archive, with "
-            "sizes and modified times. Call this first when you're unsure what "
-            "the archive contains or what a document is called."
-        ),
-        "parameters": {"type": "object", "properties": {}, "required": []},
-    },
-}
-
-SEARCH_TOOL_DEFINITION: "dict[str, Any]" = {
-    "type": "function",
-    "function": {
-        "name": "search_documents",
-        "description": (
-            "Search the local knowledge archive for documents containing some "
-            "text (case-insensitive). Returns matching filenames with snippet "
-            "lines. Call this to find saved notes on a topic before answering "
-            "from memory; then read_document the best hit."
+            "Reads the local knowledge archive of saved Markdown notes. list: "
+            "every document. search: documents containing some text, with "
+            "snippets. read: one document by its exact filename (e.g. "
+            "'notes.md'). Call when the user refers to something they saved "
+            "earlier or asks what the archive contains; list or search first "
+            "if the filename isn't known. A long document comes back in parts: "
+            "if 'truncated' is true, call again with offset set to "
+            "'next_offset'. To change part of a long document, use "
+            "edit_document rather than rewriting it."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Text to look for."},
-            },
-            "required": ["query"],
-        },
-    },
-}
-
-READ_TOOL_DEFINITION: "dict[str, Any]" = {
-    "type": "function",
-    "function": {
-        "name": "read_document",
-        "description": (
-            "Read one Markdown document from the local knowledge archive by its "
-            "exact filename (e.g. 'notes.md'). Call when the user refers to "
-            "something they saved earlier, or when a document's contents are "
-            "needed to answer. Call list_documents or search_documents first if "
-            "the filename isn't known. A long document comes back in parts: if "
-            "'truncated' is true, call again with offset set to 'next_offset'. "
-            "To change part of a long document, use edit_document rather than "
-            "rewriting it."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "filename": {"type": "string", "description": "Bare .md filename."},
+                "action": {
+                    "type": "string",
+                    "enum": list(_READ_ACTIONS),
+                    "description": ("list = every document; search = find text "
+                                    "(needs query); read = one document (needs "
+                                    "filename)."),
+                },
+                "query": {"type": "string", "description": "Text to look for (search)."},
+                "filename": {"type": "string", "description": "Bare .md filename (read)."},
                 "offset": {
                     "type": "integer",
                     "description": ("Where to continue reading: the next_offset "
@@ -594,7 +668,7 @@ READ_TOOL_DEFINITION: "dict[str, Any]" = {
                                     "the beginning."),
                 },
             },
-            "required": ["filename"],
+            "required": ["action"],
         },
     },
 }
@@ -604,9 +678,10 @@ WRITE_TOOL_DEFINITION: "dict[str, Any]" = {
     "function": {
         "name": "write_document",
         "description": (
-            "Create or fully overwrite one Markdown document in the local "
-            "knowledge archive. Use this to save new knowledge worth keeping "
-            "(e.g. a useful web result). New documents get a front-matter "
+            "Creates or fully overwrites one Markdown document in the local "
+            "knowledge archive. Call when the user asks to save something, or "
+            "to keep new knowledge worth keeping (e.g. a useful web result). "
+            "New documents get a front-matter "
             "header automatically; pass 'source' (a URL or origin) when the "
             "knowledge came from somewhere. To change part of an existing "
             "document, prefer edit_document."
@@ -628,7 +703,7 @@ EDIT_TOOL_DEFINITION: "dict[str, Any]" = {
     "function": {
         "name": "edit_document",
         "description": (
-            "Change part of an existing archive document without rewriting the "
+            "Changes part of an existing archive document without rewriting the "
             "whole file. Call when the user wants to add to, correct, or "
             "restructure a document that already exists; prefer this over "
             "write_document, which replaces the entire file. This modifies a "
@@ -662,12 +737,20 @@ EDIT_TOOL_DEFINITION: "dict[str, Any]" = {
 # Plural export: the registry (pythia.py) splats these in and binds each tool
 # name to the like-named module function. See CONVENTIONS §2/§3.
 TOOL_DEFINITIONS: "list[dict[str, Any]]" = [
-    LIST_TOOL_DEFINITION,
-    SEARCH_TOOL_DEFINITION,
-    READ_TOOL_DEFINITION,
+    READ_ARCHIVE_TOOL_DEFINITION,
     WRITE_TOOL_DEFINITION,
     EDIT_TOOL_DEFINITION,
 ]
+
+# What the code reads about each tool here; the model never sees it
+# (CONVENTIONS §8, "TOOL_META"). network: none = local only, cached = a poll
+# or TTL cache, live = may reach the network on every call. mutates = it
+# changes state outside the turn.
+TOOL_META: dict[str, dict[str, Any]] = {
+    "read_archive":   {"domain": "archive", "network": "none", "mutates": False},
+    "write_document": {"domain": "archive", "network": "none", "mutates": True},
+    "edit_document":  {"domain": "archive", "network": "none", "mutates": True},
+}
 
 
 # ── Standalone test ───────────────────────────────────────────────────────────

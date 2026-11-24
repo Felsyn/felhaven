@@ -5,6 +5,6 @@ Turn text into an audio file on disk. Typically Markdown; writes, never plays.
 - **UI:** Vox Array card → ECHO tab
 - **Brain tool:** none
 - **Files:** `tools/echo.py`, `panels/echo_panel.py`
-- **Test:** `python -X utf8 -m unittest tests.test_echo`
+- **Test:** `python -X utf8 -m unittest tests.test_echo tests.test_vox_array_panel_smoke`
 
 Details: see the docstring in `tools/echo.py`.

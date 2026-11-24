@@ -64,6 +64,8 @@ Contract:    preflight()                 — the PIN file loads (else HashFileEr
                                            never deleted); session required
              alarms() -> list · dismiss_alarm(alarm)
              fetch() -> dict             — the Kairos worker (see Session)
+             away_reason(now, before, gap_s) — fetch's lock policy, pure, so
+                                           the tests pin it
              KNOWN_KEYS                  — key name -> what uses it
              manifest_configs() · manifest_config_dir() · custody_open(file)
              ledger_log_custody(file, action) · ledger_entries()
@@ -90,7 +92,8 @@ Concurrency: Called from worker threads (Midas's pool, Pythia, Kairos's own
              (§9). Recorded in §12.
 
 Upstream:    panels/cerberus_panel.py, panels/midas_panel.py,
-             panels/home_panel.py (the lamp), felhaven.py (exit), kairos.py
+             panels/home_panel.py (the lamp), panels/artemis_panel.py (is_unlocked:
+             CACHE AREA warns when terrain will be skipped), felhaven.py (exit), kairos.py
              (fetch), tools/midas.py, tools/callimachus.py, tools/demeter.py
 Downstream:  cerberus_data.json (the PIN check), cerberus_vault.json (DPAPI
              blobs), cerberus_ledger.json (access log) — all gitignored, per
@@ -99,10 +102,19 @@ Downstream:  cerberus_data.json (the PIN check), cerberus_vault.json (DPAPI
 
 Requires:    stdlib only (ctypes for DPAPI). No tkinter, no subprocess.
 
-V0.02:       Audited 2026-07-24 — the deferred Ledger-corruption finding fixed:
+2026-07-24:  walkthrough audit — the deferred Ledger-corruption finding fixed:
              _LEDGER_LOCK + atomic writes (was a non-atomic truncate+rewrite that
              raced under Midas's thread pool). Crypto, salts, and session model
              verified honest and unchanged.
+
+V0.03:       Walked through 2026-11-17 (the V0.03 walkthrough, CONVENTIONS
+             §3), the first audit of v2 (#35, 2026-09-30). DPAPI's flags and
+             entropy, the session lock held across a read, the Ledger lock
+             order, Custody's containment, the alarms and the CLI's hidden
+             prompts all match this docstring; no log line or error carries a
+             value or a PIN. Its VaultError slugs stay its own: every tool
+             turns them into §2's words before the model sees one. Upstream
+             gained artemis_panel; the Contract names away_reason.
 """
 
 import base64

@@ -1,16 +1,34 @@
 """
 Horai panel — temporal context display for the Felhaven dashboard.
 
+Job:         Show the clock, date, season and cycle, and run the countdown timer.
+
 HoraiPanel      — clock + date + cycle/season badges, hosts AmmitWidget.
 AmmitWidget     — single countdown timer inside HoraiPanel.
 AmmitAlarm      — edge-detects Ammit's expiry into a popup + spoken event.
 AmmitAlarmPopup — the red warning Toplevel AmmitAlarm opens.
 AmmitBadge      — display-only Ammit status readout for OTHER panels (Home).
 
-Both widgets read/write state via the horai and ammit tool modules.
+Horai's reading arrives through Kairos; every Ammit class reads (and the
+countdown's controls write) through tools/ammit.py's functions.
 
-V0.02: Audited 2026-07-24 — AmmitWidget's countdown is Kairos-driven (via
-       HoraiPanel.update under horai's 1 s poll), not after()-based; §6 corrected.
+Contract:    HoraiPanel.update(data) takes horai.fetch()'s dict, or None
+             (kept as it is). AmmitBadge.refresh() is for another panel's own
+             tick. Everything runs on the Tk thread, on horai's 1 s Kairos
+             tick: no after() loop and no thread of its own (§6).
+Upstream:    felhaven.py (builds HoraiPanel and registers it under Kairos's
+             "horai" worker, tools.horai.fetch every 1 s),
+             panels/home_panel.py (AmmitBadge, refreshed from Home's own
+             "horai" registration)
+Downstream:  tools/ammit.py (the timer's state), themis.py (the clock
+             format, read per tick), calliope.py (the alarm's voice),
+             theme.py (place_alert), tools/virgil.py and
+             panels/virgil_tooltip.py (the countdown's tooltips)
+Requires:    time, tkinter, datetime, typing (stdlib).
+
+2026-07-24:  walkthrough audit — AmmitWidget's countdown is Kairos-driven
+             (via HoraiPanel.update under horai's 1 s poll), not
+             after()-based; §6 corrected.
 
 2026-09-09: added AmmitAlarm/AmmitAlarmPopup/AmmitBadge. Ammit's own docstring
        used to say "no alarm (deliberate)" — that decision is now overridden by
@@ -19,6 +37,17 @@ V0.02: Audited 2026-07-24 — AmmitWidget's countdown is Kairos-driven (via
        showing) and rides the same Kairos "horai" tick AmmitWidget already
        does — no new thread or after() loop. AmmitBadge lets HomePanel mirror
        Ammit's state without duplicating the alarm-firing logic.
+
+V0.03:       Walked through 2026-11-21 (the V0.03 walkthrough, CONVENTIONS
+             §3; born 2026-06-10). The popup was tied to the main window, so
+             Windows opened it hidden while Felhaven was minimised; it now
+             stands alone, as Iris's does (BACKLOG). An acknowledged expiry
+             no longer alarms again at every launch (the owner's pick), and
+             a stop, reset or restart closes an open popup: one left open
+             had acknowledged the next expiry when dismissed. The minutes
+             box asks Ammit's minutes_to_seconds(): "0.01" started an
+             instant alarm and "nan" raised. The unused horai import and the
+             entry's own cursor colour went (§7).
 """
 
 import time
@@ -28,10 +57,11 @@ from typing import Optional
 
 import calliope
 import themis
-from theme import C, FONTS, Card
+from panels import virgil_tooltip
+from theme import C, FONTS, Card, place_alert
 
-from tools import horai
 from tools import ammit
+from tools import virgil
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -45,6 +75,16 @@ class AmmitWidget(tk.Frame):
     ▶/■ toggles run/pause. ↺ resets.
     Reads/writes via ammit.py — same state file Metis sees.
     """
+
+    # Hover tooltips (Virgil) for the countdown's controls, each a glossary
+    # entry (CONVENTIONS §7). Keys name the widgets in self.tip_targets.
+    # The fold header names its module, so it shows that module's gloss.
+    _HEADER_TIP = virgil.module("ammit")
+    _TIPS = {
+        "minutes": virgil.term("ammit_minutes"),
+        "run": virgil.term("ammit_run"),
+        "reset": virgil.term("ammit_reset"),
+    }
 
     def __init__(self, parent):
         super().__init__(parent, bg=C["card"])
@@ -86,8 +126,7 @@ class AmmitWidget(tk.Frame):
 
         # Minute input
         self._entry = tk.Entry(row, font=FONTS["small"], bg=C["bar_bg"],
-                               fg=C["text1"], insertbackground=C["text1"],
-                               relief="flat", width=5,
+                               fg=C["text1"], relief="flat", width=5,
                                highlightbackground=C["border"], highlightthickness=1)
         self._entry.insert(0, "min")
         self._entry.config(fg=C["text3"])
@@ -109,6 +148,13 @@ class AmmitWidget(tk.Frame):
         rst.bind("<Button-1>", lambda e: self._reset())
         rst.bind("<Enter>",    lambda e: rst.config(fg=C["red"]))
         rst.bind("<Leave>",    lambda e: rst.config(fg=C["text3"]))
+
+        self.tip_targets: dict[str, tk.Misc] = {
+            "minutes": self._entry, "run": self._btn, "reset": rst}
+        for key, tip in self._TIPS.items():
+            virgil_tooltip.attach(self.tip_targets[key], tip)
+        self.header = header
+        virgil_tooltip.attach(header, self._HEADER_TIP)
 
         self._refresh()
 
@@ -139,14 +185,12 @@ class AmmitWidget(tk.Frame):
     # ── Timer actions ─────────────────────────────────────────────────────────
 
     def _start(self):
-        raw = self._entry.get().strip()
-        try:
-            minutes = float(raw)
-            if minutes <= 0:
-                return
-        except ValueError:
+        # Ammit's own check, the one the model's number meets: a whole number
+        # of seconds, at least 1. Anything else leaves the box as typed.
+        seconds = ammit.minutes_to_seconds(self._entry.get().strip())
+        if seconds is None:
             return
-        ammit.start_timer(0, int(minutes * 60))
+        ammit.start_timer(0, seconds)
         self._entry.delete(0, "end")
         self._show_ph()
         self._refresh()
@@ -191,9 +235,18 @@ class AmmitAlarm:
     False->True transition (popup + spoken announcement), then re-announces
     every ANNOUNCE_INTERVAL_S while the popup stays open, up to
     MAX_ANNOUNCEMENTS total. Holds until `expired` drops back to False, which
-    happens automatically the moment the operator stops/resets/restarts the
-    timer on the Horai view (ammit.stop_timer/reset_timer/start_timer all
-    clear `running` or `started_at`) — no separate reset hook needed.
+    happens automatically the moment the timer is stopped, reset or
+    restarted, from the countdown or by Pythia (ammit.stop_timer/
+    reset_timer/start_timer all clear `running` or `started_at`) — no
+    separate reset hook needed. That drop also closes a popup still open:
+    it no longer says anything true, and dismissing it would acknowledge
+    whatever expired next.
+
+    An expiry already ACKNOWLEDGED doesn't fire: at launch, the first check
+    finds a timer dismissed before the restart still expired, and the
+    countdown and Home's badge show it green, so the popup stays shut too
+    (the owner's pick, §12). One that ran out while Felhaven was closed
+    fires on that first check.
 
     Owned by HoraiPanel, which is built once at startup and never destroyed
     (felhaven._show_view only pack_forget()s it), so this fires regardless of
@@ -223,9 +276,12 @@ class AmmitAlarm:
         t = ammit.query_all()[0]
         expired = t["expired"]
         if expired and not self._was_expired:
-            self._fire()
+            if not t["acknowledged"]:
+                self._fire()
         elif expired and self._popup is not None:
             self._maybe_reannounce()
+        elif not expired and self._popup is not None:
+            self._close()
         self._was_expired = expired
 
     def _fire(self) -> None:
@@ -250,21 +306,29 @@ class AmmitAlarm:
         ammit.acknowledge_timer(0)
         self._popup = None
 
+    def _close(self) -> None:
+        """Close the popup without acknowledging: there is nothing to see."""
+        popup, self._popup = self._popup, None
+        if popup is not None and popup.winfo_exists():
+            popup.destroy()
+
 
 class AmmitAlarmPopup(tk.Toplevel):
-    """Red warning popup, copying RiteLog's Toplevel shape (transient, no
-    grab_set(), Escape/WM_DELETE_WINDOW both dismiss). Diverges from RiteLog
-    on one point: -topmost, since an alarm that can be buried behind another
-    window defeats the point."""
+    """Red warning popup: no grab_set(), Escape and the X both dismiss, and
+    -topmost, since an alarm that can be buried behind another window
+    defeats the point. Not `transient` to the main window: Windows hides a
+    window tied to a minimised one, so a timer that ran out while Felhaven
+    was minimised opened unseen (measured 2026-11-21: tied, it stayed
+    withdrawn; Iris's popup had the same gap, §12 2026-11-17). It stands
+    alone, with its own taskbar button, centred over Felhaven, or over the
+    screen while Felhaven is minimised."""
 
     def __init__(self, parent: tk.Widget, on_dismiss) -> None:
         super().__init__(parent, bg=C["bg"])
         self._on_dismiss = on_dismiss
 
         self.title("FELHAVEN — TIMER EXPIRED")
-        self.geometry("360x160")
         self.resizable(False, False)
-        self.transient(parent.winfo_toplevel())
         self.attributes("-topmost", True)
         self.bind("<Escape>", lambda _e: self._dismiss())
         self.protocol("WM_DELETE_WINDOW", self._dismiss)
@@ -277,6 +341,7 @@ class AmmitAlarmPopup(tk.Toplevel):
         foot = tk.Frame(self, bg=C["bg"])
         foot.pack(side="bottom", fill="x", padx=10, pady=10)
         self._button(foot, "DISMISS", self._dismiss, side="right")
+        place_alert(self, 360, 160)
 
     def _button(self, parent: tk.Widget, text: str, command, side: str = "left") -> tk.Label:
         """A clickable tk.Label with the house hover flip (§7)."""
@@ -300,8 +365,9 @@ class AmmitAlarmPopup(tk.Toplevel):
 class AmmitBadge(tk.Frame):
     """Display-only Ammit status for panels other than HoraiPanel (currently
     just HomePanel). Same read as AmmitWidget._refresh() — idle/running/
-    expired -> text3/amber/red — no controls, no side effects, safe to tick
-    from multiple panels at once, same as AmmitWidget already is.
+    expired -> text3/amber/red, and a paused timer reads as idle — no
+    controls, no side effects, safe to tick from multiple panels at once,
+    same as AmmitWidget already is.
 
     An ACKNOWLEDGED expiry (the alarm popup was dismissed — see AmmitAlarm)
     reads as green rather than red — dismissing says "I've seen it", not "it's
@@ -339,8 +405,8 @@ class AmmitBadge(tk.Frame):
 
 class HoraiPanel(Card):
     """
-    Uses horai.handle() for temporal context.
-    Hosts AmmitWidget for countdown timers.
+    Shows horai.fetch()'s reading, which Kairos hands to update().
+    Hosts AmmitWidget, and owns the one AmmitAlarm.
     """
 
     def __init__(self, parent):

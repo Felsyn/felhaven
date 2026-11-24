@@ -24,9 +24,22 @@ this host never sees a Kairos tick — do NOT register it: Card (a tk.Frame) has
 built-in update() that takes no data arg, so a Kairos dispatch against the
 host would TypeError.
 
-V0.02: Audited 2026-07-26 — verified honest; felhaven reaches through to
-       self.morpheus / self.orpheus for Kairos, Echo is request-driven. Host
-       smoke coverage already exists (test_vox_array_panel_smoke.py).
+Upstream:    felhaven.py (builds it as the "morpheus" view and reaches through
+             to .morpheus and .orpheus to register them on their workers).
+Downstream:  theme.py (TabHost), tools/virgil.py and panels/virgil_tooltip.py
+             (each tab's tip), panels/morpheus_panel.py, echo_panel.py,
+             orpheus_panel.py, euterpe_panel.py.
+
+Requires:    tkinter, through theme.TabHost.
+
+2026-07-26:  The first audit found it honest: felhaven reaches through to
+             self.morpheus / self.orpheus for Kairos, and Echo is
+             request-driven. Host smoke coverage already existed
+             (test_vox_array_panel_smoke.py).
+
+V0.03: Walked through 2026-11-21 (born 2026-07-15, when Echo joined Morpheus
+       in one host; first audited 2026-07-26). True as written, the spec it
+       cites included; Upstream, Downstream and Requires added.
 """
 
 from theme import C, TabHost

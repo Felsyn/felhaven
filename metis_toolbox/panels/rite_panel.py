@@ -23,21 +23,44 @@ Contract:    RiteLog(parent, records, focus_failures=False). `records` is the
 
 Pure display: the constructor takes dicts and renders them. It does not parse,
              reshape, validate or enrich them, and it imports NOTHING from
-             pythia, the tools, or cerberus. A diagnostic window that needed
+             pythia, the brain tools, or cerberus (tools/virgil.py is the
+             glossary its tips come from, not a tool). A diagnostic window that needed
              the vault unlocked in order to report that the vault is locked
              would be useless exactly when it is needed.
 
 Upstream:    panels/home_panel.py (opens one per meta-line click)
-Downstream:  theme.py (colors/fonts/PhosphorScroll)
+Tooltips:    Virgil tips (glossary entries, CONVENTIONS §7) on the parts a
+             reader can't guess: each rite's status, its name (a click selects
+             it), each field's ▸/▾ caption, and COPY THIS RITE. A tip says
+             what the window shows; it imports nothing that knows where the
+             records came from.
 
-Requires:    tkinter, json (stdlib). No pip dependency.
+Downstream:  theme.py (colors/fonts/PhosphorScroll), panels/virgil_tooltip.py
+             + tools/virgil.py (the tips)
+
+Requires:    tkinter, json, typing (stdlib). No pip dependency.
+
+V0.03:       First audit, 2026-11-19 (the V0.03 walkthrough's S17; born
+             2026-08-20, tips since #57). Nine slugs rendered bare: six of
+             Pythia's own refusals (the URL rule, the file-change OK, the
+             verbatim display, the allowlist) and Callimachus's
+             private_address, Daedalus's parse_failed, Morpheus's
+             not_playing. Each has its line now, and a test fails on the
+             next one missing. Closing the window with the pointer over the
+             list left the app-wide wheel binding on a dead canvas (a
+             TclError per wheel turn); _ScrollFrame gives it back on destroy.
+             The result preview shows real characters (Pythia's change).
+             Checked and true: the status table, the expired view, retention
+             (20 = home_panel._MAX_RITE_TURNS), the order, the clipboard.
 """
 
 import json
 import tkinter as tk
 from typing import Any, Literal, Optional
 
+from panels import virgil_tooltip
 from theme import C, FONTS, PhosphorScroll
+from tools import virgil
 
 _RETENTION_NOTE = "Retention limit: 20 turns."
 _COPY_FLASH_MS = 1000       # how long a copy button reads COPIED before restoring
@@ -55,15 +78,18 @@ _STATUS = {
 # ─────────────────────────────────────────────────────────────────────────────
 #  Slug → plain English.
 #
-#  Built by reading the error returns of the modules actually registered in
-#  pythia._TOOL_MODULES — those are the only tools that can appear in a rite.
-#  Nothing here is invented: a slug no module emits does not belong in this
-#  table, and a slug missing from it renders bare (see _explain).
+#  Built by reading the error returns of Pythia's dispatcher and of the modules
+#  registered in pythia._TOOL_MODULES, with the helpers whose slugs they pass
+#  up: the only places a rite's error can come from. Nothing here is invented:
+#  a slug no module emits does not belong in this table, and every slug Pythia
+#  or a registered module writes has a line (test_rite_panel_smoke holds both).
+#  Anything else renders bare (see _explain).
 #
-#  Where one slug covers two subsystems (search_failed is both Callimachus's
-#  web search and Morpheus's yt-dlp search; too_large is both a download cap
-#  and an archive cap) the wording is deliberately true of both rather than
-#  guessing which one ran.
+#  Where one slug covers several subsystems (the shared core below: offline is
+#  Aura's weather and Pheme's feeds alike; too_large is both a download cap and
+#  an archive cap) the wording is deliberately true of all of them rather than
+#  guessing which one ran. The tool's name sits beside this line, and the
+#  detail after the colon says which service, file or thing.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _ERROR_TEXT = {
@@ -71,39 +97,39 @@ _ERROR_TEXT = {
     "tool_failed":           "The tool raised an exception; Pythia caught it so the turn could continue.",
     "unknown_tool":          "The model asked for a tool that is not in the registry.",
     "cancelled":             "You stopped the turn before this call was dispatched.",
-    # Aura / Helios / Selene / Hypatia / Argus / Hephaestus — read-only sensors
-    "weather_timeout":       "The weather service did not answer in time.",
-    "weather_offline":       "Could not reach the weather service.",
-    "weather_unavailable":   "The weather service failed for some other reason.",
-    "sun_times_unavailable": "No sunrise or sunset to give — the sun does not rise or set today here, or the calculation failed.",
-    "moon_unavailable":      "The moon calculation failed.",
-    "sky_unavailable":       "The sky snapshot could not be built.",
-    "network_unavailable":   "The network snapshot could not be read.",
-    "vitals_unavailable":    "The machine vitals could not be read.",
-    # Midas
+    "tool_not_available":    "This conversation does not allow that tool, so the call was refused.",
+    "untrusted_url":         "Refused: fetch_page opens only a link you wrote or a search result gave, never one the model made.",
+    "no_confirmation":       "Refused: this tool changes files and needs your OK, and this conversation cannot ask for it.",
+    "not_confirmed":         "You did not allow this change, so it did not run.",
+    "no_display":            "The text had to be shown word for word, and this conversation has nowhere to show it.",
+    "display_failed":        "The text could not be shown, so the model was told it failed.",
+    # The shared core (CONVENTIONS §2, "The error vocabulary")
+    "bad_arguments":         "The call did not give the tool what it needs.",
+    "unknown_action":        "The model asked for an action the tool does not have.",
+    "offline":               "Could not reach the network.",
+    "timeout":               "The request did not answer in time.",
+    "unavailable":           "The source failed, or answered with nothing usable.",
+    "not_found":             "Nothing by that name exists.",
+    "no_results":            "Nothing matched.",
     "vault_locked":          "Cerberus is locked. Unlock the vault to enable this tool.",
     "no_key":                "The vault is open but holds no key for this service.",
-    "no_data":               "The service answered, but with no usable data.",
-    # Callimachus / Morpheus / shared network slugs
-    "search_failed":         "The search did not complete.",
-    "fetch_failed":          "The fetch did not complete.",
-    "rate_limited":          "The service refused the call for making too many requests.",
-    "timeout":               "The request did not answer in time.",
-    "non_https_url":         "Refused: the URL is not HTTPS, or redirected off HTTPS mid-fetch.",
     "too_large":             "Refused: the content is over the size cap.",
-    "no_results":            "Nothing matched.",
-    "no_query":              "No search text was given.",
-    "player_unavailable":    "A required player binary (yt-dlp or mpv) was not found.",
+    # The machine and sky readers have no words of their own here: Hephaestus
+    # (2026-11-17), Hypatia, Helios, Selene (2026-11-20) and Argus
+    # (2026-11-21) say the shared unavailable since their walkthroughs.
+    # Aura
+    "cert_error":            "The service's security certificate failed to verify.",
+    # Callimachus / Morpheus
+    "rate_limited":          "The service refused the call for making too many requests.",
+    "non_https_url":         "Refused: the URL is not HTTPS, or redirected off HTTPS mid-fetch.",
+    "private_address":       "Refused: the link leads to this computer or the home network.",
     "nothing_to_resume":     "Nothing has been played yet this session.",
+    "not_playing":           "Nothing is playing right now.",
+    # Daedalus
+    "parse_failed":          "The source file could not be parsed, so its docstring could not be read.",
     # Pheme
-    "http_error":            "The feed answered with an HTTP error.",
-    "feed_timeout":          "The feed did not answer in time.",
-    "network_error":         "Could not reach the feed.",
     "invalid_feed_xml":      "The feed returned something that is not valid feed XML.",
     "config_unreadable":     "The feed configuration could not be read.",
-    "unknown_feed":          "No feed is configured under that name.",
-    "all_feeds_failed":      "Every configured feed failed.",
-    "news_failed":           "The news fetch failed unexpectedly.",
     # Zeno
     "parse_error":           "The expression could not be parsed.",
     "no_previous_result":    "There is no previous result to refer back to.",
@@ -123,20 +149,11 @@ _ERROR_TEXT = {
     "missing_source_unit":   "No unit was given to convert from.",
     # Herodotus
     "invalid_filename":      "The document name is not allowed.",
-    "not_found":             "No document by that name is in the archive.",
-    "no_matches":            "Nothing in the archive matched.",
-    "missing_query":         "No search text was given.",
-    "missing_target":        "The edit needs a target (a heading, or the exact text to replace).",
-    "missing_content":       "The operation needs non-empty content.",
-    "heading_not_found":     "No heading matches that text.",
     "heading_ambiguous":     "More than one heading matches that text.",
-    "target_not_found":      "That exact text is not in the document.",
     "target_ambiguous":      "That text appears more than once — more context is needed.",
-    "bad_operation":         "That is not one of the supported edit operations.",
     "not_utf8":              "The file is not valid UTF-8 text.",
-    "read_failed":           "The file could not be read.",
+    "read_failed":           "The archive could not be read.",
     "write_failed":          "The file could not be written.",
-    "list_failed":           "The archive listing could not be read.",
 }
 
 
@@ -216,6 +233,7 @@ class _ScrollFrame(tk.Frame):
         self._canvas.bind("<Configure>", self._on_canvas_config)
         self._canvas.bind("<Enter>", self._bind_wheel)
         self._canvas.bind("<Leave>", self._unbind_wheel)
+        self._wheel_held = False          # is the app-wide wheel binding ours?
 
     def _on_inner_config(self, _event: "tk.Event[Any]") -> None:
         self._canvas.configure(scrollregion=self._canvas.bbox("all"))
@@ -225,12 +243,27 @@ class _ScrollFrame(tk.Frame):
 
     def _bind_wheel(self, _event: "tk.Event[Any]") -> None:
         self._canvas.bind_all("<MouseWheel>", self._on_wheel)
+        self._wheel_held = True
 
     def _unbind_wheel(self, _event: "tk.Event[Any]") -> None:
         self._canvas.unbind_all("<MouseWheel>")
+        self._wheel_held = False
 
     def _on_wheel(self, event: "tk.Event[Any]") -> None:
         self._canvas.yview_scroll(int(-event.delta / 120), "units")
+
+    def destroy(self) -> None:
+        """Give the app-wide wheel binding back if it is still ours.
+
+        The one way this copy differs from the other panels': it lives in a
+        window that closes. Closed with the pointer over the list (Escape),
+        no <Leave> arrives, and the binding went on calling a canvas that was
+        gone: a TclError on every wheel turn anywhere in Felhaven until
+        another list took the wheel (measured 2026-11-19)."""
+        if self._wheel_held:
+            self._canvas.unbind_all("<MouseWheel>")
+            self._wheel_held = False
+        super().destroy()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -238,6 +271,18 @@ class _ScrollFrame(tk.Frame):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RiteLog(tk.Toplevel):
+
+    # Hover tooltips (Virgil), each a glossary entry (CONVENTIONS §7). _TIPS
+    # names the footer button in self.tip_targets; _ROW_TIPS names the parts
+    # each rite block builds, attached by _build_rite and _field.
+    _TIPS = {
+        "copy_one": virgil.term("rite_copy"),
+    }
+    _ROW_TIPS = {
+        "status": virgil.term("rite_status"),
+        "select": virgil.term("rite_select"),
+        "expand": virgil.term("rite_expand"),
+    }
 
     def __init__(self, parent: tk.Widget,
                  records: "list[dict[str, Any]] | None",
@@ -309,6 +354,9 @@ class RiteLog(tk.Toplevel):
         self._copy_one = self._button(foot, "COPY THIS RITE", self._on_copy_one)
         self._button(foot, "CLOSE", lambda: self.destroy(), side="right")
         self._refresh_copy_one()
+        self.tip_targets: dict[str, tk.Misc] = {"copy_one": self._copy_one}
+        for key, tip in self._TIPS.items():
+            virgil_tooltip.attach(self.tip_targets[key], tip)
 
     def _button(self, parent: tk.Widget, text: str, command: Any,
                 side: Literal["left", "right"] = "left") -> tk.Label:
@@ -363,9 +411,12 @@ class RiteLog(tk.Toplevel):
                         font=FONTS["small_bold"], fg=C["text1"], bg=C["card"],
                         anchor="w", cursor="hand2")
         name.pack(side="left")
-        tk.Label(header, text=right, font=FONTS["small"], fg=C[color_key],
-                 bg=C["card"], anchor="e").pack(side="right")
+        status_lbl = tk.Label(header, text=right, font=FONTS["small"],
+                              fg=C[color_key], bg=C["card"], anchor="e")
+        status_lbl.pack(side="right")
         name.bind("<Button-1>", lambda _e: self._select(seq))
+        virgil_tooltip.attach(status_lbl, self._ROW_TIPS["status"])
+        virgil_tooltip.attach(name, self._ROW_TIPS["select"])
         self._rows[seq] = name
 
         tk.Label(block, text=_clock(str(record.get("started_at", ""))),
@@ -420,6 +471,7 @@ class RiteLog(tk.Toplevel):
 
         for widget in (head, chevron):
             widget.bind("<Button-1>", toggle)
+        virgil_tooltip.attach(head, self._ROW_TIPS["expand"])
 
     def _error_field(self, parent: tk.Widget, error: str) -> None:
         """The raw slug, and beneath it a plain-English line when the slug is

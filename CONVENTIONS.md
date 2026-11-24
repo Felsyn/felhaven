@@ -37,8 +37,8 @@ module.
 ## 1. Project layout
 
 The clone's outer root holds the docs and `.gitignore`. **The "app root" is
-`metis_toolbox/`, not the outer folder** — config JSONs and `bin/` live beside
-`felhaven.py`. Below it: `tools/` (headless logic), `panels/` (Tk display
+`metis_toolbox/`, not the outer folder** — `config/` (the config JSONs) and
+`bin/` live beside `felhaven.py`. Below it: `tools/` (headless logic), `panels/` (Tk display
 surfaces), `config/` (shipped templates, §4), `tests/` (§10).
 
 A tool in `tools/` finds the app root with
@@ -47,7 +47,7 @@ app root uses `Path(__file__).resolve().parent`.
 
 **Anchor to `__file__`, never to `cwd` or `sys.argv[0]`.** This is a scar, not a
 preference: an early path bug anchored to `sys.argv[0]` and broke under relative
-invocation (`metis_logging.py:36` documents it). Anchoring to the file means the
+invocation (the comment above `metis_logging.LOG_DIR` documents it). Anchoring to the file means the
 stack runs identically whether launched from Felhaven or `python tools/foo.py`
 from any directory — which is what makes it flash-drive-portable.
 
@@ -114,11 +114,11 @@ panels**, so its shape is a contract, not a formatting preference. It is one of:
 The **slug is the stable part**; the text after `: ` is for humans and may be
 reworded freely. `tools/herodotus.py` is the reference implementation.
 
-- **Never a bare sentence.** `"search failed"` → `search_failed`.
+- **Never a bare sentence.** `"search failed"` → `unavailable: search failed`.
 - **Never raw exception text.** `str(exc)` can carry paths, URLs, or key
   material into the LLM's context and onto the screen. At most
   `f"slug: {type(exc).__name__}"` — the class name, never the message.
-- **Never a computed-only string.** `f"HTTP {status}"` → `f"http_error: {status}"`.
+- **Never a computed-only string.** `f"HTTP {status}"` → `f"unavailable: HTTP {status}"`.
   In an f-string the slug must come **before** any interpolation, so it stays
   greppable and matchable.
 - Extra keys beside `error` are fine — `zeno` returns `expression` and `steps`
@@ -126,9 +126,32 @@ reworded freely. `tools/herodotus.py` is the reference implementation.
 - Three or more codes in one module: lift them to `ERR_*` module constants
   (`tools/midas.py`). Fewer than three: inline literals are fine.
 
+**A shared condition has one shared word** (§12, 2026-11-16). A small model
+generalizes better from one word per condition than from five spellings, so
+these mean the same in every module, and what makes each case different goes
+in the detail after `: `:
+
+| Slug | Means |
+|---|---|
+| `bad_arguments` | the call didn't give the tool what it needs (a schema mismatch, or an argument this action requires) |
+| `unknown_action` | an action outside the tool's enum reached the handler |
+| `offline` | no network where one was needed |
+| `timeout` | the source didn't answer in time |
+| `unavailable` | the source failed, or answered with nothing usable |
+| `not_found` | the named thing doesn't exist |
+| `no_results` | the search ran and found nothing |
+| `vault_locked` | Cerberus is sealed |
+
+A failure only one module can have keeps its own slug (`division_by_zero`,
+`target_ambiguous`, `invalid_feed_xml`). A module adopts the shared words when
+it reaches `V0.03` (§3); `test_tool_output_contract` fails a V0.03 module that
+still uses a retired spelling, and lists them.
+
 **Panels map the slug to human text**, never render it raw — the
 `_ERROR_TEXT` dict in `panels/echo_panel.py`, including its fallback to the raw
-code so an unmapped error is surfaced rather than swallowed.
+code so an unmapped error is surfaced rather than swallowed. Rite's map is
+held to the slugs tools actually write (`test_rite_panel_smoke`), so a rename
+cannot leave its words behind.
 
 `tests/test_tool_output_contract.py` enforces all of this by parsing the AST
 (a text search cannot tell `str(e)` from a literal). Modules that predate the
@@ -143,30 +166,64 @@ Copy `tools/midas.py` or `tools/morpheus.py` as the template. In order:
 
 1. **House-style header docstring**: `Job:` · `Contract:` · `Source:` ·
    `Upstream:` · `Downstream:` · `Requires:`, plus any module-specific section,
-   and `V0.02:` last once the module has been audited. This carries the weight
-   when the name doesn't.
+   and the audit marker (`V0.03:` today) last once the module has been
+   audited. This carries the weight when the name doesn't.
 
-   **The `V0.02:` field is the audit marker**, and it is the *only* version a
+   **The `V0.03:` field is the audit marker**, and it is the *only* version a
    file names — it replaces any other version line the module carried. Both a
    tool and its panel get it in the same session:
 
    ```
-   V0.02:       Audited 2026-07-21 — errors normalized, contract verified,
-                hermetic tests added.
+   V0.03:       Walked through 2026-11-23 (the V0.03 walkthrough, S34; born
+                2026-09-27). Every public function was read against the
+                Contract, the never-imports rule and the cache.
    ```
 
    Its absence means "not yet audited", so no test asserts every module has one.
-   A version *other* than `V0.02` does fail
-   (`tests/test_tool_output_contract.py`) — one file, one version, and it is
-   this one. A version number nobody maintains is a promise you can't keep; the
-   retired `(FOE v.01)` label is the scar (§12).
+   A version no audit has reached does fail
+   (`tests/test_tool_output_contract.py`) — one file, one version. A version
+   number nobody maintains is a promise you can't keep; the retired
+   `(FOE v.01)` label is the scar (§12).
+
+   **`V0.03:` means "walked through against this file as it stands"** (§12,
+   2026-11-17). That is the V0.02 walkthrough's checks (the docstring tells
+   the truth, no dead code, no stale words, an honest §2 flavor and error
+   vocabulary, hermetic tests) plus every rule and guard added since. The
+   brain-tool rules (the description grammar above, `TOOL_META`, the gate in
+   §8) apply only to brain tools, and a rule that doesn't fit a file is
+   skipped, so the one word means the same on a panel as on a tool. The
+   Pythia tool audit (§12, 2026-11-16) gave the first `V0.03:` markers to the
+   13 brain-tool modules; the V0.03 walkthrough (S00 to S36, 2026-11-17 to
+   2026-11-23) took every file there.
+
+   A module that reaches a new marker trades its old block for a dated
+   paragraph (`2026-07-24:  walkthrough audit — …`), so the history stays and
+   the file still names one version; the new block goes last. The 13
+   brain-tool modules did the same: their tool-audit block became
+   `2026-11-16:  the Pythia tool audit …` and a fresh `V0.03:` went last.
+
+   **One marker per file, in the module docstring.** Daedalus, Home's status
+   bar and the version test read only the module docstring, so a marker on a
+   class is invisible to all three. A file that holds several widgets still
+   carries one module-level marker; notes that once sat on its classes fold
+   into the module's history, or go if they only repeat it.
+   `test_tool_output_contract` fails a marker in a class or function
+   docstring, in every tracked source file, panels included.
+
+   While an audit runs, two versions stand side by side, and Home's status
+   bar shows the newest (`daedalus.audit_version()`). The test allows the
+   versions in `_ALLOWED_VERSIONS` and fails a file with two markers. The
+   V0.03 walkthrough's finale (S36, 2026-11-23) found all 92 source files at
+   `V0.03` and closed the set to that one; a next audit adds its version
+   while it runs and drops the old one when the last file has moved.
 2. **`log = logging.getLogger("METIS.<name>")`** at module top. Nothing else
    touches logging config — see §5.
 3. **Path constants** anchored to `__file__` (§1).
 4. **`_load_<thing>()` config loaders** that return a safe empty default on *any*
    failure and log it — never raise, never crash the panel.
 5. **Internals** prefixed `_`.
-6. **Public API** — `fetch()` / `handle()` / `TOOL_DEFINITION` per the flavor.
+6. **Public API** — `fetch()` / `handle()` / `TOOL_DEFINITION` per the flavor,
+   and a brain tool's `TOOL_META` beside its schema (§8).
 7. **`if __name__ == "__main__":`** standalone block that runs the real thing and
    prints the result. Every tool has one.
 
@@ -180,6 +237,25 @@ TOOL_DEFINITION = {
     },
 }
 ```
+
+**Description grammar** (§12, 2026-11-16). The description is routing text the
+model reads on every request, so every tool says it the same way, in this
+order:
+
+1. **What it returns or does**, opening with a verb in the third person:
+   *Returns…*, *Shows…*, *Starts…*. What it covers belongs here too (Eudoxus's
+   units, Asclepius's parts), because those words are what route a question to
+   it.
+2. **When to call it**, one sentence opening *Call when…*, *Call whenever…* or
+   *Call only…*. One clause, not two that overlap.
+3. Optionally, **what it is not for**, naming the sibling tool to use instead.
+
+Steering the result needs comes after (`read_archive`'s "if 'truncated' is
+true, call again…"). How to fill in an argument (Zeno's operators, which unit
+names work) goes on the parameter. Aim for 400 characters or fewer, and 200 per
+parameter. `tests/test_tool_schema_contract.py` checks the opening verb and the
+single when-clause; the lengths are targets, and only the 600-character cap is
+enforced. No personality: that lives in the deity name (§0).
 
 **Multi-tool modules** — a module usually owns exactly one tool. A module whose
 single job is naturally two tightly-coupled calls may instead export the plural
@@ -213,6 +289,10 @@ committing one.
 - **Entry points call `setup_logging("<program>")` once**, before anything can
   emit. Tool modules **never** configure logging — they just
   `logging.getLogger("METIS.<name>")` and inherit.
+- **And `log_tk_errors(root)` on each Tk root they make.** Both entry points
+  run under pythonw, with no stderr, so an exception nothing caught is logged
+  or lost: `setup_logging` sends a thread's and the program's to the log, and
+  `log_tk_errors` a Tk callback's. Why: §12, 2026-11-21.
 - **The format is load-bearing.** Lines are `" | "`-delimited
   (`ts | LEVEL | logger | message`) because **Emanon parses them with a plain
   `str.split(" | ")` — no regex.** Don't change the delimiter or column order
@@ -267,7 +347,10 @@ justified in code — Emanon's bounded, self-terminating status-blink chain,
 `MorpheusPanel`'s one daemon thread for the blocking `yt-dlp` search (see §12),
 `EchoPanel`'s one daemon thread for a whole-document conversion plus its bounded,
 self-terminating `after()` drain chain (Echo is request-driven, not a Kairos
-worker, so it has no tick to drain the result on), and **`HomePanel`'s one daemon
+worker, so it has no tick to drain the result on), `OrpheusPanel`'s one daemon
+thread for a whole-file decode with the same kind of drain chain (it has a 2 s
+Kairos tick, but draining on it would add up to 2 s to every play; see §12),
+and **`HomePanel`'s one daemon
 thread for the slow `pythia.ask()` call plus a persistent main-thread
 `after()`-poll to drain it** (HomePanel is event-driven — you press Enter — not a
 Kairos worker, so it runs its own standing 60 ms poll instead of riding the tick;
@@ -380,15 +463,31 @@ to track whether the timer is still live.
   module tip, `virgil.module(key)`, shows that module's gloss (§0); everything
   else is a glossary entry, `virgil.term(key)`, from
   `config/virgil_glossary.json`. The nav rail says what a place is (a term), a
-  tab says who works there (a module), a readout says what the number means (a
-  term). A widget's own `<Enter>`, `<Leave>` or `<Button-1>` bound *after*
-  `attach()` must use `add="+"`, or it replaces the tip's. Why: §12,
-  2026-11-09.
+  tab says who works there (a module), and so does anything else one worker
+  draws or heads (Pythia's face). A readout says what the number or the lamp
+  means (a term), and a control says what a click does (a term). A lamp that
+  carries a module's name is still a readout: its entry explains the colours,
+  under a key of its own (`cerberus_lamp`). A tagged span of a `tk.Text` gets
+  its tip with `attach_tag(text, tag, tip)`, on a tag every such span shares.
+  A widget that is sometimes empty passes `when=` so no tip shows over
+  nothing. A glyph built once per row (a playlist's ✕, a headline's ↗) is
+  named in `_ROW_TIPS` and attached by the row's builder; the tip table
+  forgets a row's widgets when they are destroyed. The tip's handlers ride
+  bindtags, so a panel binds and unbinds its
+  own widgets freely; the one exception is a text tag that carries a tip,
+  where any other binding on that same tag needs `add="+"`. Why: §12,
+  2026-11-09 and 2026-11-10.
+- **An alert popup stands alone.** Never `transient` to the main window:
+  Windows hides a window tied to a minimised one, so an alert that arrives
+  then opens unseen. It is `-topmost` with no grab, Escape and the X both
+  dismiss, and `theme.place_alert()` centres it over the main window, or over
+  the screen while that is minimised. Iris's and Ammit's; why: §12,
+  2026-11-17 and 2026-11-21.
 - **The one inversion — Hestia's vox controls** (`panels/vox_controls.py`):
   there, active = `C["amber"]` and inactive = `C["text3"]`, the opposite of the
   rule above. It is deliberate and it is local. Home's command surface sits
-  beside the wireframe face and the Sonus indicator, which already say "amber
-  means this is doing something right now"; a control row that lit up green next
+  beside the wireframe face and the status line under PYTHIA, which already say
+  "amber means this is doing something right now"; a control row that lit up green next
   to them would be reporting the same fact in a second vocabulary. The cost is
   that amber can no longer double as the hover colour — an unhovered active
   control and a hovered inactive one would be identical — so **hover brightens
@@ -421,6 +520,10 @@ to track whether the timer is still live.
   (`height=1` on a Text, an explicit `height` on a Canvas) a token request and
   let `expand` do the growing. The rule of thumb: whatever the user scrolls is
   what shrinks; whatever the user clicks or types into never does.
+  **Pack order is priority**, too: pack what must stay on screen (a SAVE row,
+  a status line) before the box that scrolls, using `before=` the first
+  widget when it is built later, so a row added above can never push it off
+  the bottom (`machine_spirit_panel.py`, 2026-11-09).
 - **Placeholders, not crashes**: if a tool can't run (no API key, missing
   binary), render a calm placeholder and disable controls — never raise from a
   panel constructor.
@@ -458,6 +561,29 @@ only after the user says yes through `ask(on_confirm=)`, and never for a caller
 that has no one to ask. **A new tool that changes files joins
 `pythia._CONFIRM_TOOLS`.** `test_pythia_guard` fails if an archive writer is
 missing from it, or if a name in it stops being registered.
+
+**Every brain tool also has a `TOOL_META` entry** (§12, 2026-11-16): a dict
+beside the schema, keyed by tool name, holding what the code reads about the
+tool and the model never sees.
+
+```python
+TOOL_META: dict[str, dict[str, Any]] = {
+    "get_weather": {"domain": "weather", "network": "cached", "mutates": False},
+}
+```
+
+- `domain` — the capability, one of `time`, `weather`, `sky`, `machine`,
+  `markets`, `news`, `math`, `music`, `web`, `archive`, `codex`. It names what
+  the model needs, not the panel that shows it.
+- `network` — `none` (local only), `cached` (a poll or TTL cache that
+  refetches when it runs out) or `live` (may reach the network on every call).
+- `mutates` — whether a call changes state outside the turn.
+
+It is kept apart from the schema so nothing has to be stripped before a
+request. Nothing routes on it yet. `tests/test_tool_meta_contract.py` holds it
+to the registry in both directions, checks the values, and fails if a
+description names a tool from another domain. A new domain is a decision, so
+it is added to that test's list and recorded here.
 
 Pythia is the **only** registry. A second, voice-side registry existed until
 voice input was retired (§12); `metis_toolbox/__init__.py` is now an empty package
@@ -562,6 +688,11 @@ marker. Keeping a tool off the LLM surface means keeping it out of
   line; then run the semgrep tripwire (`tests/semgrep/felhaven_sinks.yml`). A
   value that came from the network, a config file or the model must be checked
   before it reaches the program. Why: §12, 2026-10-03.
+- **A program is named by its absolute path**, never a bare name: System32's
+  from `%SystemRoot%` (`os.path.join(SystemRoot, "System32", "netsh.exe")`),
+  bin/'s through Aegis. Windows looks for a bare name in Python's folder and
+  the working folder before System32. `test_process_launches` fails a launch
+  whose program is a bare constant. Why: §12, 2026-11-17.
 - **Every file write, move and delete is listed** in
   `tests/test_file_writes.py`, with the folders it writes in and where its
   path comes from. A new one fails until someone traces its path and adds its
@@ -2678,3 +2809,1129 @@ and when, one line per change, so a decision worth keeping must be written here.
   Left out on purpose: top_p and top_k (the same job as temperature, harder
   to explain), num_ctx (every change reloads the model, ~70 s), and seed
   (only useful for testing). *(2026-11-09.)*
+- **The GPU through NVML by absolute path (`tools/brontes.py`), and Ollama's
+  models through Hermes (`tools/talos.py`).** Decisions:
+  (1) **NVML by ctypes**, not `nvidia-ml-py` (no new package, §11) and not
+  `nvidia-smi` (a process every 5 s, and another launch to list).
+  (2) **`nvml.dll` is loaded by its absolute System32 path.** A bare name is
+  searched for in the app folder and the working directory first, so a file
+  of that name planted beside Felhaven would load into its process. A file
+  that isn't at the absolute path is no GPU.
+  (3) **A failed start is remembered and logged once**: a machine without the
+  library would otherwise retry and log every 5 s.
+  (4) **Talos reads `/api/show`, a POST, through a new `hermes.post()`**
+  rather than an allowlist entry in `test_network_reads`: the guarded reader
+  stays the only way out, with the same cap and deadline, and a POST never
+  follows a redirect. `/api/show` (26.5 KB, mostly the license) is read
+  once per model digest.
+  (5) **Talos reports; Pythia acts.** Loading, unloading and chatting stay in
+  pythia.py, which is already allowed its streaming chat. *(2026-11-09.)*
+- **Pythia's model is the owner's pick (`themis.py`, `pythia.py`, the MACHINE
+  SPIRIT tab).** Decisions:
+  (1) **Read once per question**, like thinking and temperature; a pick
+  mid-answer applies to the next one.
+  (2) **Only models that can use tools are listed.** A model without them
+  would lose every tool, silently. A saved model that isn't listed (Ollama
+  down, or not pulled) stays shown rather than being replaced.
+  (3) **Thinking goes only to a model that can**: Ollama refuses the whole
+  request otherwise. An unknown model keeps the setting, and the tab greys
+  THINKING for a known non-thinker while keeping the setting for one that can.
+  (4) **A switch unloads only the model Felhaven was using** (keep_alive 0),
+  never another app's on the same Ollama, then warms the new one on pythia's
+  thread, one switch at a time, so two models never load onto the GPU
+  together. `PYTHIA_MODEL` remains the default for an install with no pick.
+  Only gemma4:e2b was installed when this landed; the download of tested
+  models is the next round (BACKLOG). *(2026-11-09.)*
+- **Candidate models for Pythia, tested; gemma4:e2b stays (2026-11-10).**
+  The owner approved pulling two candidates. Each was cold-loaded and asked
+  ten questions twice through Pythia's real prompt, all 23 tools and the
+  16,384-token context, scored on the first round: the right tool with
+  arguments that pass `_check_arguments`, or no tool for small talk. GPU
+  memory is read through NVML (Brontes) with nothing else loaded, because
+  Ollama's `size_vram` under-counts gemma4 badly.
+
+  | Model | Right | GPU memory | Speed | Load | A round | Disk |
+  |---|---|---|---|---|---|---|
+  | gemma4:e2b, Jul build (`7fbdbf8f`) | 20/20 | 2.82 GB | 76 tok/s | 26 s | 0.3 s | 7.2 GB |
+  | **gemma4:e2b, Nov build (`b3704936`)** | **20/20** | **3.08 GB** | **114 tok/s** | **19 s** | **0.3 s** | **4.6 GB** |
+  | gemma4:e4b | 17/20 | 4.52 GB | 49 tok/s | 80 s | 0.6 s | 6.6 GB |
+  | qwen3.5:4b | 18/20 | 4.03 GB | 44 tok/s | 28 s | 2.8 s | 3.3 GB |
+
+  e4b twice named a module (`horai`) instead of the tool, which the
+  dispatcher refuses, and once answered the news question without looking;
+  it also leaves about 0.5 GB of the GTX 1660's 6 GB free. qwen3.5:4b twice
+  answered "tell me a joke" with `get_module_docstring`, and spends about
+  3 s on each new question before the first token. All passed with thinking
+  on. The registry's current gemma4:e2b turned out to be a newer build than
+  the one installed in July; the owner had it re-pulled (it replaces the old
+  one under the same tag), and it is faster and smaller for 0.26 GB more GPU
+  memory, likely its speculative-decoding draft (`draft_num_predict 3` in
+  its parameters). So the tested list is gemma4:e2b's November build alone,
+  and two displays changed: the loaded-model lines show the GPU share and
+  never Ollama's GB figure, which under-counts gemma4 (the November e2b
+  reports 0.32 GB of 3.08; the July build 1.61 of 2.82; e4b 0.34 of 4.52).
+  *(2026-11-10.)*
+- **Weather warnings: Iris reads the National Weather Service, and one
+  controller drives every display (`tools/iris.py`, `panels/iris_panel.py`).**
+  The owner approved the placement mockups' format (2026-11-09); space
+  weather, its second half, is a later PR (BACKLOG). Decisions:
+  (1) **A failed check never reads as "none active."** Iris raises on any
+  failure, so Kairos delivers None, and the panel keeps the last list,
+  dimmed, under "couldn't check since <time>". A place outside the US is a
+  checked answer of its own (the NWS answers 400 "out of bounds").
+  (2) **Tiers by the event's name**, because NWS names say what to do:
+  Warning or Emergency (and "Evacuation Immediate", "Civil Emergency
+  Message", or severity Extreme) pops up; a Watch pops up only when
+  Settings says so; advisories and statements are only listed.
+  (3) **One controller, one view.** AlertWatch holds what was seen and what
+  popped up, and every display renders the same view, so acknowledging
+  turns all of them amber, "seen · still in effect", together, until the
+  Weather Service ends the alert (the Ammit rule of 2026-09-14). Closing the
+  popup acknowledges, as Ammit's does; OPEN ALERTS only opens the tab.
+  (4) **Seen follows a reissue.** NWS extends a warning under a new id that
+  references the old one; it stays seen when the event name matches, and
+  pops up when it doesn't (a Watch upgraded to a Warning). Seen lives in
+  memory: a restart pops a still-active warning up once more, and writes no
+  file. An alert that ended is forgotten, so a later issue is news.
+  (5) **A 60 s worker of its own**, not Aura's 30 minutes: a warning is news
+  within minutes, and an empty answer is 233 B. Coordinates go to four
+  decimals; `weather_location` (which can be a city name) is never sent.
+  (6) **A generic User-Agent.** NWS asks every client for one, and suggests
+  contact details; every install sends the same string, so it names the app
+  and nothing else.
+  (7) **Home's badge is a strip of its own above the status row**, not a
+  status-row readout as drawn: that row has about 80 px to spare at the
+  760 px minimum window. It mentions a failed check only after ten minutes,
+  so one missed poll isn't news on Home; the ALERTS tab says so at once.
+  *(2026-11-10.)*
+- **Space weather and the aurora (`tools/eos.py`, `panels/eos_panel.py`).**
+  The second half of the approved mockups. Decisions:
+  (1) **The aurora estimate is NOAA's rule of thumb, stated with its
+  sources.** SWPC ("Tips on viewing the aurora"): at Kp 0 the oval's
+  equatorward edge is about 66° geomagnetic, about 2° further per Kp level,
+  and the aurora "can often be observed hundreds of kilometers" equatorward
+  of it. The latitude is the dipole's, from NOAA NCEI's WMM2025 pole
+  (80.85°N, 72.76°W), computed on the PC: the place is never sent.
+  (2) **4° for "hundreds of kilometers"** (about 440 km), so a place sees it
+  low on the horizon when its geomagnetic latitude is at least 66 − 2·Kp − 4.
+  The dipole can sit a few degrees off the corrected latitude SWPC's maps
+  use (most in Europe), so every display calls it a guide, not a forecast.
+  (3) **No popup and no voice for the aurora.** It is not an emergency: the
+  Home notice is one quiet line, off unless Settings says "Aurora notice
+  too". Nothing to acknowledge, so no controller: each display takes the
+  worker's answer itself.
+  (4) **A failure never reads as a quiet sky** (Iris's rule): the fold row
+  keeps its last reading under "couldn't check since …", Celestarium says
+  "unknown", and Home's notice hides.
+  (5) **A 10-minute worker**: the scales move within minutes, Kp every three
+  hours, and the two reads are 8 KB together.
+  (6) **NOW scrolls, and Celestarium's conditions are packed before its
+  map.** The new rows pushed both past the 760 × 500 minimum window; the
+  map's canvas asks for a token 1 × 1, so the map is what shrinks.
+  *(2026-11-10.)*
+- **Atmospherics' PLACE dropdown (`panels/aura_panel.py` PlaceBar,
+  `tools/aura.py` "Picked place").** Step 4 of the owner's order: the
+  weather at a cached Cartograph area. Decisions, the first two the
+  owner's:
+  (1) **The last pick is remembered.** It is one setting, `atmos_place`
+  ("" = Home, else an area id). Both dropdowns, Atmospherics' and SETTINGS'
+  "Atmospherics opens on", save it the moment a place is picked, and
+  `themis.save()` carries it over. The form is built at startup, so a SAVE
+  that wrote it would put back whatever place it was built with.
+  (2) **Weather only.** NOW's conditions and FORECAST follow the pick. The
+  warnings, sun, moon, space weather, sidebar, Celestarium and Pythia's
+  `get_weather` stay on Home, and NOW and ALERTS say so in a dim line while
+  another place shows.
+  (3) **The worker fetches Home AND the pick, rather than switching.** The
+  sidebar and Celestarium read the same `aura` worker and must stay Home.
+  The pick costs one more request per poll, and none while Home shows. A
+  picked failure never raises: Home's reading is good, and raising would
+  blank the displays that never asked for the place.
+  (4) **The picked reading bypasses Aura's cache.** It is one slot keyed by
+  place, so a pick stored there would push Home out on every poll and cost
+  `get_weather` a fetch.
+  (5) **The area id is checked for shape before it touches the disk.** The
+  id comes from the settings file and becomes a folder name under
+  `artemis_cache/`. Themis refuses anything else on save and drops it on
+  load, and `artemis.place_of()` refuses it again. The pattern is
+  fullmatch'd with ASCII digits. Themis keeps its own copy because it
+  cannot import Artemis (Artemis imports Themis), and a test holds the two
+  copies in lockstep with `area_id()`.
+  (6) **An area within 0.6 mi of Home folds into Home's entry**
+  ("Home · <label>"): it is the same weather, and listing it twice would
+  cost a second fetch for nothing.
+  (7) **A recycled area shows Home and says so.** The setting is left as it
+  is, so the dropdown shows Home until another pick.
+  (8) **The dropdown is packed before the card's title** (§7), so a long
+  place name is what gets clipped at the minimum window, never the control.
+  *(2026-11-10.)*
+- **Atmospherics' tooltips (`panels/aura_panel.py`, `panels/eos_panel.py`).**
+  §7's rule, applied to a card whose tabs are not modules:
+  (1) **A tab shows the module that fills it.** NOW and FORECAST both show
+  Aura's gloss, and ALERTS shows Iris's.
+  (2) **A fold header that names its module is a tab.** HELIOS — SUN and
+  SELENE — MOON show their modules' glosses. SPACE WEATHER names no module,
+  so it keeps its glossary entry from Eos's build.
+  (3) **Every readout row carries a glossary entry, and one entry may serve
+  several rows** (sunrise and sunset share one, and so do the three forecast
+  days). The test finds the rows from the built panel, so a new row without
+  a tip goes red.
+  *(2026-11-10.)*
+- **Virgil's handlers ride bindtags, a text span can carry a tip, and Home
+  has its tips (`panels/virgil_tooltip.py`, `panels/vox_controls.py`,
+  `panels/hestia_panel.py`, `panels/home_panel.py`).** Found while walking
+  every panel for the widgets that still need a tip
+  (`specs/virgil_tooltip_surfaces.md`). Decisions:
+  (1) **Bindtags, not widget bindings.** `attach()` used to bind on the
+  widget with `add="+"`, which holds only while the panel never rebinds. Four
+  widgets due a tip do: Orpheus's ⏹ and Echo's send button unbind `<Enter>`,
+  `<Leave>` and `<Button-1>` each time they dim, Morpheus's search ＋ unbinds
+  them after a save, and Artemis rebinds CACHE AREA. *(Corrected 2026-11-18,
+  the V0.03 walkthrough's S12: Artemis never did, since CACHE AREA's click is
+  bound once and only its untipped CANCEL rebinds, so three widgets, not
+  four. The rule stands on those three.)* `<Button-1>` and
+  `<ButtonPress-1>` are one sequence to Tk, so each would have taken the tip
+  with it. Now `attach()` puts `VirgilTip` first in the widget's bindtags
+  (`VirgilPress` first in each descendant's) and the handlers are bound once
+  per root with `bind_class`. No panel can reach them, and first in the list
+  means a handler that returns `"break"` cannot starve them. The 2026-11-09
+  rule that a later bind needs `add="+"` is withdrawn.
+  (2) **A click goes to the nearest attached widget** at or above the one
+  clicked, found by walking up the path. With widget bindings every attached
+  ancestor heard it; with one handler per tag the innermost is the honest
+  answer, and it lets a tipped control sit inside a tipped box.
+  (3) **`attach_tag()` for a span.** Home's "speak aloud" and its stats line
+  are tagged text, not widgets. A span's tip is bound on the tag with
+  `add="+"`, since Tk has no bindtags for a text tag, and the re-check before
+  showing asks whether the character under the pointer carries the tag. It
+  goes on the SHARED tag (`speak`, `meta`), never the per-answer one: those
+  are made for the life of the session and each would cost an entry.
+  (4) **`when=`.** Home's status line fills its row whether or not it says
+  anything, and a tip over a blank stretch explains nothing. The tooltip
+  still decides nothing about the words; `when` only says whether there is
+  anything there to explain.
+  (5) **§7's source rule gains two cases**: a control is a term, and whatever
+  one worker draws is that module's gloss. Home keeps one kind per table, as
+  Atmospherics does: the face is `HestiaBar._TIPS` (module), the controls
+  and readouts are `VoxControls._TIPS` and `HomePanel._TIPS` (terms).
+  (6) **Home's two strips reuse Atmospherics' entries** (`weather_alert`,
+  `aurora_estimate`): the same reading gets the same words wherever it shows.
+  (7) **A panel's own smoke test holds its table to its widgets** when the
+  panel needs redirections to build (Home needs Ammit's state file), as the
+  tab hosts already do. *(2026-11-10.)*
+- **Tips on the glyph controls, and `_ROW_TIPS` (Morpheus, Orpheus, Scribe,
+  Ammit, Scriptorium, Cartograph).** Phase 2 of
+  `specs/virgil_tooltip_surfaces.md`: a bare glyph is the control a newcomer
+  can least guess. Decisions:
+  (1) **`_ROW_TIPS` beside `_TIPS`.** `_TIPS` stays one key per widget in
+  `tip_targets`, so its lockstep test still means something. A glyph every
+  row builds has no one widget to name, so it gets its own table, the row's
+  builder attaches it, and the panel's smoke test builds rows and checks
+  each one.
+  (2) **One entry per consequence, not per glyph.** Morpheus's ✕ takes a
+  playlist off a list and Orpheus's sends a file to the Recycle Bin: two
+  entries. The two stop buttons do the same thing: one entry.
+  (3) **No tip of its own on a ▶/▼ fold glyph.** #64 put a fold header's tip
+  on the whole header, glyph included, and phase 3 does the same for Ammit,
+  Argus and Cerberus. A second tip on the glyph would hide the header's.
+  (4) **The glossary texts are stand-ins.** The owner asked for the tips to
+  ship with drafts; BACKLOG lists every key that still needs a human edit.
+  *(2026-11-10.)*
+- **Tips on the inner tab bars and section headers (Dynastic Vault,
+  Scriptorium, Morpheus, Ammit, Aether, Argus, Cerberus).** Phase 3 of
+  `specs/virgil_tooltip_surfaces.md`, applying #64's rule for Atmospherics:
+  (1) **A tab or header that names a module shows that module's gloss.** The
+  Vault's PRICES is Midas and LEDGER is Plutus; `AMMIT — COUNTDOWN` and
+  `AETHER — CONNECTIVITY` name theirs.
+  (2) **Where one module fills every tab, the gloss would repeat, so each
+  says what the view is**: a glossary entry. Scriptorium's two tabs are both
+  Pheme, Morpheus's two are both Morpheus, Argus's six sections are all
+  Argus, Cerberus's three all Cerberus. Atmospherics kept Aura's gloss on
+  both NOW and FORECAST because their names already say the difference;
+  SCRAPSTREAM and SOURCE FONTS do not.
+  (3) **A fold header's tip covers the whole header**, glyph included, and
+  each `_Section` now exposes its `header` for it.
+  (4) **The tables are `_TAB_TIPS`, `_HEADER_TIP` and `_SECTION_TIPS`**, one
+  kind each, beside any `_TIPS` the panel already has.
+  The thirteen glossary texts are stand-ins; BACKLOG lists them.
+  *(2026-11-10.)*
+- **Tips on the jargon readouts and controls (Celestarium, Cartograph,
+  Dynastic Vault, Tunes, Zeno, Emanon, Argus, Daedalus, Machine Spirit).**
+  Phase 4 of `specs/virgil_tooltip_surfaces.md`. Decisions:
+  (1) **Priority A only.** The owner chose every row a newcomer can't guess,
+  and the guessable (priority B) rows only on Home. The B rows elsewhere are
+  listed in the plan and left out on purpose, not forgotten.
+  (2) **A tip on a settings row covers the label and its controls.**
+  Machine Spirit's MODEL, THINKING and TEMPERATURE tips sit on the row
+  frame, so hovering OFF, ON, −, + or DEFAULT explains the setting, and a
+  click on any of them still goes to the row's own handler.
+  (3) **One entry for a set of controls that do one thing**: the four sky
+  presets share `sky_preset`.
+  (4) **A readout that is sometimes blank uses `when=`**: Zeno's ANS label is
+  empty until the first good result, the Home status-line precedent.
+  (5) **Machine Spirit's own explanatory line stays.** It was already one
+  line ("Thinking: slower, more careful answers…") before the tips, so the
+  plan's question of shortening it is moot.
+  The fifteen glossary texts are stand-ins; BACKLOG lists them.
+  *(2026-11-10.)*
+- **Three machine tools become one: `get_machine_status`
+  (`tools/asclepius.py`).** It retires `get_system_vitals`, `get_connectivity`
+  and `get_network_summary` (V0.03 audit T10: a retired name is gone, never
+  kept as an alias; chat history lives only in `HomePanel._history`, so an old
+  name can't outlive a relaunch). Why: every tool is paid for on every turn,
+  and two of the three were near-duplicates the model had to tell apart
+  (`get_connectivity`'s own description had to point at
+  `get_network_summary`). All three sit in the audit's `machine` domain, so
+  nothing here gets in the way of a revived Tool Broker. Decisions:
+  (1) **One required `part` enum: vitals / online / network / all.** Aether's
+  internet probe can wait 5 s, so "how's the CPU?" must be able to skip it.
+  Enum membership stays the handler's (§8): a bad part is `unknown_action`.
+  (2) **A single part comes back exactly as its module said it.** `all`
+  merges flat (no keys overlap, checked); a failed part is one key named for
+  it, holding its error string; every part failed is `unavailable` (T6, T9).
+  (3) **Hephaestus, Aether and Argus lose `TOOL_DEFINITION`.** `handle()`,
+  `fetch()`, their panels and Kairos workers are untouched, and Asclepius
+  calls each `handle()`, so one function still feeds the panel and the tool.
+  (4) **"How's the computer doing?" may use `all`.** The model chose it 4/4
+  over vitals (~8.9 s against ~7.2 s); the owner accepted that, so the
+  routing probe takes either.
+  Measured 2026-11-14 on the Obelisk (gemma4:e2b, think on): the routing
+  probe scores 52/56 on both prompts (the morning briefing and the known
+  "archives" miss remain); tool schemas went 21,453 → 20,817 characters, but
+  the prefix only 5,429 → 5,349 tokens. gemma renders a schema more compactly
+  than its JSON, so JSON characters overstated this merge's saving by about
+  2×. Names: Asclepius, the physician, and `get_machine_status`, both the
+  owner's picks. *(2026-11-14.)*
+- **Three sky tools become one: `get_sky_report` (`tools/ptolemy.py`), and
+  `get_weather` drops its sun and moon.** It retires `get_sun_times`,
+  `get_moon_phase` and `get_sky_tonight` (V0.03 audit T10). The sky crosses
+  the audit's atmospherics/celestarium line, the one cross-domain merge the
+  plan allowed: since M3, Helios and Selene are arithmetic on Themis and the
+  clock, so none of the three reads Aura any more. Decisions:
+  (1) **No argument.** All three are local arithmetic, under 5 ms together,
+  so there is nothing slow to skip and nothing for the model to pick wrong.
+  The cost is ~900 characters per answer, planets and stars included when
+  only sunset was asked.
+  (2) **The Asclepius merge rule (entry above), written out in both modules
+  rather than shared.** A shared helper would be a third module, with its own
+  Daedalus enum line, Pantheon page and tests, for ~30 lines. A third facade
+  is the moment to extract it.
+  (3) **The three lose `TOOL_DEFINITION`; their workers are untouched.** Five
+  panel comments that named the old tools are updated, the one exception to
+  "panels untouched" (owner's call). The two dated notes among them keep
+  their words and gain a pointer, since a dated record isn't edited.
+  (4) **Aura's `astronomy` block is gone** (the BACKLOG item). Since M3 only
+  the model read it: a second sunrise a minute off Helios's, and empty moon
+  fields whenever Open-Meteo answered. Open-Meteo is no longer asked for
+  sunrise and sunset.
+  (5) **A merged description keeps the retired ones' trigger words.** The
+  first draft dropped `get_sky_tonight`'s "whether a planet is up", and "Is
+  Jupiter up?" went once in four to `get_machine_status`, whose description
+  says the Ollama server "is up". With the phrase back it routed 12/12.
+  Measured 2026-11-14 on the Obelisk (gemma4:e2b, think on): the routing
+  probe stays at 52/56 on both prompts, and "What's the weather like?" calls
+  only `get_weather` (4/4); tool schemas went 20,817 → 20,190 characters and
+  the prefix 5,349 → 5,239 tokens. *(2026-11-14.)*
+- **The window opens tall enough for the whole nav rail, measured on
+  launch (`felhaven.start_height`).** At 960 × 620 Cogitator was cut off
+  with every group shut. Tightening the rows would have fitted it on one
+  machine's fonts and not another's; a taller BASE_H would have shrunk the
+  type everywhere when maximised. Measuring the rail once, with the root
+  withdrawn so the window is first drawn at the height it keeps, fits it on
+  whatever fonts this machine has. A taller window alone leaves the font
+  scale at 1.0 (`rescale_fonts` takes the smaller ratio, and the width stays
+  BASE_W), so the measurement holds. The scroll lane stays: an open group,
+  a short window or a row added later can still outgrow it, and a window
+  grown past BASE_H stops 80 px short of the screen's height (one already
+  shorter than BASE_H plus 80 still gets BASE_H, as before). *(2026-11-15;
+  corrected the same day, see the placement entry below.)*
+- **Home's status bar shows FOE's version, read off the audit markers
+  (`daedalus.audit_version()`), never typed.** §3 makes the `V0.02:` audit
+  marker the only version a file names, because a version nobody maintains
+  is a promise you can't keep — the retired `(FOE v.01)` label and Sphynx's
+  "v1.0" are the scars. A constant would be that promise again. So the bar
+  shows the newest marker in any module's docstring, which is the release
+  line the code has reached: it moves when an audit's markers land, and no
+  one can forget to bump it. Decisions:
+  (1) **Newest, not oldest.** An audit marks only the modules its work
+  touched (the BACKLOG's "`V0.03:` markers" item), so the oldest marker
+  would read V0.02 forever. A stray newer marker would move it early. In
+  tools/ and the app root `test_tool_output_contract` turns that red; it
+  skips panels/, so there it is `test_daedalus`'s real-tree check that does.
+  (2) **Through Daedalus**, because it is "the only thing in Felhaven that
+  reads source files to describe them", and it already holds every
+  docstring warm: the read is one stat per file.
+  (3) **Read once, as HomePanel is built.** It is the running Felhaven's
+  version; a marker edited on disk afterwards is not what is running.
+  (4) **No commit hash.** It would pin the exact code, but reading it means
+  git's files or a git process (§11's launch rules), and "a version number"
+  was the ask. A later addition if a screenshot ever needs to name its
+  commit.
+  (5) **The bar sits under the input, and the input row, the bar and the
+  file-change question share one dock frame.** The alert and aurora strips
+  pack just before the dock, so they stay above all three, the order the
+  status row guaranteed when it sat between them.
+  (6) **What is on disk, not what git tracks.** Daedalus lists its three
+  folders, so an untracked .py left in one, with a newer marker in its
+  docstring, moves the bar on that machine (and turns `test_daedalus`'s
+  real-tree check red there, not in CI). Asking git which files are tracked
+  would mean a git process at launch (§11) to guard against a stray file,
+  so that is accepted. *(Added the same day, after review.)*
+  *(2026-11-15.)*
+- **The launch window is placed, not left where Windows puts it
+  (`felhaven.start_position`).** The 80 px margin only holds if the window
+  starts at the top, and Windows' default spot cascades down the screen: on
+  a 768 px screen a window grown to the limit could open with its bottom
+  edge, Home's input row and status bar, behind the taskbar. So it opens
+  centred across the screen and centred down the part above the margin,
+  which puts a window grown to the limit at the very top. The cost is that
+  it no longer opens wherever Windows would have chosen. Asking Windows for
+  the work area instead would mean a ctypes call to answer what centring
+  answers already. `fit_window` now holds the launch sequence (withdraw,
+  measure, size, place, show) so `test_felhaven` runs the real thing.
+  *(2026-11-15.)*
+- **On Home's status bar the version gives way to the status
+  (`HomePanel._fit_version`).** Measured with real fonts: at 960 px the
+  status has 232 px with the version in, and "consulting the oracle…" needs
+  154; at the 760 px minimum the readouts leave it 113 (already short of
+  154 before the version came) and the version took that down to 32. Pack
+  can't put the version on the left and still let the status win, because
+  for left-packed widgets the left-to-right order is the priority order. So
+  the version hides while it would leave the status less than that line's
+  width, and comes back once there is room for both. The test for showing
+  it again is stricter than the test for hiding it by exactly the version's
+  own width, so it can't flicker. "consulting the oracle…" is the yardstick
+  because it is the turn's own line; the longest Auto-DJ line (224 px)
+  would hide the version at 960 px as soon as Scraptoken Flux reached four
+  digits. *(2026-11-15; superseded the same day: the status moved to
+  Hestia's line, see the next entry.)*
+- **What Pythia is doing is written into Hestia's line under the PYTHIA
+  title, not onto the status bar.** That line said "ask the oracle" and
+  nothing else; now it says that while nothing is happening and the status
+  otherwise ("consulting the oracle…", "waiting for your OK…", the Auto-DJ
+  lines, still clickable while it shows the queue). The owner's call, after
+  the measurements above showed that on the bar the readouts leave the
+  status 78–113 px at the 760 px minimum against the 154 its own line needs,
+  and that no packing order fixes that without cutting off something else.
+  Up top the title column is 153 px at the minimum and ~253 at 960, and the
+  bar beside a 160 px face has room for a second line, so the line wraps
+  instead of being cut off. Decisions:
+  (1) **It wraps; it never widens its column.** The title and control
+  columns share a `uniform` width so the face stays on the centre line; a
+  line asking for more would widen both and push the face off it. Hestia
+  re-wraps on its own `<Configure>` (the bar's width is set by its parent,
+  so there is no feedback).
+  (2) **Hestia draws the line; HomePanel writes it.** `HestiaBar.line` and
+  `IDLE_LINE` are the contract; `_set_status` stays the line's one writer,
+  so Hestia still owns no chat state.
+  (3) **One font for both states**, the subtitle's Georgia italic: dim
+  while idle, amber with a status, so the title block doesn't change shape
+  as statuses come and go.
+  (4) **The version's yield gets simpler.** With nothing left on the bar to
+  compete with, the version shows only while it fits whole beside the
+  readouts. The readouts are packed first, so the room beside them doesn't
+  depend on the version and it can't flicker. It fits at 760 px until a
+  long session (Flux in the millions, failed Rites) fills the bar.
+  *(2026-11-15.)*
+- **Three archive read tools become one: `read_archive`
+  (`tools/herodotus.py`).** It retires `list_documents`, `search_documents`
+  and `read_document` as tools (V0.03 audit T10); the three stay public
+  functions with their own answers and slugs. No facade module: Herodotus
+  already exports a list, so the merge is a schema change inside it.
+  Decisions:
+  (1) **A required `action` (list / search / read) plus optional `query`,
+  `filename` and `offset`** (the owner's pick, the `manage_timer` pattern).
+  A missing argument keeps the read's own slug (`missing_query`,
+  `invalid_filename`); an action outside the enum is `unknown_action`.
+  (2) **`write_document` and `edit_document` stay separate tools.** A change
+  to a file is never one action among reads, and `_CONFIRM_TOOLS` keeps
+  naming whole tools.
+  (3) **The description keeps the retired three's trigger words** ("saved",
+  "what the archive contains") and `read_document`'s paging steering word
+  for word (tested), the sky merge's lesson.
+  (4) **The probe gate held, and a single full run is not enough to say
+  so.** Rows 13–15 and 17 passed 4/4 on both prompts, as before; "archives
+  of Nethys" still misses, no worse (now `read_archive(search)`); "search
+  the web for…" still reaches `search_web` 4/4. That run also showed three
+  single misses on rows this change does not touch, under the owner's
+  prompt (49/56). Rechecked with the same rows, four runs per prompt, on the
+  branch and on master: 23/24 against 20/24. That is sampling noise, since
+  the temperature is the model's default. Two runs per row cannot separate
+  a one-in-eight miss from a regression; compare the same rows on both
+  sides before calling one.
+  Measured 2026-11-15 on the Obelisk (gemma4:e2b, think on): tool schemas
+  went 20,190 → 19,711 characters and the prefix 5,239 → 5,171 tokens.
+  Across the three merges: 23 tools → 17, prefix 5,429 → 5,171 tokens
+  (−258). *(2026-11-15.)*
+- **Daedalus's enum keeps its full glosses, re-measured after the merges
+  (V0.03 audit M7, D4).** The tree grew from 77 files to 92 since the
+  2026-09-25 entry, so `get_module_docstring` is now 8,141 of 19,711 schema
+  characters (41%). Measured 2026-11-16 on the Obelisk (gemma4:e2b, no-tool
+  prompt, default system prompt): full glosses give a 5,167-token prefix;
+  core+tools (`_ENUM_GROUPS` without panels, its 35 lines gone) 4,240
+  (−927); keys only (`_GLOSS_CHARS = 0`) 3,553 (−1,614). The enum's prose
+  costs about one token per 3.3 characters, so JSON-character estimates
+  undersell what trimming it saves (the draft guessed ~660 for core+tools).
+  The owner kept full glosses: keys only lost "auto DJ" → `awen` in
+  September, and trimming now trades routing for headroom nothing is using,
+  with ~830–1,830 tokens left before the Broker trigger. **Revisit** when a
+  new tool would push the prefix past ~6k: core+tools is the one-line
+  switch, and it needs the full probe first. Probes 23–24 held on the
+  unchanged schema: row 24 8/8, row 23 15/16 (one default-prompt answer in
+  eight skipped the tool, the BACKLOG's M1 item). *(2026-11-16.)*
+- **Every tool description follows one grammar (V0.03 audit L1/T2, draft
+  D8).** What it returns or does, opening with a third-person verb; then one
+  sentence opening "Call when", "Call whenever" or "Call only"; then,
+  optionally, what it is not for (§3, "Description grammar"). Nine of the
+  seventeen opened in the imperative ("Search…", "Convert…") and
+  `get_time_context` had two overlapping when-clauses, so the small model read
+  seventeen phrasings of one idea. `test_tool_schema_contract` now checks the
+  opening verb and the single when-clause; the 400- and 200-character targets
+  stay targets (`read_archive` and `get_machine_status` sit over 400 because
+  each carries its actions or parts; `control_music.action` is 405 because
+  its per-action rules were measured).
+  (1) **No trigger word was dropped**, the sky merge's lesson. A sentence that
+  said how to fill in an argument moved onto that parameter (Zeno's
+  operators; that unit names and abbreviations both work). Eudoxus's unit list
+  stayed in sentence one, because those words route "tbsp" and "quart" to it.
+  (2) **`fetch_page` may now be called on a URL the user gave**, which the
+  gate has allowed since 2026-09-30. With the old "only AFTER search_web"
+  text, two link questions fetched the link first 11/16 times (0/4 for "what
+  does <link> say" under the owner's prompt); with the new text, 15/16.
+  The probe held: default prompt 52/56 (as before), owner's 51/56 (49 before).
+  Row 23 ("auto DJ") read 5/8 on the default prompt in that run, so it was
+  rechecked against master the same evening: master 12/16, branch 16/16.
+  The schema went 20,605 → 20,567 characters (`json.dumps`); the prefix
+  5,171 → 5,174 tokens, so this change is about consistency, not size.
+  Measured 2026-11-16 on the Obelisk (gemma4:e2b, think on). *(2026-11-16.)*
+- **The default Machine Spirit prompt names no tools (V0.03 audit M1).** It
+  listed "weather, time, system vitals…" plus `search_web` and `fetch_page` by
+  name, and the list had drifted: no music, sky, archive or Daedalus. The
+  schemas are the tool list (§8), so the copy goes; a test now fails if the
+  default prompt names any registered tool. What stays is one call directive,
+  "Call a tool whenever the question needs current or computed data rather
+  than guessing", **ahead of the style rules**, and the no-Markdown sentence.
+  Order is the reason: in July that sentence, with nothing before it, stopped
+  `write_document` being called at all (0/5); a second test keeps the
+  directive first. The owner picked this over rewriting the list (it drifts
+  again with the next kind of tool) and over also dropping the no-Markdown
+  sentence (it costs nothing measurable and guards spoken answers). The
+  owner's own override already runs with no list. Measured 2026-11-16 on the Obelisk
+  (gemma4:e2b, think on), eight runs each for the current prompt, a rewritten
+  list, no list, and no list without the Markdown rule: "Save that as
+  lich.md" called `write_document` 8/8 under all four; "auto DJ" 7–8/8; no
+  Markdown in 0/6 list-bait answers under any. With no list, the full probe on
+  the default prompt held at 52/56; three unknown-fact questions reached
+  `search_web` 12/12 (as with the old prompt, which named it); the prefix went
+  5,174 → 5,109 tokens. *(2026-11-16.)*
+- **Every brain tool has a `TOOL_META`: domain, network, mutates (V0.03
+  audit M6/T1, draft D9 and D10).** The schema says what the model reads;
+  nothing in code said which tools change things, which reach the network, or
+  which belong together, so those answers lived in memory. `TOOL_META` sits
+  beside each schema, keyed by tool name, and the model never sees it (§8).
+  (1) **Domains are capability words** (the owner's pick over panel names and
+  the audit's mixed ids): `time` (time, timer), `weather`, `sky`, `machine`,
+  `markets`, `news`, `math` (calculate, convert), `music`, `web`, `archive`,
+  `codex`. Panels move (Celestarium already has), Moderati shows both
+  `machine` and `codex`, and web search and the archive have no panel. Under
+  a Broker that loads a domain at a time, "how's the CPU?" shouldn't bring
+  Daedalus's 8k-character module list with it.
+  (2) **`keywords` waits for a reader** (the owner's pick; a departure from
+  the audit's T1). Nothing matches on them yet, so no test could tell a right
+  list from a stale one. They arrive with the Broker that reads them. The
+  audit's "resident" set is the same kind of thing, a Broker setting, so it
+  isn't a domain here.
+  (3) **What the test holds:** meta for every registered tool and none for
+  any other; exactly the three fields; values from the allowed sets, and
+  every domain used; every `_CONFIRM_TOOLS` entry marked `mutates`; no tool
+  marked `network: none` in a module that imports Hermes; and the audit's T5,
+  a description naming only tools in its own domain (it holds today:
+  music, web and archive name only their siblings). Each check was broken on
+  purpose once and went red.
+  (4) **The values**, checked against the code on 2026-11-16: five tools
+  mutate (`manage_timer`, `play_music`, `control_music`, `write_document`,
+  `edit_document`); four are `live` (`get_machine_status` through Aether,
+  `play_music` through yt-dlp, `search_web`, `fetch_page`); three are
+  `cached` (`get_weather` 30 min, `get_news_stories` 15 min,
+  `get_market_prices` 60 s); the rest are local. *(2026-11-16.)*
+- **The Pythia tool audit closes with `V0.03:` on the 13 brain-tool modules
+  (the audit's T11, the draft's Phase 7).** `test_tool_output_contract` now
+  allows V0.02 and V0.03 and fails a file naming two markers; Home's status
+  bar reads V0.03 (`daedalus.audit_version()`, newest marker wins).
+  (1) **Which files: the 13 modules that register Pythia's 17 tools** (the
+  owner's pick over all 21 files the work touched). V0.03 is a standard for
+  brain tools, and tests now hold its grammar (§3), gate (§8), `TOOL_META`
+  and domain rule. Hephaestus, Aether, Argus, Helios, Selene and Hypatia only
+  lost their schemas and are not brain tools any more, so their V0.02 audits
+  still describe them; `pythia.py`, `machine_spirit.py` and the panels keep
+  theirs too.
+  (2) **One file, one version, history kept.** Each module's `V0.02:` opener
+  became a dated paragraph (`2026-07-24:  walkthrough audit — …`), like the
+  dated notes already beside it, and the `V0.03:` block went last (§3).
+  Asclepius and Ptolemy, born in the audit, carry their first marker.
+  (3) **Shared error slugs are still to come** (the owner's pick; a departure
+  from T9's "adopt the next time it's audited"). Renaming a slug changes its
+  panel's words, which the draft kept out of every phase. Each marker names
+  its module's pending renames, and the BACKLOG's slug item is now the one
+  V0.03 rule left. Midas's missing `as_of` (T7) is named the same way.
+  Across the plan (Phases 0–7, measured on the Obelisk, gemma4:e2b, think
+  on): 23 tools → 17; the prefix on the default prompt 5,429 → 5,109 tokens,
+  and 5,168 on the owner's longer prompt; routing on the default prompt held
+  at its baseline after every phase. *(2026-11-16.)*
+- **The V0.03 modules say a shared condition with the shared word (the
+  audit's L2/T9).** The seven whose markers listed pending renames (Aura,
+  Midas, Pheme, Morpheus, Callimachus, Herodotus, Daedalus) moved to §2's
+  shared core in one pass, with Rite's, Pheme's and Daedalus's panel words
+  in the same commit. The detail after the colon was kept everywhere, so no
+  failure says less than it did.
+  (1) **The owner's full map** (over moving only network and lookup
+  failures). Network and source failures became `offline` / `timeout` /
+  `unavailable` (`weather_offline`, `network_error`, `feed_timeout`,
+  `http_error: 404` → `unavailable: HTTP 404`, every `*_failed` that meant
+  "the source failed"); lookups became `not_found` (`unknown_module`,
+  `unknown_feed`, a missing heading or target) and `no_results`
+  (`no_matches`); an argument an action needs became `bad_arguments`, as
+  Ammit already said it (`missing_query`, `no_query`, `no_level`); and
+  `bad_operation` became `unknown_action`. Three same-condition spellings
+  outside T9's table went too: `weather_cert_error` → `cert_error`,
+  `feed_too_large` → `too_large`, and Herodotus's listing and search failures
+  → `read_failed`. Awen's own `play_music` stand-in says `bad_arguments` with
+  Morpheus.
+  (2) **Callimachus reads Cerberus's reason** instead of reporting every
+  vault refusal as `search_failed: VaultError`: sealed is `vault_locked`, an
+  open vault with no Brave key is `no_key` (Midas's words), anything else
+  `unavailable: VaultError`.
+  (3) **Two guards.** `test_tool_output_contract` fails a V0.03 module using
+  a retired spelling; the list includes the five `*_unavailable` slugs that
+  Helios, Selene, Hypatia, Argus and Hephaestus still use at V0.02, so each
+  goes red the day that module is marked, which is T9's "adopt when
+  audited" as a test. `test_rite_panel_smoke` holds Rite's words to the slugs
+  tools write, both ways for the shared core, so a renamed slug can never
+  render bare again.
+  The tool schemas are byte-identical, so routing cannot move. How the model
+  words its reply to a failure was not probed: the words reach it only when
+  a tool fails, which the routing corpus does not set out to cause.
+  *(2026-11-16.)*
+- **V0.03 is the walkthrough's standard for every file, not only the
+  brain-tool one (the owner's six calls before the V0.03 walkthrough).** The
+  Pythia tool audit marked 13 brain-tool modules V0.03 against rules that fit
+  only brain tools, and the other 79 files read V0.02 or nothing. A second
+  walkthrough, one session per job as in July, takes all 92 to V0.03.
+  (1) **What V0.03 means** (over naming the walkthrough V0.04): walked
+  through against this file as it stands, which is July's checks plus every
+  rule and guard added since, with the brain-tool rules only where they fit
+  (§3). One word then means one thing on every file, and the last session can
+  narrow `test_tool_output_contract` to V0.03 alone.
+  (2) **The 13 already at V0.03 are walked like the rest** (over appending a
+  line to their block, or counting the tool audit as their walkthrough).
+  That audit read schemas, words and slugs, not dead code or stale comments.
+  Their 2026-11-16 block becomes a dated paragraph and a fresh `V0.03:` goes
+  last, the way the V0.02 openers moved.
+  (3) **One marker per file, in the module docstring.** `aura_panel.py` and
+  `hephaestus_panel.py` carry three class-level V0.02 tags each and none on
+  the module, so everything that reads versions counts them as unaudited.
+  Their sessions fold the class tags into one module-level marker.
+  (4) **No new Pantheon stubs.** A stub is for a module with a job of its
+  own; the shell, the tab hosts, panel helpers, `palette`, `theme`,
+  `metis_logging` and the hand-run catalog builder have none, and a panel is
+  named on its tool's `Files:` line. `test_pantheon_docs` requires a stub
+  only for a registered brain module, so a stub for every file would be one
+  more layer kept in step by hand, restating a docstring.
+  (5) **Grouped by job, ordered by risk, with July's stopping rule.** A tool
+  is walked with its panel; the security boundaries go first and the brain
+  tools touched on 2026-11-16 last. After three sessions in a row that find
+  nothing but a marker, the rest of that tier is batched. July's rule never
+  fired.
+  (6) **One PR per session**, on its own branch from `origin/master`, never
+  stacked on another session's: the owner squash-merges, and a stacked branch
+  conflicts the moment its base lands. *(2026-11-17.)*
+- **Aegis's PATH fallback finds only `<name>.exe`, in PATH folders written as
+  full paths (the V0.03 walkthrough's S02; narrows the 2026-10-01 entry's
+  decision (3)).** The fallback called `shutil.which`, which on Windows (Python
+  3.13) searches the working folder before PATH unless
+  `NoDefaultCurrentDirectoryInExePath` is set, and this machine's environment
+  doesn't set it. It also honours PATHEXT, so it takes a `.bat` or `.cmd`. A
+  batch file runs through cmd.exe, which re-reads its arguments, and Python
+  does not escape them for it; Morpheus hands yt-dlp search text from the
+  model and from YouTube titles Awen reads. Measured on the old code: `which`
+  returned `.\mpv.EXE` from the working folder, and `yt-dlp.CMD` ahead of a
+  real `yt-dlp.exe` later on PATH. The owner's pick, over dropping the
+  fallback (which would reverse decision (3)) or only skipping the working
+  folder (which leaves the batch-file route). Every common installer (pip,
+  winget, scoop, choco) puts these three on PATH as an `.exe`, so the owner's
+  own install still runs. The same walk found `record` hashing the file a
+  second time to write the entry, after yt-dlp had run, so a file changed in
+  between would be recorded as vouched for. The entry now holds the hash
+  that was checked, and the changed file is refused at its next resolve.
+  *(2026-11-17.)*
+- **Sphynx tells you to use a PIN you use nowhere else, and its test PINs
+  stay outside the fixture guard (the V0.03 walkthrough's S04; the owner's
+  two calls).** Cerberus v2 made Cerberus's PIN a child lock that decrypts
+  nothing, and Sphynx's docstring, unchanged since July, never said where
+  its own PIN stands. It now does: a separate PIN, file and attempt counter,
+  neither PIN decrypts anything, and the gate guards only `Felhaven.bat`'s
+  launch. What the gate can still give away is the PIN itself.
+  (1) **The advice goes where the PIN is chosen** (over SETUP alone): one
+  line on the first-run screen, and the same in SETUP §7, where Cerberus
+  already had it. The PIN is a fast, unsalted SHA-256, and Python tried
+  every six-digit PIN in 1.2 s (measured), so anyone who can read
+  `sphynx_data.json` (a backup, a synced folder, Cerberus's Custody editor)
+  has it. That costs nothing unless the PIN is also a phone or card PIN.
+  Key stretching stays out, as the docstring says: whoever can read the file
+  can edit it to skip the gate, so a slow hash would protect only a reused
+  PIN, and the advice covers that.
+  (2) **`test_secret_fixtures` still scans only tests that import
+  Cerberus.** Sphynx's tests use bare-digit PINs; none of them, in any
+  version of the two files, is the real one (checked by hash). The owner
+  kept the guard to the vault's tests, since the gate guards nothing
+  secret. *(2026-11-17.)*
+- **Every program Felhaven starts is named by its absolute path (the V0.03
+  walkthrough's S05; carries Brontes's decision (2), 2026-11-09, from DLLs
+  to programs).** Aether's WiFi probe and Argus's firewall and DNS reads ran
+  `netsh` and `ipconfig` by bare name, and Daedalus ran `notepad.exe` the
+  same way. For a bare name, Windows searches Python's own folder and the
+  working folder before System32, unless `NoDefaultCurrentDirectoryInExePath`
+  is set, and the owner's machine doesn't set it. Measured: with a copy of
+  `hostname.exe` named `netsh.exe` in the working folder, Aether's call ran
+  it. Felhaven.bat and Sphynx start Felhaven in the app folder, which is
+  why the launch guard's verdicts (2026-10-03) judged a planted file there
+  no worse than editing the code. But `python felhaven.py` can be started
+  from any folder (SETUP §7 offers running it directly), and then that
+  folder is the one searched.
+  (1) **System32 by `%SystemRoot%`, in each module** (Brontes's `nvml.dll`
+  rule). Argus and Daedalus belong to later walkthrough sessions, but a
+  security fix lands in the session that finds it. A shared helper was
+  left out: four one-line constants, and no module's job is "where
+  Windows keeps its programs".
+  (2) **A guard, the owner's pick** (over the fix alone):
+  `test_process_launches` fails any subprocess launch whose program is a
+  constant that isn't an absolute path, read through a module-level
+  constant too. Only macOS's `open` and Linux's `xdg-open` are allowed,
+  where exec searches PATH and never the working folder. A computed program
+  (Aegis's bin/ paths, `sys.executable`) is outside it and stays with its
+  `_LAUNCHES` line.
+  A scar for whoever measures this next: Claude Code's own shell sets
+  `NoDefaultCurrentDirectoryInExePath`, so the first decoy run came back
+  clean. Unset it before measuring. *(2026-11-17.)*
+- **Iris's warning popup stands alone, and its alerts carry only what a
+  display reads (the V0.03 walkthrough's S06; the owner's two calls).**
+  (1) **The popup is no longer `transient` to the main window** (over
+  bringing Felhaven back up with it, or leaving it). Windows hides a window
+  tied to a minimised one: measured, a tied popup opened withdrawn while
+  its main window was minimised and showed only once that came back. With
+  Read aloud off, a warning arriving then gave no sign at all. Untied, it
+  shows on top with a taskbar button of its own, centred on the screen
+  while Felhaven is minimised, and stays up until acknowledged even if
+  Felhaven is minimised after it opened. Untying it only while the main
+  window is minimised doesn't work: Tk can't bring back a popup Windows has
+  already hidden (measured: untied and deiconified, it stayed unmapped).
+  This departs from Ammit's popup shape (2026-09-14), which has the same
+  gap (BACKLOG, S28).
+  (2) **`onset`, `sender`, `area` and `headline` left Iris's alert dict**
+  (over keeping them for a future warnings brain tool): no display read
+  them, and adding one back is a line. Iris still reads the Weather
+  Service's headline as the summary's last resort. *(2026-11-17.)*
+- **Eos's reading carries only what a display reads (the V0.03
+  walkthrough's S07; the owner's call).** `kp_kind`, `kp_time` and each
+  day's `r_major`, `s` and `kp_max` left `eos.fetch()`'s dict (over keeping
+  them for a future aurora brain tool, BACKLOG): NOW, Celestarium and Home
+  read none of them, and adding one back is a line. It is Iris's call
+  (above) again, so the two polled modules born together on 2026-11-10
+  keep one rule. `kp` is still the bin that holds the present moment,
+  whatever its kind. *(2026-11-17.)*
+- **A keyed request's reply is cut free of its key before any of it is
+  logged (`tools/demeter.py`; the V0.03 walkthrough's S10).** Demeter logs
+  the first 200 bytes of an elevation reply it can't parse, because the API
+  reports quota and auth trouble as a short body. Measured with a made-up
+  key, OpenTopography's error reply repeats the key it was sent ("Not a
+  valid format API Key: <key>"). That one came as a 401, which never
+  reaches the parse, but one that comes as a 200 would have written the key
+  into `logs/` in plain text (none had: the logs on disk were checked).
+  Now the key is replaced, in any case, in the reply's bytes before the
+  200-byte cut (so a key across the cut leaves no head behind) and in the
+  slug, and `from None` keeps the unredacted error out of any traceback.
+  The rule for any keyed tool: §2 already keeps an exception's text out of
+  a log; a reply's text is the server's, and it can quote the request, so
+  it is never logged with the key still in it. Midas logs only a class and
+  a status; Callimachus's catch-all logs a raw message (BACKLOG, S33).
+  *(2026-11-18.)*
+- **A mistyped coordinate never leaves the machine (`tools/eratosthenes.py`;
+  the V0.03 walkthrough's S11).** Coordinates and waypoints resolve
+  offline, but text that only looks like coordinates and fails to parse
+  (one hemisphere letter, a lone latitude, minutes past 60) fell through to
+  the Census geocoder, sending a location to census.gov. Measured live with
+  public points, it came back as "no match" or as a guess:
+  "138.8977 -77.0365", a latitude with one digit too many, was echoed back
+  as an x/y pair at 77°S, which the chart would have panned to under the
+  label ", , , ". Text made only of numbers and hemisphere letters that
+  didn't parse is now `bad_coordinates`, and the panel says so in words.
+  Two placements are deliberate. The refusal comes after the waypoints, so
+  a waypoint named in digits still resolves. It also comes before the
+  geocoder, not inside it, so the rule is "a word makes it an address".
+  The cost, measured: the geocoder can match some number-only addresses
+  ("100 N 200 E 84601", a Utah grid address, returned a different corner
+  of the same town), and such an address now needs its city typed. The
+  owner's call over leaving it as it was (2026-11-18), taken on the claim
+  that numbers alone can't match; the live check above showed they can,
+  only as a guess. *(2026-11-18.)*
+- **Clio's QC checks the true peak as well as the loudness (the V0.03
+  walkthrough's S16; the owner's pick).** Clio's Audio section promised
+  peaks under -1.5 dBTP, and `TARGET_TP` named the figure, but QC measured
+  only the loudness and the final hold: the limiter at -2 dBFS was trusted
+  to keep the promise. Measured on all eleven finished videos, it does, at
+  -1.77 to -1.86 dBTP, so 0.27 dB to spare. Checking costs nothing, since
+  loudnorm's measuring pass already reports the peak. A video over the line
+  now fails like a loudness miss: exit 1, renamed `.failed-qc.mp4`. The
+  other choice was to reword the figure as the limiter's aim, unchecked; but
+  a run that fails rather than warns shouldn't promise a number it never
+  measures. *(2026-11-19.)*
+- **Tool results reach the model as real characters (`pythia.py`; the
+  V0.03 walkthrough's S17; the owner's pick).** Pythia wrote each tool
+  result with `json.dumps(result)`, whose default escapes every non-ASCII
+  character, so a curly quote reached the model as the six characters
+  `\u2019`: the request's own JSON then carries the backslash through, and
+  Ollama hands it to the model as written. Measured on gemma4:e2b with six
+  news-style headlines: 427 prompt tokens escaped, 344 as characters. Asked
+  to quote them exactly, the model turned curly double quotes into single
+  ones and em dashes into en dashes; with the characters, all six came back
+  exact. Now `ensure_ascii=False`, for the model's copy and for the Rite
+  records' (the Rite Log showed the escapes too). The result is still JSON,
+  and the request body is escaped on the wire as before, so nothing else
+  moves. The routing probe ran on this branch and on master the same
+  evening: 49/56 each, the same verdict on every row (rows 12 and 16 miss
+  as always, row 23 once, and row 4 on both; BACKLOG). *(2026-11-19.)*
+- **Log lines keep an exception's text, and Pythia's tool catch-all scrubs
+  credential values out of it (`pythia.py`; the V0.03 walkthrough's S17;
+  the owner's pick).** The July walkthrough left a flag: the output guard
+  reads `{"error": …}` returns, not log calls, and a log line that printed
+  an exception's text is how Midas once wrote its Finnhub key into
+  `logs/`. On this date, 102 log calls in 30 files printed a caught
+  exception's text.
+  No live leak was found: hermes's errors carry fixed text and no URL since
+  S01, Midas logs a class and a status, and Callimachus's Brave key rides
+  in a header (its catch-all is still a BACKLOG item for S33). A guard over
+  all 102 would be an allowlist of nearly every one, so there is none. The
+  one line that any exception escaping a tool reaches, `_dispatch`'s
+  catch-all, now passes the text through `_redact()`, the
+  Rite Log's scrub (`key=`, `token=` and `auth=` values, a Bearer header).
+  The text stays, because it is what diagnoses a tool bug. *(2026-11-19.)*
+- **Golden hour follows the sun's angle (`tools/helios.py`; the V0.03
+  walkthrough's S21; the owner's pick, closing the BACKLOG decision of
+  2026-09-28).** It was a plain hour after sunrise and before sunset, kept
+  when Helios learned the sun's position because switching would change what
+  the row meant. Now it means what photography almanacs mean: the sun's
+  centre between 4° below the horizon and 6° above it, true (airless)
+  altitude. At mid-latitudes the plain hour began 15 to 28 minutes late in
+  the morning, and in the evening ended that much early, in every season
+  checked (Washington DC, Greenwich, New York, Sydney). (1) **The same
+  hour-angle solution as sunrise**, at -4° and +6°, so no new astronomy.
+  Checked against JPL Horizons' airless elevations at five places on seven
+  days: 23 of 24 crossings to the minute, and Sydney's evening +6° a minute
+  off. (2) **Above about 60°, near a solstice, an end may not happen.** If
+  the sun never climbs to +6°, the morning window ends and the evening one
+  starts at solar noon (Anchorage at midwinter is golden all day). If it
+  never sinks to -4°, they meet at solar midnight (Trondheim at midsummer).
+  The windows meet rather than show "—", because the light is golden through
+  that span. (3) **No refraction.** Below the horizon there is none to see;
+  at +6° it moves the end by about a minute at mid-latitudes; and the
+  reference the tests use leaves it out. (4) **The tool schema is
+  unchanged**, so routing cannot move and no probe ran. get_sky_report's
+  `golden_am` and `golden_pm` move by those minutes. The Virgil tooltip,
+  which said Felhaven counts a plain hour, now gives the angle.
+  *(2026-11-20.)*
+- **Argus says when Windows keeps the DNS cache from a normal user
+  (`tools/argus.py`, `panels/argus_panel.py`; the V0.03 walkthrough's S22;
+  the owner's pick).** Measured 2026-11-21 on Windows 11 (build 26200) as a
+  normal user: `ipconfig /displaydns` exits 1 with "The requested operation
+  requires elevation", the DNS API's own cache table refuses too, and
+  PowerShell's `Get-DnsClientCache` returns nothing, while the DNS Client
+  service runs. Argus read every refusal as a failure, so the DNS CACHE
+  section blamed a stopped service, the summary dot stayed amber for good,
+  and Pythia was told the cache held 0 names. (1) **A refusal is its own
+  state, `needs_admin`,** recognised by ipconfig's English sentence, like
+  Argus's two parsers; any other failure stays `unavailable`. (2) **The dot
+  counts it as a permission, not a failure,** so it stays teal; amber keeps
+  meaning a source failed or a program went unnamed. The section says
+  Windows shows the cache only to an administrator. (3) **`handle()` leaves
+  `dns_cached_names` out unless the cache was read.** A count it couldn't
+  take would be a false 0. (4) **Argus still never asks for elevation;** a
+  Felhaven run as administrator shows the cache again. Removing the section
+  was the other choice, and lost that run; fixing only the hint left the
+  dot amber and the 0 in place. The routing probe ran before and after
+  (default prompt, 2 runs): 49/56 on master, 48/56 on the branch, and the
+  only rows that moved (23 and 24, one sample each) got a byte-identical
+  request on both, captured, so the difference is sampling. *(2026-11-21.)*
+- **Echo never replaces a file in `local_audio/`** (`tools/echo.py`,
+  `panels/echo_panel.py`; the V0.03 walkthrough's S23; the owner's pick).
+  Echo handed ffmpeg `-y`, so a name already there was overwritten with no
+  Recycle Bin copy. And when the encode failed, Echo removed the file at
+  that name, though ffmpeg had never touched it: measured with the real
+  ffmpeg, a kept file was gone after one failed encode. (1) **A name
+  already there is refused (`file_exists`) before synthesis,** so a long
+  document costs no minutes for nothing. The status line says to pick
+  another name or remove the old file in ORPHEUS, which sends it to the
+  Recycle Bin. (2) **The name is then claimed with an exclusive create
+  (`O_EXCL`) just before ffmpeg runs.** A name taken during synthesis is
+  refused too, and the file a failed encode removes is always the empty one
+  Echo just made. Overwriting safely was the other choice: keep `-y` and
+  remove only Echo's own file. It still lost the old file on every success,
+  and Orpheus's duration cache assumed write-once files. That cache no
+  longer leans on it either: it keys on name, size and mtime, because a
+  probe of a file Echo was still writing cached a partial duration (46 s
+  for a 24:37 file, measured). *(2026-11-21.)*
+- **ORPHEUS decodes off the UI thread** (`panels/orpheus_panel.py`; the
+  V0.03 walkthrough's S23; the owner's pick). `orpheus.play_file()` decodes
+  the whole file before anything plays, and it ran in the click handler on
+  the panel's word that it was "fast enough for what Echo produces". Echo
+  has made longer files since: measured 2026-11-21 on the owner's files, a
+  25-minute one took 3.2 s, a 19-minute one 2.3 s, a 9-minute one 1.1 s,
+  and all of Felhaven froze for that long. The panel now takes EchoPanel's
+  shape, which §6 already names: one daemon thread per click, whose only
+  shared touch is a queue `put`, and a bounded `after()` chain that drains
+  it and stops itself. A second click while one decodes is ignored, the
+  status line says "decoding …", and the chain is cancelled in `destroy()`.
+  Leaving it in BACKLOG, as S11 did with the Cartograph's search freeze, was
+  the other choice; this one needed no new design. *(2026-11-21.)*
+- **Themis reads and writes its file under one lock (`themis.py`; the V0.03
+  walkthrough's S24).** Windows refuses `os.replace` onto a file another
+  thread has open (WinError 5), and refuses an open while the rename runs
+  (Errno 13). Themis is read on many threads (horai's worker every second,
+  seven more workers, Pythia's request thread, the Tk thread's two clocks)
+  and saved on the Tk thread. Measured with a tight reader against 300
+  saves: 215 saves failed, and 78 reads fell back to the defaults
+  (Greenwich, °F, the default model). At real rates it is rare (none in 300
+  saves against a reader once a second), but a lost read fetches for the
+  wrong place or asks the wrong model. One `threading.Lock` held across each
+  read and each rename: 0 and 0. A lock rather than a retry, because both
+  sides are in this one process. Other files saved with `os.replace` and read
+  on another thread can race the same way (BACKLOG). *(2026-11-21.)*
+- **A settings save logs field names, not values (`themis.py`; S24; the
+  owner's pick).** `_write` logged the whole settings dict at INFO: the
+  latitude, longitude, weather location and Atmospherics place id (which
+  encodes a location too), and the EMANON tab shows INFO lines on screen.
+  It now logs `settings saved (changed: latitude, longitude)`. A refused
+  weather location's warning names its type, not its text. Keeping the
+  values was the other choice: the log is local and gitignored.
+  *(2026-11-21.)*
+- **SCRIBE's task list scrolls (`panels/scribe_panel.py`; S24; the owner's
+  pick).** At the 488 x 330 tab (Felhaven's 760 x 500 minimum), rows past
+  about ten ran off the bottom and the notes shrank to nothing first; about
+  fifteen fit at the start size. The list now sits in `theme.ScrollColumn`,
+  as tall as its rows or as what is left once the notes keep four lines,
+  and a task just added scrolls into view. BACKLOG was the other choice.
+  *(2026-11-21.)*
+- **Errors nothing caught go to the log (`felhaven.py`, `kairos.py`; the
+  V0.03 walkthrough's S25).** Felhaven.bat starts the Sphynx gate under
+  pythonw, and Sphynx spawns felhaven.py, so Felhaven has no stderr
+  (`sys.stderr` is None, reproduced through that chain). Tk prints a
+  callback's exception there, and Python a thread's, so both went nowhere:
+  a probe through the chain found neither in `logs/`. That is why earlier
+  sessions kept finding failures "silent under pythonw". Felhaven now
+  installs `root.report_callback_exception` and `threading.excepthook`,
+  which log at ERROR with the traceback; each distinct failure (class, file,
+  line) is logged once a run, so a `<Motion>` handler that raises can't fill
+  the log. The same probe then found both. Kairos guards each panel's
+  `update()` itself, logging a panel when it starts failing and again when
+  it recovers, and re-arms its tick in a `finally`: one raise used to freeze
+  every panel, with no log line either (BACKLOG). A failure while Felhaven
+  is built is logged at CRITICAL and, the owner's pick, shown in an error
+  box naming only the error's kind, since no window would ever open.
+  *(2026-11-21.)*
+- **A failed SCRIBE save shows on the tab (`scribe.py`,
+  `panels/scribe_panel.py`, `felhaven.py`; S25; the owner's pick, closing
+  S24's BACKLOG item).** `save_data()` returns whether it wrote the file,
+  `_flush_save` hands that to the tab, and its count line reads "3 open ·
+  not saved, see the log" in red until a save works. Logging only was the
+  other choice: EMANON already showed the WARNING, but nothing on the SCRIBE
+  tab did, and the notes were lost at the next start. A save that fails
+  while the window closes can only be logged. *(2026-11-21.)*
+- **The error hooks live in `metis_logging` (the V0.03 walkthrough's S26,
+  closing S25's BACKLOG item).** S25 put Felhaven's hooks in `felhaven.py`;
+  the Sphynx gate, the other entry point and also under pythonw, never set up
+  logging at all, so its errors still went nowhere. `setup_logging()` now
+  installs `threading.excepthook` and `sys.excepthook` itself, and
+  `log_tk_errors(root)` wires a Tk root, so each entry point makes two calls
+  (§5). One function, `log_uncaught()`, does the logging and the once-a-run
+  dedupe, which also keeps Felhaven's own start-failure line from being
+  logged a second time by the program hook. The program hook passes the
+  exception on to the one it replaced, so a console run still prints it. The
+  gate calls both in its program block, not its constructor, so its smoke
+  tests open no log. Through the real launch chain a probe found a Tk
+  callback's, a thread's and the program's exception in the log. The console
+  handler is now added only when there is a stderr: under pythonw it wrote to
+  None, and every record failed inside it. *(2026-11-21.)*
+- **EMANON shows every line's date (`panels/emanon_panel.py`; the V0.03
+  walkthrough's S27; the owner's pick, closing his report of 2026-10-02,
+  "Emanon's time looks wrong").** The panel showed the time alone ("the date
+  is too wide"). The owner's log, read for timestamps only, had no clock
+  jump and nothing out of order in early October; Felhaven ran on 2026-10-02
+  from 06:01 to about 18:00 and restarted the next morning at 07:37, so the
+  first view after a restart showed the evening before's times as if they
+  were today's. Every line now carries "2026-10-02 16:42:13". A date only on
+  lines from an earlier day was the recommendation, and keeping the time
+  alone the other choice; the owner chose the date everywhere, unambiguous
+  at the cost of earlier wrapping. The same session stopped the 2 s rebuild
+  of an unchanged tail, which wiped a selection and threw a reader who had
+  scrolled up back to the bottom. *(2026-11-21.)*
+- **Horai has no logger, by a written exemption (the V0.03 walkthrough's
+  S28; the owner's pick, closing the 2026-09-28 entry's open question).** It
+  reads only the clock and Themis, has no failure of its own, and Themis logs
+  its own file's problems, so a logger would be a name with nothing to say.
+  `test_tool_loggers` holds it as an exemption with that reason, and still
+  fails if Horai gains one. A logger with no calls, so every tool module
+  looks the same, was the other choice. *(2026-11-21.)*
+- **Ammit's alarm stays quiet for an expiry already dismissed, and follows
+  the timer (`panels/horai_panel.py`; S28; the owner's pick).** The alarm
+  ignored `acknowledged`: measured, a timer dismissed before a restart
+  popped up and spoke at every launch until Stop or Reset, while the
+  countdown and Home's badge read it green, which is the split the
+  2026-09-14 rule forbids. Now only an expiry not yet seen fires, which
+  still includes one that ran out while Felhaven was closed. Re-alarming at
+  every launch, with the countdown and badge back to red to match, was the
+  other choice. A stop, reset or restart now closes a popup still open:
+  measured, one left open beside the next expiry's popup acknowledged that
+  expiry when dismissed. The popup also stands alone now, as Iris's has
+  since 2026-11-17 (BACKLOG): measured with the main window minimised, the
+  tied popup stayed withdrawn, and the untied one showed, centred on the
+  screen. *(2026-11-21.)*
+- **Ammit reads and writes its file under one lock (`tools/ammit.py`; S28).**
+  The Themis race again: Pythia's request thread starts, stops and resets
+  the timer while the Tk thread reads it three times a second and saves its
+  own clicks and the alarm's acknowledge. Measured unlocked with a tight
+  reader, 149 of 300 saves failed and 84 reads fell back to "no timer"; with
+  two writers, a load that fell back saved "no timer" over a running one 53
+  times in 300. None at real rates (300 saves against three reads a second).
+  The lock also covers each public call's whole read-change-save, so two
+  threads can't each save over the other's change. Locked: 0, 0 and 0.
+  *(2026-11-21.)*
+- **Midas dates its answers (`tools/midas.py`; the V0.03 walkthrough's S29,
+  closing the audit's T7).** It answers from a 60 s cache, and a ticker whose
+  refresh failed rides back on its last good price, but it said neither
+  when. Now every answer carries `as_of`, when that set was fetched, and a
+  stale ticker its own, when its price is from: one date for the usual case,
+  and the honest one for the exception. Aura's convention (naive local ISO,
+  an injectable `_now()`); unlike Aura, the panel's dict carries it too,
+  since the cache is shared and PRICES' "updated HH:MM" now reads it.
+  gemma4:e2b ignores freshness fields (2026-09-28), so the gain is for the
+  next model. The routing probe on the default prompt read 48/56 on branch
+  and master alike (prefix 5,106 both): the watchlist row passed 2/2 on
+  each, its answer 26 prompt tokens longer, and the rows that moved never
+  call Midas. *(2026-11-22.)*
+- **Midas never reuses a cached refusal, and opening the Dynastic Vault
+  fetches at once (S29).** Measured: locked, then unlocked a second later,
+  Midas answered `vault_locked` from its cache for up to 60 s with no network
+  call, and the panel showed the tick it kept while sealed, "locked" on
+  every row, until the next 60 s tick. `vault_locked` and `no_key` cost
+  nothing to check again, so a set holding one is never reused; the gate
+  calls `Kairos.refetch("midas")` (the Settings tab's seam), and a kept tick
+  saying "locked" isn't shown. *(2026-11-22.)*
+- **Plutus never writes over a ledger it can't read (`tools/plutus.py`;
+  S29).** `add_event()` appended to `load_events()`, which reads an
+  unreadable file as empty: measured, a ledger of 40 records with one
+  hand-edit typo became a file of one record after one ADD. A real-money
+  record wants the opposite of "carry on": `add_event()` reads strictly and
+  raises `LedgerError`, LEDGER says so in red, and the file stays as it was
+  for a human to mend. A record the folds can't read is skipped and counted
+  on the totals line, not raised (it stopped the tab drawing) and not
+  dropped (`add_event()` keeps it in the file). Shares and price must be
+  finite: one NaN made its ticker fall out of the holdings for good, since
+  NaN > 0 is false. Plutus is unused today, so no ledger was lost.
+  *(2026-11-22.)*
+- **A feed can't freeze Felhaven: Pheme bounds each story field and refuses a
+  feed that declares an XML entity (`tools/pheme.py`; the V0.03
+  walkthrough's S30, a security fix).** A feed is network input, and two
+  things it could send were unbounded. (1) **Length.** A plain feed under the
+  byte cap can carry a title of a million characters; measured, the
+  Scriptorium took 137 s to draw one, frozen on the Tk thread, and handle()
+  would have handed it to Pythia whole. Title, author and url now have caps,
+  4x the longest measured over every item of the 7 shipped feeds and rounded
+  up to a power of two (130, 54 and 176 characters: 512, 256, 1,024). A
+  title or author past its cap is cut and ends in "…"; a url past its cap is
+  dropped, because a cut url is a wrong link, and the story just isn't
+  clickable. (2) **Entities.** expat 2.8.2 refuses a billion laughs, but
+  lets one entity expand up to ~100x: measured, a 900 KB feed became a
+  54,000,000-character title and 108 MB in 0.09 s. No feed needs an entity
+  (none of the 7 has a DOCTYPE), so one that declares any is refused as
+  `invalid_feed_xml`, the slug the panel already words. The check is
+  pyexpat reading the prolog, where declarations must sit, not a byte
+  search, which a UTF-16 feed would get past. *(2026-11-23.)*
+- **Pheme's byte cap follows its rule up: 2 MiB (S30, the owner's pick).**
+  The Register's feed grew from 244,346 B (2026-10-01) to 300,830 B, so
+  1 MiB was 3.5x the largest feed against the rule's 4x. Raising it moves
+  hermes's default deadline from 12 s to the cap at 100 kB/s, about 21 s, a
+  wait only a link slower than that sees. Kept at 1 MiB, the feed would have
+  read "too large" once it grew past it. *(2026-11-23.)*
+- **Pheme checks its config row by row (S30).** §4 says a bad config
+  degrades one panel, never the app, but a feed row with no id, a row that
+  wasn't an object, or a `feeds` that wasn't a list stopped PhemePanel, and
+  so Felhaven, from opening (measured). `load_feeds()` keeps the usable rows
+  and logs the rest, Midas's watchlist rule (S29), and the panel reads
+  through it instead of its own copy of the file. Rows with none usable
+  count as unreadable, so handle()'s empty `stories` still means the feeds
+  answered, not that every row was bad. *(2026-11-23.)*
+- **Zeno's sandbox bounds what a call can cost, not only what it can name
+  (`tools/zeno.py`; the V0.03 walkthrough's S31, a security fix).** The
+  model writes Zeno's expressions, and a page Pythia reads can steer the
+  model, so the whitelist is a boundary on time and size as well as on
+  syntax. Two things got past it. (1) **round()'s hidden power.** For an int
+  and a negative ndigits, `int.__round__` computes 10 to the minus ndigits,
+  which `_guard_pow` never sees: `round(5, -100000000)` ran past 20 s
+  (measured), holding Pythia's turn. Once that power is more than ten times
+  the number the answer is exactly 0, so `_round()` returns it without the
+  power; a number has at most `bit_length // 3 + 1` digits, hence the bound,
+  and a test holds the shortcut to Python's own answers. The other
+  whitelisted functions were checked for a power of their own; the math
+  functions turn a huge int into a float and raise, and factorial and `**`
+  were already guarded. (2) **The steps.** Each step restates the whole
+  expression, so a wide call grew quadratically: `max()` of 100 factorials,
+  1,703 characters, returned 19.3 MB in 1.2 s, and Pythia sends a tool
+  result to the model whole. The steps now have fetch_page's budget, 4,000
+  characters: the step that would pass it becomes "…", and no snapshot is
+  built after it. `result` and `display` always carry the answer, and an
+  ordinary trace is far under the budget. *(2026-11-23.)*
+- **Herodotus's first rail covers list and search too, and stops at hard
+  links (`tools/herodotus.py`; S32).** Rail 1 said every path resolves
+  inside the archive "on every operation", but only read, write and edit
+  went through `_resolve`; list and search walked the folder as it stood.
+  Measured with a symlink to a file outside: read and edit refused it, list
+  showed it, and search returned the outside file's text. Both now skip an
+  entry that resolves elsewhere. A hard link is the file itself, so no path
+  check can tell it apart, and read returns it like any document. Making
+  either kind of link needs write access to the archive folder, and anyone
+  with that can read the outside file directly, so the rails stop there
+  rather than refusing every file with a second link. *(2026-11-23.)*
+- **The address guard refuses ::/96 by its shape, not by Python's word for it
+  (`tools/callimachus.py`; S33, a security fix).** `_is_public` leaned on
+  `ipaddress`'s `is_global`, which counts ::/96, the IPv4-compatible form
+  RFC 4291 deprecated, as global: `::127.0.0.1` passed as public. Measured on
+  Windows, a connect to `::7f00:1` answers "unreachable network", so nothing
+  was reached, but the guard's promise is the public internet and nothing
+  else, and a resolver answer of that shape is no address anyone should
+  dial. The check is on the bits (the top 96 zero), the same way the guard
+  already looks inside IPv4-mapped, 6to4 and NAT64 addresses.
+  *(2026-11-23.)*
+- **fetch_page reads text only (S33).** It decoded whatever came back as
+  UTF-8 and stripped it as HTML: measured live, a PDF and a PNG each came
+  back as 4,000 characters of their bytes, about 1,700 of them replacement
+  characters, and the model was handed them as the page. Now a Content-Type
+  that isn't text, XML or JSON is refused as `unavailable: not a text page
+  (<type>)` before the body is read, so the download is skipped too. A
+  missing Content-Type is read as text, as a browser would sniff it, and the
+  server's type is quoted only when it is shaped like one. *(2026-11-23.)*
+- **play_music answers with the load's verdict (`tools/morpheus.py`; S35,
+  the owner's pick).** loadfile is fire-and-forget, and play_music answered
+  `now_playing` the moment it was written, so when YouTube then refused the
+  stream Pythia had already said the song was playing; the owner's log held
+  45 Morpheus errors from 2026-09-17 on, most of them that (counted by level
+  and logger, the messages unread). Of the three ways offered, waiting for
+  the verdict, answering at once and posting a correction into the chat
+  later, or fixing only the immediate case, the owner picked the first. It
+  polls status() every 0.5 s, the read control_music already makes, until
+  media exists (`now_playing`), the load is condemned or mpv is gone
+  (`unavailable`), a stop disarmed it (`not_playing`), or another play()
+  replaced it (`now_playing`: ours did start). A load took 4.5-6.5 s to
+  become audible (2026-09-19), so the wait is bounded at 15 s, past which the
+  answer says `"loading": true`. The cost is that Pythia answers a "play X"
+  a few seconds later; the gain is that she never claims a song that didn't
+  load. play() also says whether it sent anything, so a refused URL or an
+  mpv that won't start is `unavailable` at once. *(2026-11-23.)*

@@ -44,11 +44,22 @@ Echo:        Echo's per-conversion voice is deliberately NOT stored here. It is
              a per-job choice, held in the panel for the session and seeded from
              pythia_voice() at build time — see panels/echo_panel.py.
 
-Upstream:    panels/voice_bar_panel.py (the dropdown, via its two hosts),
-             felhaven.py (seeds Calliope from pythia_voice() at startup)
+Upstream:    panels/voice_bar_panel.py (the dropdown's roster and labels),
+             panels/machine_spirit_panel.py (the narration pick: read, label,
+             save), panels/echo_panel.py (seeds Echo's pick), tools/echo.py
+             and tools/clio.py (CATALOG as the gate), felhaven.py (seeds
+             Calliope from pythia_voice() at startup)
 Downstream:  voice_config.json; calliope.py (read-only, for default())
 
-Requires:    json, logging, os, tempfile, pathlib (stdlib only).
+Requires:    calliope.py (default()), and json, logging, os, tempfile,
+             pathlib (stdlib).
+
+V0.03:       Walked through 2026-11-19 (the V0.03 walkthrough, CONVENTIONS
+             §3), its first audit (born 2026-08-02). The pick is read fresh and
+             fail-soft, written atomically, and refused outside CATALOG; the
+             28 en-us ids still match their count. Upstream gains the four
+             callers it had missed, and Requires names Calliope: it said
+             "stdlib only", and importing this module imports Calliope.
 """
 
 import json

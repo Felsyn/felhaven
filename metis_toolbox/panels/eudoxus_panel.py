@@ -1,6 +1,8 @@
 """
 Eudoxus panel — unit converter for the Felhaven dashboard.
 
+Job:         Convert between units, showing the factor used and recent conversions.
+
 EudoxusPanel(tk.Frame) — unit converter (Eudoxus), with a factor line and a
 recent-history strip. A bare Frame tab body inside CogitatorPanel (the EUDOXUS
 tab). Split out of zeno_panel.py, where it lived as the CONVERT tab sharing a
@@ -8,10 +10,23 @@ card with Zeno — now its own surface.
 
 Request-driven only; no Kairos worker, no root.after(), no threading.
 
-V0.02:  Audited 2026-07-23 — stopped rendering Eudoxus's raw error codes at the
-        user and mapped them to human text; fixed the placeholder swallowing a
-        real conversion and the last good result vanishing after a failure;
-        first tests (tests/test_eudoxus_panel_smoke.py).
+Contract:    EudoxusPanel(parent), a tab body; no update() (nothing polls it).
+
+Upstream:    panels/cogitator_panel.py builds it as the EUDOXUS tab.
+Downstream:  tools/eudoxus.py (convert()), theme.py
+
+Requires:    tkinter (stdlib)
+
+2026-07-23: walkthrough audit — stopped rendering Eudoxus's raw error codes at
+        the user and mapped them to human text; fixed the placeholder
+        swallowing a real conversion and the last good result vanishing after a
+        failure; first tests (tests/test_eudoxus_panel_smoke.py).
+
+V0.03:  Walked through 2026-11-23 (the V0.03 walkthrough, S31; born
+        2026-06-23, split out of zeno_panel.py). Every path was read against
+        Eudoxus's slugs, the placeholder flag and the history strip; nothing
+        here needed changing beyond the entry box dropping the theme's own
+        cursor colour (§7). Contract, Upstream, Downstream and Requires added.
 """
 
 import tkinter as tk
@@ -62,7 +77,7 @@ class EudoxusPanel(tk.Frame):
         # ── Entry ─────────────────────────────────────────────────────────────
         self._entry = tk.Entry(
             self, font=FONTS["body"], bg=C["bar_bg"], fg=C["text3"],
-            insertbackground=C["text1"], relief="flat",
+            relief="flat",
             highlightbackground=C["border"], highlightthickness=1,
         )
         self._entry.insert(0, _PLACEHOLDER)

@@ -150,6 +150,26 @@ class TestReadShp(unittest.TestCase):
         with self.assertRaises(ValueError):
             cadmus.read_shp(self.shp[:150])         # header claims more bytes
 
+    def test_a_header_length_under_the_header_raises(self):
+        """Read as "no shapes" it passed silently; a map then lost a layer."""
+        broken = bytearray(_shp([struct.pack("<i", 0)]))
+        struct.pack_into(">i", broken, 24, 20)      # 40 bytes, in 16-bit words
+        with self.assertRaises(ValueError) as ctx:
+            cadmus.read_shp(bytes(broken))
+        self.assertIn("bad_shp", str(ctx.exception))
+
+    def test_a_short_last_record_is_a_value_error(self):
+        """A PolyLine holding only its type, last in the file, read past the
+        data and escaped as struct.error, which no caller catches."""
+        try:
+            cadmus.read_shp(_shp([struct.pack("<i", 3)]))
+        except ValueError as exc:
+            self.assertIn("bad_shp", str(exc))
+        except Exception as exc:                    # noqa: BLE001 — the point
+            self.fail(f"escaped as {type(exc).__name__}, not ValueError")
+        else:
+            self.fail("decoded a record too short for its header")
+
     def test_unsupported_shape_type_raises(self):
         # Flip the first record's shape type to Point (1).
         broken = bytearray(self.shp)

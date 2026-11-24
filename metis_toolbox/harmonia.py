@@ -86,8 +86,8 @@ Morpheus:    Harmonia's own code — not in Calliope, not in Orpheus, not in a
              Morpheus starting playback is a deliberate UI action, and Morpheus
              never learns Harmonia exists. morpheus.duck() opens its IPC pipe
              fresh each call and never raises, so it is safe from whatever
-             thread enters play() — Calliope's release worker (speech) or the
-             UI thread (an Orpheus briefing).
+             thread enters play() — Calliope's release worker (speech) or
+             OrpheusPanel's decode thread (a briefing, since 2026-11-21).
 
              It used to call morpheus.stop(), and that KILLED music the user
              had just asked for: mpv's loadfile is fire-and-forget, so the
@@ -121,7 +121,10 @@ No channels: One stream, full stops only. Harmonia does not know what speech
 
 Upstream:    calliope.py (speech PCM @ 24 kHz mono), tools/orpheus.py
              (decoded file PCM @ 24 kHz mono, matching Echo's own output —
-             not a generic decode), felhaven.py (calls shutdown() on close).
+             not a generic decode), panels/home_panel.py (tick_yield() on its
+             60 ms drain), awen.py (is_playing(), to wait for quiet),
+             tools/clio.py (its by-hand render), felhaven.py (calls
+             shutdown() on close).
 Downstream:  sounddevice (playback) -> tools/morpheus.py (ducked and
              restored, never called back — Harmonia is a one-way dependency on
              Morpheus).
@@ -129,7 +132,7 @@ Downstream:  sounddevice (playback) -> tools/morpheus.py (ducked and
 Requires:    sounddevice, numpy (already in the stack via Calliope). Stdlib
              otherwise.
 
-V0.02:       Audited 2026-07-24; stream rewrite 2026-07-26. Harmonia now owns a
+2026-07-24:  walkthrough audit; stream rewrite 2026-07-26. Harmonia now owns a
              single persistent sd.OutputStream with a callback that pulls from
              an internal buffer, and barge-in (stop()) is a buffer FLUSH rather
              than a cross-thread sd.stop(). This is the "Stage 2" stream fix the
@@ -144,6 +147,15 @@ NOTE         The yield became a DUCK. play() lowers mpv's volume instead of
              real bug in which asking Pythia to play a song killed the track
              it had just started, silently — see "Ducking Morpheus" and
              CONVENTIONS §12.
+
+V0.03:       Walked through 2026-11-19 (the V0.03 walkthrough, CONVENTIONS
+             §3). Still the only module that calls sounddevice, and only
+             through its one stream's callback; the callback, play(), stop(),
+             tick_yield() and shutdown() never raise; the buffer lock is never
+             held across a device call, so the callback cannot stall on one
+             (the stream lock is, by design: it serialises open and close); a
+             dead stream is still noticed and reopened. Upstream gains Home's drain, Awen and
+             Clio; the standalone demo lost a second `import time`.
 """
 
 import logging
@@ -432,8 +444,6 @@ def shutdown() -> None:
 # ── Standalone demo ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import time
-
     logging.basicConfig(level=logging.INFO)
     tone = (np.sin(2 * np.pi * 440 * np.arange(24000) / 24000) * 0.2).astype(np.float32)
     print("[Harmonia] playing a 1s 440Hz tone at 24kHz...")

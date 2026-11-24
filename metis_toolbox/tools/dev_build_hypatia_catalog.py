@@ -8,8 +8,8 @@ Job:         Turn two public astronomical datasets into the two JSON files
              hypatia_constellations.json.
 
 This is a ONE-OFF, HAND-RUN SCRIPT. It is not imported by anything, not a
-Kairos worker, and not part of the running dashboard — Matthew runs it
-manually when the catalog needs regenerating:
+Kairos worker, and not part of the running dashboard — the owner runs it
+by hand when the catalog needs regenerating:
 
     python tools/dev_build_hypatia_catalog.py
 
@@ -31,11 +31,23 @@ Upstream:    none — hand-run, imported by nothing.
 Downstream:  writes hypatia_stars.json + hypatia_constellations.json, read by
              tools/hypatia.py (never config/hypatia_lore.json).
 
-Requires:    requests (existing dependency), csv/io/json/logging/os/tempfile (stdlib).
+Requires:    requests (in requirements.txt), csv/io/json/logging/os/tempfile/
+             typing (stdlib).
 
-V0.02:       Audited 2026-07-26 — verified honest (write paths + schema match
+2026-07-26:  walkthrough audit — verified honest (write paths + schema match
              hypatia's readers, atomic writes, no dead code); Requires/Upstream/
              Downstream completed; first hermetic tests. The walkthrough finale.
+
+V0.03:       Walked through 2026-11-20 (the V0.03 walkthrough's S20). Words
+             only: the owner is "the owner", the magnitude cut no longer cites
+             a handoff document that is gone, and Requires gained typing.
+             Both source URLs still answer (checked that day: the HYG v41 CSV
+             is 33.9 MB, the sky culture 206 KB), so the script still runs.
+             The committed catalog matches what it writes: 1,025 stars (919
+             to mag 4.5, the rest line endpoints), 88 constellations, every
+             one with lore. Its downloads have no size cap and it uses
+             requests, not Hermes: allowed, as a dev-only script Felhaven
+             never imports (tests/test_network_reads.py).
 """
 
 import csv
@@ -57,7 +69,7 @@ _CONST_OUT = os.path.join(_APP_ROOT, "hypatia_constellations.json")
 _HYG_URL = "https://raw.githubusercontent.com/astronexus/HYG-Database/main/hyg/CURRENT/hygdata_v41.csv"
 _SKYCULTURE_URL = "https://raw.githubusercontent.com/Stellarium/stellarium/master/skycultures/modern/index.json"
 
-_MAG_LIMIT = 4.5   # locked (HANDOFF §1)
+_MAG_LIMIT = 4.5   # the naked-eye cut, fixed since the first build (2026-07-01)
 _REQUEST_TIMEOUT = 30
 
 # ── The standard 88 IAU constellations, abbreviation -> full name ────────────

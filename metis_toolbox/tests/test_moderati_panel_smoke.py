@@ -9,10 +9,12 @@ The Moderati host builds seven real tab bodies. The three file-backed ones are
 redirected at a temp dir so no real user state is read or written and
 construction is deterministic: cerberus (its data/vault/manifest/ledger paths —
 an absent temp data file routes CerberusPanel to its first-run gate),
-machine_spirit and themis (their _DATA_PATH → defaults). The polled bodies
-(Hephaestus/Aether, Emanon, Argus) construct side-effect-free; they only read the
-system on update(), which Kairos drives — never construction. DAEDALUS reads
-nothing until its tab is shown (tests/test_daedalus_panel_smoke.py).
+machine_spirit and themis (their _DATA_PATH → defaults), voices, and the
+Cartograph's cache, which SETTINGS' place list reads (artemis.CACHE_DIR → an
+empty folder). The polled bodies (Hephaestus/Aether, Emanon, Argus) construct
+side-effect-free; they only read the system on update(), which Kairos drives —
+never construction. DAEDALUS reads nothing until its tab is shown
+(tests/test_daedalus_panel_smoke.py).
 
     python -X utf8 -m unittest tests.test_moderati_panel_smoke
 """
@@ -31,6 +33,7 @@ import cerberus
 import machine_spirit
 import themis
 import voices
+from tools import artemis
 
 
 class TestModeratiPanelSmoke(unittest.TestCase):
@@ -74,6 +77,11 @@ class TestModeratiPanelSmoke(unittest.TestCase):
         # The MACHINE SPIRIT tab's narration-voice bar reads this at build time.
         self._orig_voices = voices._DATA_PATH
         voices._DATA_PATH = os.path.join(self._dir, "voice_config.json")
+        # SETTINGS' place list reads the Cartograph's cached areas at build
+        # time: an empty cache, never this checkout's own (six tests listed it,
+        # measured 2026-11-19 by S18).
+        self._orig_cache = artemis.CACHE_DIR
+        artemis.CACHE_DIR = os.path.join(self._dir, "no_cache")
 
         self.VitalsPanel = VitalsPanel
         self.EmanonPanel = EmanonPanel
@@ -93,6 +101,7 @@ class TestModeratiPanelSmoke(unittest.TestCase):
         machine_spirit._DATA_PATH = self._orig_ms
         themis._DATA_PATH = self._orig_themis
         voices._DATA_PATH = self._orig_voices
+        artemis.CACHE_DIR = self._orig_cache
         for f in os.listdir(self._dir):
             os.unlink(os.path.join(self._dir, f))
         os.rmdir(self._dir)

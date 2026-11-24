@@ -2,10 +2,13 @@
 test_echo.py — hermetic tests for tools/echo.py.
 
 No audio hardware, no kokoro model, no ffmpeg binary, no network: calliope's
-synthesize() and echo's ffmpeg subprocess call are both mocked. Covers Markdown
-stripping, chunk + concatenation ORDER, filename sanitisation (incl. reserved
-device names), the empty-text / empty-filename guards, missing ffmpeg, and the
-ffmpeg-present-but-encode-fails path.
+synthesize() and echo's ffmpeg subprocess call are both mocked, and
+local_audio/ is a scratch folder in every conversion test. Covers Markdown
+stripping, chunk + concatenation ORDER, filename sanitisation (incl. every
+form of reserved device name), the empty-text / empty-filename guards,
+missing ffmpeg, write-once (a taken name is refused before synthesis and again
+at the claim, and the kept file survives), and the encode-fails and
+launch-raises paths.
 
     python -X utf8 -m unittest tests.test_echo
 """
@@ -84,6 +87,15 @@ class TestSanitizeFilename(unittest.TestCase):
     def test_leading_trailing_dots_and_spaces(self):
         self.assertEqual(echo.sanitize_filename("  ..name..  "), "name.opus")
 
+    def test_every_name_windows_reserves_is_refused(self):
+        # The forms a list of the twenty-two plain names let through
+        # (measured 2026-11-21): trailing spaces, superscript digits, and the
+        # console's own two names.
+        for name in ("con .opus", "aux .opus", "COM¹", "LPT².opus",
+                     "CONIN$", "CONOUT$.opus"):
+            with self.subTest(name=name):
+                self.assertEqual(echo.sanitize_filename(name), "")
+
     def test_reserved_names_rejected(self):
         for reserved in ("CON", "nul", "Com1", "LPT9", "con.opus"):
             self.assertEqual(echo.sanitize_filename(reserved), "",
@@ -111,7 +123,21 @@ class TestAvailable(unittest.TestCase):
             self.assertEqual(echo.available(), {"ffmpeg": None, "problem": "binary_unverified: ffmpeg.exe does not match its manifest entry"})
 
 
-class TestTextToAudioGuards(unittest.TestCase):
+class _ScratchAudioDir(unittest.TestCase):
+    """Points local_audio/ at a scratch folder for every test, so no test
+    reads or writes the real one (text_to_audio checks the name there before
+    synthesis). A test that patches it again just nests."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.audio_dir = tmp.name
+        patcher = mock.patch.object(echo, "_LOCAL_AUDIO_DIR", tmp.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class TestTextToAudioGuards(_ScratchAudioDir):
     def test_empty_filename(self):
         self.assertEqual(echo.text_to_audio("hello world.", "///"),
                          {"error": "empty_filename"})
@@ -126,7 +152,7 @@ class TestTextToAudioGuards(unittest.TestCase):
                              {"error": "ffmpeg_unavailable"})
 
 
-class TestTextToAudioConversion(unittest.TestCase):
+class TestTextToAudioConversion(_ScratchAudioDir):
     def test_success_writes_path_and_concatenates_in_order(self):
         calls: list[str] = []
 
@@ -208,26 +234,82 @@ class TestTextToAudioConversion(unittest.TestCase):
             self.assertEqual(echo.text_to_audio("hello world.", "out"),
                              {"error": "synthesis_failed"})
 
+    def _convert(self, run, synth=None):
+        """text_to_audio("hello world.", "out") with the model, the WAV
+        writer and ffmpeg faked; `run` stands in for subprocess.run."""
+        synth = synth or mock.MagicMock(return_value=np.array([0.0], dtype=np.float32))
+        with mock.patch.object(echo, "_resolve", return_value="ffmpeg"), \
+                mock.patch.object(calliope, "synthesize", synth), \
+                mock.patch.object(calliope, "save_wav"), \
+                mock.patch("tools.echo.subprocess.run", run):
+            return echo.text_to_audio("hello world.", "out")
+
     def test_encode_failure_removes_partial_file(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            out_path = os.path.join(tmp, "out.opus")
-            # Simulate a partial file left by a failed encode.
-            with open(out_path, "wb") as f:
+        out_path = os.path.join(self.audio_dir, "out.opus")
+
+        def half_write(cmd, **kwargs):
+            # ffmpeg got partway into the file Echo claimed, then failed.
+            with open(cmd[-1], "wb") as f:
                 f.write(b"partial")
+            return _FakeProc(1)
 
-            with mock.patch.object(echo, "_LOCAL_AUDIO_DIR", tmp), \
-                    mock.patch.object(echo, "_resolve", return_value="ffmpeg"), \
-                    mock.patch.object(
-                        calliope, "synthesize",
-                        return_value=np.array([0.0], dtype=np.float32)), \
-                    mock.patch.object(calliope, "save_wav"), \
-                    mock.patch("tools.echo.subprocess.run",
-                               return_value=_FakeProc(1)):
-                result = echo.text_to_audio("hello world.", "out")
+        self.assertEqual(self._convert(mock.MagicMock(side_effect=half_write)),
+                         {"error": "ffmpeg_encode_failed"})
+        self.assertFalse(os.path.exists(out_path),
+                         "partial output should be removed on encode failure")
 
-            self.assertEqual(result, {"error": "ffmpeg_encode_failed"})
-            self.assertFalse(os.path.exists(out_path),
-                             "partial output should be removed on encode failure")
+    def test_a_launch_that_raises_leaves_no_file(self):
+        # ffmpeg vanishing between the check and the launch: the claimed name
+        # must not stay behind as an empty .opus in the ORPHEUS list.
+        result = self._convert(mock.MagicMock(side_effect=FileNotFoundError()))
+        self.assertEqual(result, {"error": "ffmpeg_encode_failed"})
+        self.assertEqual(os.listdir(self.audio_dir), [])
+
+
+class TestWriteOnce(_ScratchAudioDir):
+    """Echo never replaces a file in local_audio/ (its "Write-once" section).
+    Until 2026-11-21 it overwrote, and a failed encode deleted the old file."""
+
+    def _keep(self, content=b"a file the owner kept"):
+        path = os.path.join(self.audio_dir, "out.opus")
+        with open(path, "wb") as f:
+            f.write(content)
+        return path
+
+    def test_a_name_already_there_is_refused_before_synthesis(self):
+        path = self._keep()
+        synth = mock.MagicMock(return_value=np.array([0.0], dtype=np.float32))
+        run = mock.MagicMock(return_value=_FakeProc(0))
+        with mock.patch.object(echo, "_resolve", return_value="ffmpeg"), \
+                mock.patch.object(calliope, "synthesize", synth), \
+                mock.patch.object(calliope, "save_wav"), \
+                mock.patch("tools.echo.subprocess.run", run):
+            self.assertEqual(echo.text_to_audio("hello world.", "out"),
+                             {"error": "file_exists"})
+        synth.assert_not_called()   # no minutes of synthesis for nothing
+        run.assert_not_called()
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), b"a file the owner kept")
+
+    def test_a_name_taken_during_synthesis_is_refused_and_kept(self):
+        # The early check passed; then something else wrote the name while
+        # the model ran. The exclusive create catches it, and ffmpeg never
+        # runs, so the failure path can't remove that file.
+        def synth_while_another_writes(chunk, *, voice=None):
+            self._keep(b"written during synthesis")
+            return np.array([0.0], dtype=np.float32)
+
+        run = mock.MagicMock(return_value=_FakeProc(1))
+        with mock.patch.object(echo, "_resolve", return_value="ffmpeg"), \
+                mock.patch.object(calliope, "synthesize",
+                                  side_effect=synth_while_another_writes), \
+                mock.patch.object(calliope, "save_wav"), \
+                mock.patch("tools.echo.subprocess.run", run):
+            self.assertEqual(echo.text_to_audio("hello world.", "out"),
+                             {"error": "file_exists"})
+        run.assert_not_called()
+        with open(os.path.join(self.audio_dir, "out.opus"), "rb") as f:
+            self.assertEqual(f.read(), b"written during synthesis")
 
 
 class TestEncodeOnlyTakesAbsolutePaths(unittest.TestCase):
@@ -256,10 +338,14 @@ class TestEncodeOnlyTakesAbsolutePaths(unittest.TestCase):
                 run.assert_not_called()
 
     def test_absolute_paths_do(self):
-        wav, out = os.path.abspath("in.wav"), os.path.abspath("out.opus")
-        with mock.patch("tools.echo.subprocess.run", return_value=_FakeProc(0)) as run:
-            self.assertEqual(echo._encode_opus("ffmpeg", wav, out), {"path": out})
-        run.assert_called_once()
+        # The output lands in a scratch folder: _encode_opus claims the name
+        # with a real exclusive create before ffmpeg (the fake) runs.
+        with tempfile.TemporaryDirectory() as tmp:
+            wav, out = os.path.abspath("in.wav"), os.path.join(tmp, "out.opus")
+            with mock.patch("tools.echo.subprocess.run",
+                            return_value=_FakeProc(0)) as run:
+                self.assertEqual(echo._encode_opus("ffmpeg", wav, out), {"path": out})
+            run.assert_called_once()
 
 
 if __name__ == "__main__":

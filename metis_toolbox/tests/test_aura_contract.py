@@ -22,7 +22,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 from tools import aura, hermes
-from tests._fixtures import load_real_j1
+from tests._fixtures import ScratchSettings, load_real_j1
+
+
+# Settings in a scratch folder: neither this checkout's place nor its PLACE
+# pick is read, so every test asks for Home at Themis's defaults (a pick
+# would add a second fetch). test_aura_place covers the pick.
+_settings = ScratchSettings()
+
+
+def setUpModule():
+    _settings.start()
+
+
+def tearDownModule():
+    _settings.stop()
 
 
 class _FakeResp:
@@ -51,30 +65,33 @@ class _FreshCache(unittest.TestCase):
 class TestHandleNeverRaises(_FreshCache):
     """Every failure mode of the LLM path degrades to its own slug, no raise."""
 
-    def test_timeout_degrades_to_weather_timeout(self):
+    def test_timeout_degrades_to_timeout(self):
         with mock.patch("tools.aura.hermes.get", side_effect=hermes.Timeout):
             out = aura.handle()
-        self.assertEqual(out["error"], "weather_timeout")
+        self.assertEqual(out["error"], "timeout")
 
-    def test_connection_error_degrades_to_weather_offline(self):
+    def test_connection_error_degrades_to_offline(self):
         with mock.patch("tools.aura.hermes.get", side_effect=hermes.Offline):
             out = aura.handle()
-        self.assertEqual(out["error"], "weather_offline")
+        self.assertEqual(out["error"], "offline")
 
-    def test_malformed_body_degrades_to_weather_unavailable(self):
+    def test_malformed_body_degrades_to_unavailable(self):
         # A 200 whose JSON lacks current_condition -> _build raises KeyError ->
-        # the catch-all returns weather_unavailable rather than crashing.
+        # the catch-all returns unavailable rather than crashing.
         with mock.patch("tools.aura.hermes.get", return_value=_FakeResp({})):
             out = aura.handle()
-        self.assertEqual(out["error"], "weather_unavailable")
+        self.assertEqual(out["error"], "unavailable")
 
     def test_success_returns_a_full_dict(self):
         with mock.patch("tools.aura.hermes.get",
                         return_value=_FakeResp(load_real_j1())):
             out = aura.handle()
         self.assertNotIn("error", out)
-        for key in ("temp_f", "description", "astronomy", "forecast"):
+        for key in ("temp_f", "description", "forecast"):
             self.assertIn(key, out)
+        # Gone since 2026-11-14: the sun and moon reach the model through
+        # get_sky_report, never a second copy inside get_weather.
+        self.assertNotIn("astronomy", out)
 
 
 class TestFetchRaises(_FreshCache):

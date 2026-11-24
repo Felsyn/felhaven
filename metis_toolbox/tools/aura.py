@@ -20,13 +20,17 @@ Contract:    Polled + brain tool. Exposes TOOL_DEFINITION, handle(), and
              up to _STALE_MAX. fetch() always goes to the network, and its dict
              carries no `as_of`, so the panels' shape is unchanged. See the
              "Freshness" section.
+             fetch() also reads Atmospherics' PLACE pick (themis.atmos_place)
+             and, when it names a cached Artemis area, adds that place's
+             reading under data["picked"]. Everything else in the dict stays
+             Home's. See the "Picked place" section.
 
 Upstream:    kairos.py (calls fetch), pythia.py (registration + dispatch),
-             themis.py (location, read fresh per fetch)
+             themis.py (location and the PLACE pick, read fresh per fetch),
+             tools/artemis.py (place_of: a picked area's centre and name)
 Downstream:  panels/aura_panel.py (display surface), panels/hypatia_panel.py
-             (cloud cover). The `astronomy` block is read only by the model,
-             through get_weather: since 2026-09-28 Helios and Selene compute
-             the sun and moon themselves (V0.03 audit M3).
+             (cloud cover), panels/sidebar.py (the Atmospherics row's
+             temperature).
 
 Requires:    tools/hermes.py (the bounded network read): every fetch has a
              byte cap and a deadline for the whole request.
@@ -38,7 +42,7 @@ Location config:
     set, OVERRIDES the file (headless/CI). Both accept a city name, ZIP, or
     lat/lon pair — e.g. "Greenwich,UK", "10001", "51.4779,0.0".
 
-V0.02:       Audited 2026-07-25 — contract verified: handle() never raises
+2026-07-25:  walkthrough audit — contract verified: handle() never raises
              (degrades to weather_timeout / weather_offline / weather_unavailable),
              fetch() DOES raise per §2. Added test_aura_contract.py to pin that
              public surface (the _build() shaping was already covered by the
@@ -51,12 +55,41 @@ V0.02:       Audited 2026-07-25 — contract verified: handle() never raises
              fallback normalizes into _build()'s dict so no panel learns which
              host answered — see the "Fallback source" section for the two
              places the dialects genuinely differ (its WMO weather codes get
-             translated into wttr.in's WWO space, and it carries no moon data).
+             translated into wttr.in's WWO space, and it carries no moon data;
+             the second stopped mattering on 2026-11-14, below).
 
 2026-09-28:  handle() answers from a cache (V0.03 audit T7 / M2). Kairos
              already polled every 30 min, yet get_weather, get_sun_times and
              get_moon_phase each fetched again, so one question cost three
              round trips. See "Freshness" for the threading and the stale rule.
+
+2026-11-10:  fetch() adds the picked place's reading (Atmospherics' PLACE
+             dropdown). The fetch helpers take the place as an argument; with
+             none they read Home, as before.
+
+2026-11-14:  the `astronomy` block is gone from the reading. Since M3 no panel
+             read it, so only the model saw it, through get_weather: wttr.in's
+             sunrise beside Helios's, a minute apart, and empty moon fields
+             whenever Open-Meteo answered. The sun and moon reach the model
+             through get_sky_report (Ptolemy) alone (CONVENTIONS §12).
+
+2026-11-16:  Pythia tool audit (CONVENTIONS §12) — handle() answers from the
+             30-minute cache with as_of (T7, the 2026-09-28 note), the reading
+             no longer carries a second sun and moon (2026-11-14), and the
+             description follows §3's grammar. TOOL_META says weather / cached
+             / changes nothing. Its failures use the shared offline / timeout
+             / unavailable (T9, 2026-11-16); cert_error stays its own, without
+             the weather_ prefix.
+
+V0.03:       Walked through 2026-11-17 (the V0.03 walkthrough, CONVENTIONS
+             §3). Both reads go through Hermes with measured caps (re-measured
+             that day: wttr.in 39,667 and Open-Meteo 995 bytes; the caps and
+             the 12 s deadlines hold), fetch() raises only when both sources
+             fail for Home and handle() never, Themis is read at every fetch,
+             and the logs name exception classes, never a place. _build() now
+             asks Themis for Home's name only when the reply names no place;
+             Downstream gained the sidebar's row. The description, schema and
+             results are unchanged.
 """
 
 import copy
@@ -78,7 +111,7 @@ if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import themis
-from tools import hermes
+from tools import artemis, hermes
 
 log = logging.getLogger("METIS.aura")
 
@@ -180,12 +213,29 @@ def _forecast_day(day: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _fetch_raw() -> dict[str, Any]:
+@dataclass(frozen=True)
+class _Place:
+    """Where one reading is for: the string wttr.in is asked, and the lat/lon
+    Open-Meteo is asked."""
+    query: str
+    lat: float
+    lon: float
+
+
+def _home() -> _Place:
+    """Home, read fresh: Settings (or AURA_LOCATION) for wttr.in, Settings'
+    coordinates for Open-Meteo."""
+    return _Place(_location(), themis.latitude(), themis.longitude())
+
+
+def _fetch_raw(query: "str | None" = None) -> dict[str, Any]:
     """
-    Fetch wttr.in JSON for the configured location.
+    Fetch wttr.in JSON for `query`, or Home's location when None.
     Returns parsed dict or raises on failure.
     """
-    url = _WTTR_URL.format(location=_location().replace(" ", "+"))
+    if query is None:
+        query = _location()
+    url = _WTTR_URL.format(location=query.replace(" ", "+"))
     resp = hermes.get(url, cap=_WTTR_MAX_BYTES, timeout=_REQUEST_TIMEOUT)
     resp.raise_for_status()
     data: dict[str, Any] = resp.json()
@@ -205,10 +255,9 @@ def _fetch_raw() -> dict[str, Any]:
 #
 #   - weather_code stays a WWO code, wttr.in's code space, because that is what
 #     panels/aura_panel.py's _icon() maps. _WMO_TO_WWO translates.
-#   - Open-Meteo has no moon data. The astronomy dict keeps its sun fields and
-#     leaves moonrise/moonset/phase empty. Nothing on screen reads them any
-#     more (Selene computes the moon, M3), so the gap shows only in
-#     get_weather's own output.
+#   - Open-Meteo has no moon data, which no longer matters: the reading carries
+#     no sun or moon at all since 2026-11-14 (Helios and Selene compute them),
+#     so neither host's astronomy is asked for or passed on.
 
 _OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
@@ -276,33 +325,25 @@ def _place_name(query: str) -> str:
     return query
 
 
-def _om_clock(iso: str) -> str:
-    """'2026-09-15T07:02' -> '07:02 AM'. get_weather's astronomy block keeps
-    wttr.in's clock shape on the fallback too, not an ISO stamp, so the model
-    reads one format whichever host answered."""
-    try:
-        return datetime.strptime(iso, "%Y-%m-%dT%H:%M").strftime("%I:%M %p")
-    except (ValueError, TypeError):
-        return ""
+def _fetch_open_meteo(lat: "float | None" = None,
+                      lon: "float | None" = None) -> dict[str, Any]:
+    """Fetch Open-Meteo JSON for these coordinates, Home's (Themis) when
+    None. Raises on failure.
 
-
-def _fetch_open_meteo() -> dict[str, Any]:
-    """Fetch Open-Meteo JSON for the configured coordinates. Raises on failure.
-
-    Uses lat/lon from Themis directly — Open-Meteo has no place-name lookup,
-    which is also why the returned dict's `location` falls back to the
-    configured location string rather than a host-resolved city.
+    Open-Meteo has no place-name lookup, which is also why the returned
+    dict's `location` falls back to the asked-for location string rather than
+    a host-resolved city.
     """
     # Annotated, not inferred: the mixed float/str/int values make mypy widen
     # this to dict[str, object], which hermes' params type rejects (--strict
     # on tools/ is a blocking gate).
     params: dict[str, float | str | int] = {
-        "latitude": themis.latitude(),
-        "longitude": themis.longitude(),
+        "latitude": themis.latitude() if lat is None else lat,
+        "longitude": themis.longitude() if lon is None else lon,
         "current": ("temperature_2m,relative_humidity_2m,apparent_temperature,"
                     "precipitation,weather_code,cloud_cover,wind_speed_10m,uv_index"),
         "daily": ("weather_code,temperature_2m_max,temperature_2m_min,"
-                  "precipitation_probability_max,sunrise,sunset"),
+                  "precipitation_probability_max"),
         "temperature_unit": "fahrenheit",
         "wind_speed_unit": "mph",
         "precipitation_unit": "mm",
@@ -316,8 +357,9 @@ def _fetch_open_meteo() -> dict[str, Any]:
     return data
 
 
-def _from_open_meteo(raw: dict[str, Any]) -> dict[str, Any]:
-    """Shape an Open-Meteo response into the same dict _build() returns."""
+def _from_open_meteo(raw: dict[str, Any], query: "str | None" = None) -> dict[str, Any]:
+    """Shape an Open-Meteo response into the same dict _build() returns.
+    `query` names the place (Home's location when None)."""
     cur = raw["current"]
     daily = raw.get("daily") or {}
     days = daily.get("time") or []
@@ -352,7 +394,7 @@ def _from_open_meteo(raw: dict[str, Any]) -> dict[str, Any]:
 
     today = forecast[0] if forecast else {}
     return {
-        "location":     _place_name(_location()),
+        "location":     _place_name(_location() if query is None else query),
         "country":      "",
         "description":  desc,
         "temp_f":       temp_f,
@@ -370,32 +412,25 @@ def _from_open_meteo(raw: dict[str, Any]) -> dict[str, Any]:
         "uv_index":     round(float(cur.get("uv_index", 0) or 0)),
         "rain_chance_pct": today.get("rain_pct", 0),
         "cloud_cover_pct": _safe_int(cur.get("cloud_cover"), 0),
-        # Sun only — see the section note. Empty moon fields are the documented
-        # cost of the fallback; they reach only get_weather's output.
-        "astronomy": {
-            "sunrise":           _om_clock(day_field("sunrise", 0, "")),
-            "sunset":            _om_clock(day_field("sunset", 0, "")),
-            "moonrise":          "",
-            "moonset":           "",
-            "moon_phase":        "",
-            "moon_illumination": "",
-        },
         "forecast": forecast,
     }
 
 
-def _fetch_weather() -> dict[str, Any]:
-    """The shaped reading, from wttr.in if it answers and Open-Meteo if it does
-    not. Raises only when BOTH sources fail, and re-raises the *primary*
-    failure — wttr.in is the one whose behaviour the log is tracking, and a
-    fallback error would bury it."""
+def _fetch_weather(place: "_Place | None" = None) -> dict[str, Any]:
+    """The shaped reading for `place` (Home when None), from wttr.in if it
+    answers and Open-Meteo if it does not. Raises only when BOTH sources fail,
+    and re-raises the *primary* failure — wttr.in is the one whose behaviour
+    the log is tracking, and a fallback error would bury it."""
+    if place is None:
+        place = _home()
     try:
-        return _build(_fetch_raw())
+        return _build(_fetch_raw(place.query), place.query)
     except Exception as primary:
         log.warning(f"Aura: wttr.in failed ({type(primary).__name__}); "
                     f"trying Open-Meteo.")
         try:
-            data = _from_open_meteo(_fetch_open_meteo())
+            data = _from_open_meteo(_fetch_open_meteo(place.lat, place.lon),
+                                    place.query)
         except Exception as secondary:
             log.error(f"Aura: Open-Meteo also failed: {type(secondary).__name__}")
             raise primary
@@ -419,9 +454,8 @@ def _fetch_weather() -> dict[str, Any]:
 # that very fetch, and waiting beats a second, racing round trip. It is safe
 # only because the fetch is bounded: hermes ends each source's request at its
 # deadline, so the lock is held 24 s at the very worst, never for as long as a
-# slow server likes. Every dict
-# going in or out is a deep copy, so no two threads ever hold one mutable
-# object (§6).
+# slow server likes. Every dict going in or out is a deep copy, so no two
+# threads ever hold one mutable object (§6).
 
 CACHE_TTL = 1800            # s. Kairos's aura interval, so handle() normally reuses the poll
 _RETRY_AFTER = 60           # s. A failed refresh isn't retried sooner: one turn, one attempt
@@ -504,7 +538,7 @@ TOOL_DEFINITION = {
         "description": (
             "Returns current local weather conditions including temperature, "
             "feels-like, sky description, humidity, wind speed, and UV index. "
-            "Call this when the user asks about weather, temperature, what to wear, "
+            "Call when the user asks about weather, temperature, what to wear, "
             "whether to go outside, or any sky/atmospheric condition."
         ),
         "parameters": {
@@ -515,11 +549,24 @@ TOOL_DEFINITION = {
     },
 }
 
+# What the code reads about each tool here; the model never sees it
+# (CONVENTIONS §8, "TOOL_META"). network: none = local only, cached = a poll
+# or TTL cache, live = may reach the network on every call. mutates = it
+# changes state outside the turn.
+TOOL_META: dict[str, dict[str, Any]] = {
+    "get_weather": {"domain": "weather", "network": "cached", "mutates": False},
+}
 
-def _build(raw: dict[str, Any]) -> dict[str, Any]:
+
+def _build(raw: dict[str, Any], query: "str | None" = None) -> dict[str, Any]:
     cur  = raw["current_condition"][0]
     area = raw.get("nearest_area", [{}])[0]
-    city    = area.get("areaName", [{}])[0].get("value", _location())
+    # The reply's own name for the place; failing that, the query asked, or
+    # Home's location, read from Themis only then (a .get() default is
+    # evaluated every time, so it read the settings file on every reading).
+    names = area.get("areaName", [{}])[0]
+    city    = names["value"] if "value" in names else (
+        _location() if query is None else query)
     country = area.get("country",  [{}])[0].get("value", "")
     region  = area.get("region",   [{}])[0].get("value", "")
     temp_f    = int(cur["temp_F"])
@@ -536,7 +583,6 @@ def _build(raw: dict[str, Any]) -> dict[str, Any]:
     low_f  = int(today.get("mintempF", temp_f))
     high_c = int(today.get("maxtempC", temp_c))
     low_c  = int(today.get("mintempC", temp_c))
-    astro  = today.get("astronomy", [{}])[0]
     forecast = [_forecast_day(d) for d in raw.get("weather", [])]
     rain_chance_pct = forecast[0]["rain_pct"] if forecast else 0
     return {
@@ -560,18 +606,6 @@ def _build(raw: dict[str, Any]) -> dict[str, Any]:
         # Hypatia's ConditionsWidget reads this — Aura stays the single sky-data
         # fetcher, Hypatia only reads (CONVENTIONS §12).
         "cloud_cover_pct": _safe_int(cur.get("cloudcover"), 0),
-        # Raw passthrough — Aura fetches, it does not interpret. Only the model
-        # reads these now, through get_weather: Helios and Selene compute the
-        # sun and moon themselves (M3). wttr.in returns clock strings like
-        # "05:52 AM" and, on some days, "No moonrise" / "No moonset".
-        "astronomy": {
-            "sunrise":           astro.get("sunrise", ""),
-            "sunset":            astro.get("sunset", ""),
-            "moonrise":          astro.get("moonrise", ""),
-            "moonset":           astro.get("moonset", ""),
-            "moon_phase":        astro.get("moon_phase", ""),
-            "moon_illumination": astro.get("moon_illumination", ""),
-        },
         # 3-day outlook (today + 2). One scalar dict per day, in order.
         "forecast": forecast,
     }
@@ -588,16 +622,16 @@ def _fetch_or_error() -> dict[str, Any]:
         # an expired cert for nine hours on 2026-09-15 and every attempt failed
         # identically — worth saying so rather than reporting a generic outage.
         log.error("Aura: TLS certificate verification failed.")
-        return {"error": "weather_cert_error", "location": _location()}
+        return {"error": "cert_error", "location": _location()}
     except hermes.Timeout:
         log.warning("Aura: weather request timed out.")
-        return {"error": "weather_timeout", "location": _location()}
+        return {"error": "timeout", "location": _location()}
     except hermes.Offline:
         log.warning("Aura: no network connection.")
-        return {"error": "weather_offline", "location": _location()}
+        return {"error": "offline", "location": _location()}
     except Exception as e:
         log.error(f"Aura: unexpected failure: {type(e).__name__}")
-        return {"error": "weather_unavailable", "location": _location()}
+        return {"error": "unavailable", "location": _location()}
 
 
 def handle() -> dict[str, Any]:
@@ -633,17 +667,57 @@ def handle() -> dict[str, Any]:
 
 def fetch() -> dict[str, Any]:
     """Kairos entry point — raises; Kairos catches and delivers None.
-    Raises only when both wttr.in and Open-Meteo fail (see _fetch_weather).
+    Raises only when both wttr.in and Open-Meteo fail for HOME (see
+    _fetch_weather).
 
     Always goes to the network, even when the cache is fresh: this poll IS the
     refresh. If it answered from the cache, a failed poll would stop raising
     and Kairos's retry ladder would never engage. A good result is stored for
-    handle(); a failure leaves the last reading where it was."""
+    handle(); a failure leaves the last reading where it was.
+
+    When Atmospherics' PLACE names a cached area, the dict also carries
+    data["picked"]: that place's reading (see "Picked place")."""
     key = _cache_key()
     with _lock:
         data = _fetch_weather()
-        _remember(key, data)
+        _remember(key, data)            # stores its own copy: data is ours
+    area = themis.atmos_place()
+    if area:
+        data["picked"] = _fetch_picked(area)
     return data
+
+
+# ── Picked place ──────────────────────────────────────────────────────────────
+# Atmospherics' PLACE dropdown shows the weather at a cached Artemis area. Its
+# pick changes NOW and FORECAST only, so this worker fetches Home as always and
+# the pick as well, rather than switching: the sidebar row and Celestarium's
+# cloud cover read this same worker and must stay Home, and so must Pythia's
+# get_weather. The picked reading never enters the cache above: one slot keyed
+# by place would swap Home out on every poll, and handle() answers for Home
+# only. Nor does it hold _lock, which guards only that cache.
+#
+# A failed picked fetch does NOT raise: Home's reading is good, and raising
+# would blank the sidebar and Celestarium too. The panel says the place could
+# not be reached and retries at the next poll (30 min, or a new pick).
+
+def _fetch_picked(area: str) -> dict[str, Any]:
+    """The picked area's reading plus {"area", "name"}; {"area", "name",
+    "failed": True} when both sources fail; {"area", "missing": True} when the
+    area is no longer cached (recycled in the Cartograph). Never raises.
+    "failed", not "error": §2 keeps that key for slug identifiers."""
+    place = artemis.place_of(area)
+    if place is None:
+        return {"area": area, "missing": True}
+    lat, lon = float(place["lat"]), float(place["lon"])
+    tag: dict[str, Any] = {"area": area, "name": str(place["label"])}
+    try:
+        reading = _fetch_weather(_Place(f"{lat:.4f},{lon:.4f}", lat, lon))
+    except Exception as exc:
+        log.warning(f"Aura: weather for the picked place failed "
+                    f"({type(exc).__name__}).")
+        return {**tag, "failed": True}
+    reading.update(tag)
+    return reading
 
 
 # ── Standalone test ───────────────────────────────────────────────────────────

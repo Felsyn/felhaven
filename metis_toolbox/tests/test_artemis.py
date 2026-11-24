@@ -229,6 +229,27 @@ class TestVecRoundTrip(_CacheDirBase):
         with self.assertRaises(ValueError):
             artemis.read_vec(self._path())
 
+    def test_a_cut_short_name_table_is_a_value_error(self):
+        """Cut by one byte the last name came back clipped ("Main S"); cut
+        into its length it escaped as struct.error, past the panel's catch."""
+        artemis.write_vec(self._path(), [_feature([(0.0, 0.0), (1.0, 1.0)],
+                                                  name="Main St")],
+                          _FIX, artemis.LAYER_ROADS)
+        with open(self._path(), "rb") as fh:
+            whole = fh.read()
+        for cut in (1, len("Main St") + 1):
+            with self.subTest(cut=cut):
+                with open(self._path(), "wb") as fh:
+                    fh.write(whole[:-cut])
+                try:
+                    artemis.read_vec(self._path())
+                except ValueError as exc:
+                    self.assertIn("bad_vec", str(exc))
+                except Exception as exc:            # noqa: BLE001 — the point
+                    self.fail(f"escaped as {type(exc).__name__}, not ValueError")
+                else:
+                    self.fail("read a cut-short name table")
+
     def test_disk_full_leaves_no_temp(self):
         # The test_scribe idiom: a failing os.replace must not leak the temp.
         with mock.patch("tools.artemis.os.replace",
@@ -443,7 +464,7 @@ def _reference_zip():
 
 def _FakeResponse(payload, status=200):
     """What hermes.get returns: a finished Reply."""
-    return hermes.Reply(status, {}, payload, "https://census.example.invalid/x.zip")
+    return hermes.Reply(status, {}, payload)
 
 
 class TestReference(_CacheDirBase):
@@ -816,6 +837,74 @@ class TestLabels(_CacheDirBase):
         self.assertEqual(rows[0]["label"], "Deer Camp")
         self.assertEqual(rows[0]["area_id"], area)
         self.assertEqual(rows[0]["fetched"], "2026-08-10T00:00:00Z")
+
+
+class TestPlaceOf(_CacheDirBase):
+    """Atmospherics' PLACE pick reads a cached area through place_of(); the id
+    comes from the settings file, so its shape is checked before the disk."""
+
+    _AT = (51.4779, 0.0)            # Greenwich: a generic point
+
+    def _area(self, centre=_AT, **extra):
+        area = artemis.area_id(*self._AT)
+        os.makedirs(artemis.area_dir(area), exist_ok=True)
+        payload = {"center": list(centre), "schema": artemis.MANIFEST_SCHEMA}
+        payload.update(extra)
+        artemis.write_manifest(artemis.area_dir(area), payload)
+        return area
+
+    def test_a_cached_area_gives_its_centre_and_label(self):
+        area = self._area(label="Observatory")
+        self.assertEqual(artemis.place_of(area),
+                         {"lat": 51.4779, "lon": 0.0, "label": "Observatory"})
+
+    def test_an_unlabelled_area_is_named_by_its_coordinates(self):
+        area = self._area()
+        self.assertEqual(artemis.place_of(area)["label"], "51.478 0.000")
+
+    def test_an_uncached_area_is_none_without_a_log_line(self):
+        self.assertIsNone(artemis.place_of("n00p000_e000p000"))
+
+    def test_a_bad_centre_or_manifest_is_none(self):
+        for centre in ([91.0, 0.0], [1.0], ["x", 0.0]):
+            with self.subTest(centre=centre):
+                area = self._area(centre=centre)
+                with self.assertLogs("METIS.artemis", "WARNING"):
+                    self.assertIsNone(artemis.place_of(area))
+        with open(os.path.join(artemis.area_dir(area), "manifest.json"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("[not a manifest")
+        with self.assertLogs("METIS.artemis", "WARNING"):
+            self.assertIsNone(artemis.place_of(area))
+
+    def test_a_non_id_is_refused_before_the_disk_is_touched(self):
+        with mock.patch("tools.artemis.read_manifest") as read:
+            for bad in ("..", "..\\x", "_reference", "n51p478_e000p000.partial",
+                        "n51p478_e000p000\n", "C:\\x", 5, None):
+                with self.subTest(bad=bad):
+                    with self.assertLogs("METIS.artemis", "WARNING"):
+                        self.assertIsNone(artemis.place_of(bad))
+        read.assert_not_called()
+
+    def test_the_id_patterns_match_area_id_in_lockstep(self):
+        """themis.py keeps its own copy of the area-id pattern (it cannot import
+        Artemis). Both must accept what area_id() makes, and refuse the same
+        near-misses."""
+        import themis
+        made = [artemis.area_id(lat, lon) for lat, lon in
+                ((51.4779, 0.0), (-33.8688, 151.2093), (0.0, -0.0005),
+                 (89.9999, -179.9999), (-89.9999, 179.9999), (39.1, -94.579))]
+        for area in made:
+            with self.subTest(area=area):
+                self.assertTrue(artemis.is_area_id(area))
+                self.assertEqual(themis._coerce_place(area), area)
+        for bad in ("n5p478_e000p000", "n51p478_e000p00", "x51p478_e000p000",
+                    "n51p478-e000p000", "n51p478_e000p000\n", "N51P478_E000P000"):
+            with self.subTest(bad=bad):
+                self.assertFalse(artemis.is_area_id(bad))
+                with self.assertRaises(ValueError):
+                    themis._coerce_place(bad)
+        self.assertEqual(artemis._AREA_ID.pattern, themis._AREA_ID.pattern)
 
 
 class TestDeleteArea(_CacheDirBase):

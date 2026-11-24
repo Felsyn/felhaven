@@ -8,7 +8,7 @@ isn't — and because the tip is transient to the root, and a transient window
 stays withdrawn while its master is. The tip window is made invisible too, so
 nothing flashes on screen. The pointer is never moved: virgil_tooltip._pointer_xy is
 patched to put it inside or outside the widget. Events go through
-event_generate, so the real add="+" bindings run; the 500 ms timer is not
+event_generate, so the real bindtag handlers run; the 500 ms timer is not
 waited out, _fire() is called the way the timer would call it.
 
 Run from the package root:
@@ -217,8 +217,7 @@ class TestHiding(_TooltipCase):
 
     def test_a_click_hides_even_where_the_widget_binds_button_1(self):
         """Every SidebarRow and tab label binds <Button-1> on each of its
-        widgets, and Tk runs only the most specific binding a widget has, so
-        a bare <ButtonPress> would never fire there. Both handlers must."""
+        widgets. The row's click and the tip's must both run."""
         clicked = []
         for w in (self.row, self.child):
             w.bind("<Button-1>", lambda _e: clicked.append("row"))
@@ -264,24 +263,27 @@ class TestHiding(_TooltipCase):
 
 
 class TestBindings(_TooltipCase):
+    """The handlers hang on bindtags, never on the widget, so nothing a panel
+    does to its own bindings can reach them."""
 
-    def _handlers(self, widget, sequence):
-        return len([line for line in widget.bind(sequence).splitlines() if line.strip()])
-
-    def test_attaching_twice_binds_once_and_replaces_the_tip(self):
-        before = {s: self._handlers(self.row, s)
-                  for s in ("<Enter>", "<Leave>", "<Unmap>", "<Destroy>",
-                            *virgil_tooltip._PRESSES)}
+    def test_attaching_twice_tags_once_and_replaces_the_tip(self):
         self.attach(tip=CPU)
-        once = {s: self._handlers(self.row, s) for s in before}
         shared = self.attach(tip=virgil.term("ram"))
-        twice = {s: self._handlers(self.row, s) for s in before}
-        self.assertEqual(once, {s: n + 1 for s, n in before.items()})
-        self.assertEqual(twice, once)
+        self.assertEqual(self.row.bindtags().count(virgil_tooltip._TAG), 1)
+        for w in (self.row, self.child):
+            self.assertEqual(w.bindtags().count(virgil_tooltip._PRESS_TAG), 1)
+        self.assertEqual(self.row.bindtags()[0], virgil_tooltip._PRESS_TAG)
         self.pointer()
         self.row.event_generate("<Enter>")
         shared._fire()
         self.assertEqual(shared._title.cget("text"), "RAM")
+
+    def test_attach_binds_nothing_on_the_widget(self):
+        sequences = ("<Enter>", "<Leave>", "<Unmap>", "<Destroy>",
+                     *virgil_tooltip._PRESSES)
+        before = {s: self.row.bind(s) for s in sequences}
+        self.attach()
+        self.assertEqual({s: self.row.bind(s) for s in sequences}, before)
 
     def test_an_existing_enter_handler_still_fires(self):
         seen = []
@@ -295,12 +297,188 @@ class TestBindings(_TooltipCase):
         self.assertIs(shared._owner, self.row)   # and the tip armed too
         shared._hide()
 
+    def test_a_widget_that_rebinds_or_unbinds_keeps_its_tip(self):
+        """Orpheus's stop button and Echo's send button bind and unbind
+        <Enter>, <Leave> and <Button-1> each time they light or dim, with no
+        add="+". Neither may take the tip with it."""
+        for label, churn in (
+            ("bind", lambda w: [w.bind(s, lambda _e: None)
+                                for s in ("<Enter>", "<Leave>", "<Button-1>")]),
+            ("unbind", lambda w: [w.unbind(s)
+                                  for s in ("<Enter>", "<Leave>", "<Button-1>")]),
+        ):
+            with self.subTest(after=label):
+                shared = self.attach()
+                churn(self.row)
+                churn(self.child)
+                self.pointer()
+                self.row.event_generate("<Enter>")
+                shared._fire()
+                self.assertTrue(shared._shown, "the tip was lost")
+                self.child.event_generate("<ButtonPress-1>")
+                self.assertFalse(shared._shown, "the click no longer hides it")
+                self.pointer(inside=False)
+                self.row.event_generate("<Leave>")
+
+    def test_a_handler_that_breaks_cannot_starve_the_tip(self):
+        for w in (self.row, self.child):
+            for s in ("<Enter>", "<Leave>", "<Button-1>"):
+                w.bind(s, lambda _e: "break")
+        shared = self.show()
+        self.assertTrue(shared._shown)
+        self.child.event_generate("<ButtonPress-1>")
+        self.assertFalse(shared._shown)
+
+    def test_a_click_goes_to_the_nearest_attached_widget(self):
+        """A tipped control inside a tipped box: the click quiets the control,
+        and the box can still show its own tip afterwards."""
+        shared = self.attach()
+        virgil_tooltip.attach(self.child, virgil.term("ram"))
+        self.pointer(widget=self.child)
+        self.child.event_generate("<Enter>")
+        self.child.event_generate("<ButtonPress-1>")
+        self.assertIs(shared._quiet, self.child)
+
     def test_attach_never_raises(self):
         gone = tk.Label(self.host)
         gone.destroy()
         with self.assertLogs("METIS.virgil_tooltip", "WARNING"):
             virgil_tooltip.attach(gone, CPU)
             virgil_tooltip.attach(None, CPU)
+            virgil_tooltip.attach_tag(None, "speak", CPU)
+
+
+class TestWhen(_TooltipCase):
+    """attach(..., when=): asked at show time, so one widget can have a tip
+    only while it has something to explain."""
+
+    def test_a_falsy_when_means_no_tip_and_a_truthy_one_shows(self):
+        answer = [False]
+        virgil_tooltip.attach(self.row, CPU, when=lambda: answer[0])
+        shared = self.tip()
+        self.pointer()
+        self.row.event_generate("<Enter>")
+        shared._fire()
+        self.assertFalse(shared._shown)
+        answer[0] = True
+        self.row.event_generate("<Enter>")
+        shared._fire()
+        self.assertTrue(shared._shown)
+
+    def test_a_when_that_raises_means_no_tip(self):
+        virgil_tooltip.attach(self.row, CPU, when=lambda: 1 / 0)
+        shared = self.tip()
+        self.pointer()
+        self.row.event_generate("<Enter>")
+        shared._fire()
+        self.assertFalse(shared._shown)
+
+    def test_attaching_again_without_when_drops_it(self):
+        virgil_tooltip.attach(self.row, CPU, when=lambda: False)
+        shared = self.show()
+        self.assertTrue(shared._shown)
+
+
+class TestSpans(_TooltipCase):
+    """attach_tag(): a tip on a tagged span of a Text. Tag events are raised
+    by the real pointer, which is never moved here, so the handlers are called
+    the way Tk would call them; _pointer_xy is patched over the span as it is
+    for a widget."""
+
+    def setUp(self):
+        super().setUp()
+        self.text = tk.Text(self.host, width=30, height=3)
+        self.text.pack()
+        self.text.tag_configure("speak")
+        self.text.insert("end", "an answer\n")
+        self.text.insert("end", "speak aloud", ("speak", "speak1"))
+        self.text.insert("end", "\nmore\n")
+        self.host.update()
+        virgil_tooltip.attach_tag(self.text, "speak", CPU)
+        self.shared = self.tip()
+        self.span = self.shared._spans[(str(self.text), "speak")]
+
+    def over(self, index):
+        x, y, w, h = self.text.bbox(index)
+        xy = (self.text.winfo_rootx() + x + w // 2,
+              self.text.winfo_rooty() + y + h // 2)
+        patch = mock.patch.object(virgil_tooltip, "_pointer_xy", return_value=xy)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_a_hover_over_the_span_shows_its_tip(self):
+        self.over("2.3")
+        self.shared._on_enter(self.span)
+        self.shared._fire()
+        self.assertTrue(self.shared._shown)
+        self.assertEqual(self.shared._title.cget("text"), "CPU")
+
+    def test_the_pointer_off_the_span_means_no_show(self):
+        self.over("1.2")                 # the same Text, an untagged line
+        self.shared._on_enter(self.span)
+        self.shared._fire()
+        self.assertFalse(self.shared._shown)
+
+    def test_leaving_the_span_hides(self):
+        self.over("2.3")
+        self.shared._on_enter(self.span)
+        self.shared._fire()
+        self.over("1.2")
+        self.shared._on_leave(self.span)
+        self.assertFalse(self.shared._shown)
+
+    def test_a_click_hides_and_quiets_until_the_pointer_leaves(self):
+        self.over("2.3")
+        self.shared._on_enter(self.span)
+        self.shared._fire()
+        self.shared._on_click(self.span)
+        self.assertFalse(self.shared._shown)
+        baseline = self.pending()
+        self.shared._on_enter(self.span)
+        self.assertEqual(self.pending() - baseline, set())
+
+    def test_attaching_twice_binds_once(self):
+        before = self.text.tag_bind("speak", "<Enter>", None)
+        virgil_tooltip.attach_tag(self.text, "speak", virgil.term("ram"))
+        self.assertEqual(self.text.tag_bind("speak", "<Enter>", None), before)
+        self.assertEqual(self.shared._tips[(str(self.text), "speak")],
+                         virgil.term("ram"))
+
+    def test_a_per_span_tag_bound_without_add_leaves_the_tip(self):
+        """Home binds each answer's own tag for its click and hover. Those
+        are other tags; the shared one keeps the tip's handlers."""
+        before = self.text.tag_bind("speak", "<Enter>", None)
+        for s in ("<Enter>", "<Leave>", "<Button-1>"):
+            self.text.tag_bind("speak1", s, lambda _e: None)
+        self.assertEqual(self.text.tag_bind("speak", "<Enter>", None), before)
+
+    def test_unmapping_or_destroying_the_text_hides_and_forgets(self):
+        self.over("2.3")
+        self.shared._on_enter(self.span)
+        self.shared._fire()
+        self.text.pack_forget()
+        self.host.update()
+        self.assertFalse(self.shared._shown)
+        self.text.destroy()
+        self.assertNotIn((str(self.text), "speak"), self.shared._tips)
+        self.assertNotIn((str(self.text), "speak"), self.shared._spans)
+
+
+class TestSecondaryWindows(_TooltipCase):
+
+    def test_a_widget_in_a_toplevel_uses_the_roots_one_tip(self):
+        """The Rite Log and the queue box are Toplevels of the main root."""
+        window = tk.Toplevel(self.root)
+        window.attributes("-alpha", 0.0)
+        self.addCleanup(window.destroy)
+        label = tk.Label(window, text="Rites", width=20, height=3)
+        label.pack()
+        window.update()
+        if not label.winfo_viewable():
+            self.skipTest("no mapped window on this display")
+        shared = self.show(widget=label)
+        self.assertIs(shared, virgil_tooltip._shared(self.root))
+        self.assertTrue(shared._shown)
 
 
 class TestPlacement(_TooltipCase):

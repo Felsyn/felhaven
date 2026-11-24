@@ -10,7 +10,9 @@ same pattern as the panel smoke tests) exercises theme's public seams:
   - the right-click menu primitives (themed_menu builds in-theme, popup_menu
     pops and releases the grab),
   - the widget defaults (_init_widget_defaults: the selection and cursor
-    colours no widget sets, and every root that inits fonts inits them too).
+    colours no widget sets, and every root that inits fonts inits them too),
+  - place_alert, over the main window while it shows (the minimised branch
+    is in Iris's and Ammit's popup tests).
 
     python -X utf8 -m unittest tests.test_theme
 """
@@ -279,6 +281,111 @@ class WidgetDefaultsTests(unittest.TestCase):
                         callers[name].add(rel)
         self.assertIn("felhaven.py", callers["_init_fonts"])   # the scan found them
         self.assertEqual(callers["_init_fonts"], callers["_init_widget_defaults"])
+
+
+class ScrollColumnSizeTests(unittest.TestCase):
+    """set_size() and scroll_to_end(): THEMIS's form, SCRIBE's task list and
+    the Cartograph's cached-areas list reached into _canvas for these (BACKLOG,
+    routed to S26). Real geometry needs a mapped root: mapped and invisible."""
+
+    def setUp(self):
+        self.root = tk.Tk()
+        self.root.attributes("-alpha", 0.0)
+        self.root.overrideredirect(True)
+        self.root.geometry("200x300+40+40")
+        theme._init_fonts(self.root)
+        self.addCleanup(self.root.destroy)
+        self.column = theme.ScrollColumn(self.root)
+        self.column.pack(side="top", fill="x")
+        for i in range(30):
+            tk.Label(self.column.body, text=f"row {i}").pack(anchor="w")
+        self.root.update()
+        if not self.column.winfo_viewable():
+            self.skipTest("no mapped window on this display")
+
+    def _need(self, name):
+        method = getattr(self.column, name, None)
+        self.assertIsNotNone(method, f"ScrollColumn has no {name}()")
+        return method
+
+    def test_set_size_asks_for_the_room_and_the_column_scrolls_past_it(self):
+        self._need("set_size")(height=120, width=150)
+        self.root.update()
+        self.assertEqual(self.column._canvas.winfo_height(), 120)
+        self.assertEqual(int(self.column._canvas.cget("width")), 150)
+        first, last = self.column._canvas.yview()
+        self.assertLess(last - first, 1, "thirty rows in 120 px should scroll")
+
+    def test_a_size_it_was_not_given_is_left_alone(self):
+        set_size = self._need("set_size")
+        set_size(height=120, width=150)
+        set_size(height=90)
+        self.assertEqual(int(self.column._canvas.cget("width")), 150)
+        self.assertEqual(int(self.column._canvas.cget("height")), 90)
+
+    def test_scroll_to_end_shows_the_last_row(self):
+        self._need("set_size")(height=120)
+        self.root.update()
+        self._need("scroll_to_end")()
+        self.root.update()
+        self.assertEqual(self.column._canvas.yview()[1], 1.0)
+        self.column.scroll_to_top()
+        self.assertEqual(self.column._canvas.yview()[0], 0.0)
+
+
+class PlaceAlertTests(unittest.TestCase):
+    """Iris's and Ammit's popups stand alone (never `transient`) and are put
+    over the main window by place_alert. Mapped and invisible: a withdrawn
+    root takes the other branch."""
+
+    def setUp(self):
+        self.root = tk.Tk()
+        self.root.attributes("-alpha", 0.0)
+        self.root.overrideredirect(True)
+        self.root.geometry("600x450+40+40")
+        self.addCleanup(self.root.destroy)
+        self.root.update()
+        if not self.root.winfo_viewable():
+            self.skipTest("no mapped window on this display")
+        self.popup = tk.Toplevel(self.root)
+        self.popup.withdraw()
+
+    def _expected(self, w, h):
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - w) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - h) // 3
+        return max(0, x), max(0, y)
+
+    def test_a_fixed_size_is_centred_a_third_down_the_main_window(self):
+        with mock.patch.object(self.popup, "geometry") as geometry:
+            theme.place_alert(self.popup, 360, 160)
+        x, y = self._expected(360, 160)
+        geometry.assert_called_once_with(f"360x160+{x}+{y}")
+
+    def test_with_no_size_it_takes_what_the_popup_asks_for(self):
+        tk.Label(self.popup, text="a warning " * 4).pack()
+        with mock.patch.object(self.popup, "geometry") as geometry:
+            theme.place_alert(self.popup)
+        x, y = self._expected(self.popup.winfo_reqwidth(), self.popup.winfo_reqheight())
+        geometry.assert_called_once_with(f"+{x}+{y}")
+
+
+class RgbTests(unittest.TestCase):
+    """rgb() promised a ValueError for anything that isn't #RRGGBB, but int()
+    takes a sign or a space, so "#+7+8+9" read as (7, 8, 9) (2026-11-21)."""
+
+    def test_every_palette_value_parses(self):
+        for role, value in theme.C.items():
+            with self.subTest(role=role):
+                r, g, b = theme.rgb(value)
+                self.assertEqual("#%02X%02X%02X" % (r, g, b), value.upper())
+
+    def test_anything_else_is_refused(self):
+        good = theme.C["text1"]
+        for bad in ("#+7+8+9", "# 7 8 9", "#" + "G" * 6, good[1:] + "0", good[:-1],
+                    good + "0", "", "#-1-2-3"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    theme.rgb(bad)
 
 
 if __name__ == "__main__":

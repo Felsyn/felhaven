@@ -1,6 +1,8 @@
 """
 Morpheus panel — YouTube audio player (no video, ever).
 
+Job:         Play YouTube audio from your playlists or a search, with transport controls.
+
 MorpheusPanel is a bare tk.Frame tab body inside VoxArrayPanel (the MORPHEUS
 tab) — the "Vox Array" Card header + tab bar are owned by that host now. It
 keeps its own update() and stays registered with Kairos directly under the
@@ -54,15 +56,28 @@ SEARCH THREADING — a documented deviation from the house rule.
       is already in flight — same idea as Kairos's _running_threads.
 ─────────────────────────────────────────────────────────────────────────────
 
-V0.02: Audited 2026-07-25 — no code change. The search-error branch renders its
-own fixed "search failed" message (it checks for the error key, not its value),
-so the tool's slug rename to "search_failed" needs no lockstep here. NOTE: this
-panel also uses one-shot self.after() timers for transient UI feedback (the
-two-click-remove confirm window, status-flash auto-clear, save-glyph reset) that
-§6 does not list among its after()/thread exceptions — flagged for a §6 pass, not
-fixed here (see the walkthrough findings).
+Contract:    MorpheusPanel(parent), a tab body, and update(data) for Kairos
+             (below). It calls morpheus.play() and the transport functions on
+             a click; Morpheus owns the player.
 
-NOTE (2026-08-06, post-audit): that flag is retired — the §6 pass happened and
+Upstream:    panels/vox_array_panel.py builds it as the MORPHEUS tab, and
+             felhaven.py registers it with Kairos's "morpheus" worker
+             (tools.morpheus.fetch, every 2 s).
+Downstream:  tools/morpheus.py (the player, search, playlists), theme.py
+             (ScrollColumn), tools/virgil.py and
+             panels/virgil_tooltip.py (the tips)
+
+Requires:    queue, threading, tkinter (stdlib)
+
+2026-07-25: walkthrough audit — no code change. The search-error branch renders
+its own fixed "search failed" message (it checks for the error key, not its
+value), so the tool's slug rename to "search_failed" needs no lockstep here.
+NOTE: this panel also uses one-shot self.after() timers for transient UI
+feedback (the two-click-remove confirm window, status-flash auto-clear,
+save-glyph reset) that §6 does not list among its after()/thread exceptions —
+flagged for a §6 pass, not fixed here (see the walkthrough findings).
+
+2026-08-06: that flag is retired — the §6 pass happened and
 narrowed the rule instead of the code (CONVENTIONS §6, recorded in §12 dated
 2026-07-26). §6 now permits by name what the audit flagged: "a single one-shot
 after() for transient UI feedback — a status line that self-clears, a glyph that
@@ -82,15 +97,28 @@ uncancelled timer outlives the Tcl command it names and makes Tcl print
 `invalid command name` on stderr. Note the winfo_exists() guards described above
 do NOT cover this case: they protect against a destroyed *glyph* while the panel
 lives, and never run at all once the panel itself is gone.
+
+V0.03: Walked through 2026-11-23 (the V0.03 walkthrough, S35; born 2026-06-10).
+The wheel worked only over empty space in both lists, because the hand-rolled
+canvas dropped it on <Leave>, which Tk sends as the pointer moves onto a row;
+_ScrollFrame is theme.ScrollColumn plus title wrapping, as the Scriptorium's is
+(S30). A playlist row that isn't an object, or a "playlists" that isn't a list,
+stopped this panel, and so Felhaven, from opening (measured); such a row is
+skipped now, at its own position, so removal still deletes the row it shows.
+The July flag on _save_from_search's reset is already met: _reset_save_glyph
+guards winfo_exists() and the timer goes through _after_once (2026-08-06,
+2026-08-10). Three entry boxes drop the theme's own cursor colour (§7). A
+Contract, Upstream, Downstream and Requires added.
 """
 
 import queue
 import threading
 import tkinter as tk
 
-from theme import C, FONTS, PhosphorScroll
+from panels import virgil_tooltip
+from theme import C, FONTS, ScrollColumn
 
-from tools import morpheus
+from tools import morpheus, virgil
 
 # Placeholder shown in both tabs when a binary is missing. Backslash before the
 # space is intentional (the bin\ directory).
@@ -113,57 +141,28 @@ _ERROR_TEXT = {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  _ScrollFrame — vertically scrollable container.
+#  _ScrollFrame — theme.ScrollColumn plus labels that wrap to its width.
 #
-#  Same pattern as pheme_panel._ScrollFrame / midas_panel._LedgerScroll. House
-#  convention is one scroll frame per panel (copied, not shared) so panels stay
-#  decoupled — see CONVENTIONS §7. Pack content into `.inner`; register labels
-#  that should reflow to the width via add_wrap_label(); the mouse wheel binds
-#  only while hovering so stacked frames don't fight over wheel events.
+#  The Scriptorium's _ScrollFrame is the same shape (S30). Pack rows into
+#  `.body`; register labels that should reflow via add_wrap_label(). The wheel
+#  is ScrollColumn's, judged by the pointer: the hand-rolled canvas this was
+#  dropped it on <Leave>, which Tk sends as the pointer moves onto a row, so
+#  the wheel worked only over empty space (measured 2026-11-23).
 # ─────────────────────────────────────────────────────────────────────────────
 
-class _ScrollFrame(tk.Frame):
-    """Canvas + Scrollbar wrapper. Pack content into `.inner`."""
+class _ScrollFrame(ScrollColumn):
+    """theme.ScrollColumn plus width-following wrap labels. Pack into `.body`."""
 
     def __init__(self, parent):
-        super().__init__(parent, bg=C["card"])
-
-        self._canvas = tk.Canvas(self, bg=C["card"], highlightthickness=0, bd=0)
-        scroll = PhosphorScroll(self, command=self._canvas.yview)
-        self._canvas.configure(yscrollcommand=scroll.set)
-
-        scroll.pack(side="right", fill="y")
-        self._canvas.pack(side="left", fill="both", expand=True)
-
-        self.inner = tk.Frame(self._canvas, bg=C["card"])
-        self._win = self._canvas.create_window((0, 0), window=self.inner, anchor="nw")
-
+        super().__init__(parent)
         # (label, horizontal_padding_px) for width-following wrap.
         self._wrap_labels: list[tuple[tk.Label, int]] = []
 
-        self.inner.bind("<Configure>", self._on_inner_config)
-        self._canvas.bind("<Configure>", self._on_canvas_config)
-        self._canvas.bind("<Enter>", self._bind_wheel)
-        self._canvas.bind("<Leave>", self._unbind_wheel)
-
-    def _on_inner_config(self, _event) -> None:
-        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
-
     def _on_canvas_config(self, event) -> None:
-        # Pin inner to canvas width (no horizontal scroll) + reflow wrap labels.
-        self._canvas.itemconfigure(self._win, width=event.width)
+        # ScrollColumn pins the rows to the canvas width; wrap labels reflow.
+        super()._on_canvas_config(event)
         for label, pad in self._wrap_labels:
             label.config(wraplength=max(1, event.width - pad))
-
-    def _bind_wheel(self, _event) -> None:
-        self._canvas.bind_all("<MouseWheel>", self._on_wheel)
-
-    def _unbind_wheel(self, _event) -> None:
-        self._canvas.unbind_all("<MouseWheel>")
-
-    def _on_wheel(self, event) -> None:
-        # Windows wheel deltas arrive in multiples of 120.
-        self._canvas.yview_scroll(int(-event.delta / 120), "units")
 
     def add_wrap_label(self, label: tk.Label, pad: int = 24) -> None:
         """Register a label to wrap to (canvas width - pad)."""
@@ -174,10 +173,10 @@ class _ScrollFrame(tk.Frame):
 
     def clear(self) -> None:
         """Destroy all rows, drop stale wrap-label refs, scroll back to top."""
-        for w in self.inner.winfo_children():
+        for w in self.body.winfo_children():
             w.destroy()
         self._wrap_labels.clear()
-        self._canvas.yview_moveto(0)
+        self.scroll_to_top()
 
 
 class MorpheusPanel(tk.Frame):
@@ -185,6 +184,28 @@ class MorpheusPanel(tk.Frame):
 
     A bare Frame tab body inside VoxArrayPanel (the MORPHEUS tab); the Card
     header + tab bar are the host's now."""
+
+    # Hover tooltips (Virgil): a control says what a click does, so each is a
+    # glossary entry (CONVENTIONS §7). _TIPS names the widgets built once, in
+    # self.tip_targets. _ROW_TIPS names the glyph each playlist or search row
+    # builds; the row builders attach those.
+    _TIPS = {
+        "prev": virgil.term("transport_prev"),
+        "play": virgil.term("transport_play"),
+        "next": virgil.term("transport_next"),
+        "stop": virgil.term("transport_stop"),
+        "playlist_save": virgil.term("playlist_save"),
+    }
+    # The inner tabs name no module (Morpheus fills both), so each says what
+    # the tab is: a glossary entry. Keys are the tab keys in self._tabs.
+    _TAB_TIPS = {
+        "playlists": virgil.term("playlists_tab"),
+        "search": virgil.term("search_tab"),
+    }
+    _ROW_TIPS = {
+        "playlist_remove": virgil.term("playlist_remove"),
+        "search_save": virgil.term("search_save"),
+    }
 
     def __init__(self, parent):
         super().__init__(parent, bg=C["card"])
@@ -288,6 +309,10 @@ class MorpheusPanel(tk.Frame):
                 b.bind("<Button-1>", lambda e, f=fn: self._on_transport(f))
             self._btns[key] = b
 
+        self.tip_targets: dict[str, tk.Misc] = dict(self._btns)
+        for key, b in self._btns.items():
+            virgil_tooltip.attach(b, self._TIPS[key])
+
     def _on_transport(self, fn) -> None:
         """Every transport click funnels through here, so the dead-pipe refusal
         is ONE decision rather than four (and one place to test).
@@ -342,6 +367,7 @@ class MorpheusPanel(tk.Frame):
             line.pack(fill="x")
             lbl.bind("<Button-1>", lambda e, k=key: self._show_tab(k))
             self._tabs[key] = lbl
+            virgil_tooltip.attach(lbl, self._TAB_TIPS[key])
             self._lines[key] = line
 
         self._playlists_frame = tk.Frame(self, bg=C["card"])
@@ -410,7 +436,7 @@ class MorpheusPanel(tk.Frame):
 
         tk.Entry(
             row1, textvariable=self._pl_label_var, font=FONTS["small"],
-            bg=C["bar_bg"], fg=C["text1"], insertbackground=C["text1"],
+            bg=C["bar_bg"], fg=C["text1"],
             highlightthickness=1, highlightbackground=C["border"], bd=0,
         ).pack(fill="x", expand=True, side="left")
 
@@ -432,10 +458,12 @@ class MorpheusPanel(tk.Frame):
         save_btn.bind("<Button-1>", lambda e: self._on_save_playlist())
         save_btn.bind("<Enter>",    lambda e: save_btn.config(fg=C["text1"]))
         save_btn.bind("<Leave>",    lambda e: save_btn.config(fg=C["text3"]))
+        self.tip_targets["playlist_save"] = save_btn
+        virgil_tooltip.attach(save_btn, self._TIPS["playlist_save"])
 
         url_entry = tk.Entry(
             row2, textvariable=self._pl_url_var, font=FONTS["small"],
-            bg=C["bar_bg"], fg=C["text1"], insertbackground=C["text1"],
+            bg=C["bar_bg"], fg=C["text1"],
             highlightthickness=1, highlightbackground=C["border"], bd=0,
         )
         url_entry.pack(fill="x", expand=True, side="left")
@@ -459,15 +487,19 @@ class MorpheusPanel(tk.Frame):
         playlists = morpheus.load_playlists()
         if not playlists:
             tk.Label(
-                self._pl_scroll.inner,
+                self._pl_scroll.body,
                 text="no playlists — add one above",
                 font=FONTS["small_italic"], fg=C["text3"], bg=C["card"], anchor="w",
             ).pack(anchor="w", pady=(10, 0))
             return
         for idx, p in enumerate(playlists):
+            if not isinstance(p, dict):
+                # Skipped where it stands: idx stays the file position that
+                # remove_playlist() deletes by (see load_playlists).
+                continue
             url = p.get("url", "")
 
-            outer = tk.Frame(self._pl_scroll.inner, bg=C["card"])
+            outer = tk.Frame(self._pl_scroll.body, bg=C["card"])
             outer.pack(fill="x", pady=2)
 
             # ── Remove glyph — pack BEFORE the label so it lands on the right.
@@ -481,15 +513,16 @@ class MorpheusPanel(tk.Frame):
             glyph.bind("<Leave>", lambda e, g=glyph: self._pl_glyph_hover(g, C["text3"]))
             glyph.bind("<Button-1>",
                        lambda e, i=idx, g=glyph: self._on_remove_playlist(i, g))
+            virgil_tooltip.attach(glyph, self._ROW_TIPS["playlist_remove"])
 
             row = tk.Label(
-                outer, text=p.get("label", "(unnamed)"),
+                outer, text=str(p.get("label", "(unnamed)")),
                 font=FONTS["body"], fg=C["text1"], bg=C["card"],
                 anchor="w", justify="left",
             )
             row.pack(fill="x", anchor="w", side="left", expand=True)
             self._pl_scroll.add_wrap_label(row, pad=36)   # 8 (PhosphorScroll lane) + 28 (✕ glyph)
-            if url:
+            if isinstance(url, str) and url:
                 row.config(cursor="hand2")
                 row.bind("<Button-1>", lambda e, u=url: morpheus.play(u))
                 row.bind("<Enter>",    lambda e, r=row: r.config(fg=C["amber"]))
@@ -562,7 +595,7 @@ class MorpheusPanel(tk.Frame):
         bar.pack(fill="x", pady=(8, 4))
         self._search_var = tk.StringVar()
         entry = tk.Entry(bar, textvariable=self._search_var, font=FONTS["small"],
-                         bg=C["bar_bg"], fg=C["text1"], insertbackground=C["text1"],
+                         bg=C["bar_bg"], fg=C["text1"],
                          highlightthickness=1, highlightbackground=C["border"], bd=0)
         entry.pack(fill="x")
         entry.bind("<Return>", lambda e: self._on_search())
@@ -576,7 +609,7 @@ class MorpheusPanel(tk.Frame):
 
     def _result_msg(self, text: str) -> None:
         self._clear_results()
-        tk.Label(self._results.inner, text=text, font=FONTS["small_italic"],
+        tk.Label(self._results.body, text=text, font=FONTS["small_italic"],
                  fg=C["text3"], bg=C["card"], anchor="w").pack(anchor="w", pady=(6, 0))
 
     def _on_search(self) -> None:
@@ -613,7 +646,7 @@ class MorpheusPanel(tk.Frame):
             self._build_result_row(r)
 
     def _build_result_row(self, r: dict) -> None:
-        parent = self._results.inner
+        parent = self._results.body
         url = r.get("url", "")
         clickable = url.startswith(("http://", "https://"))
 
@@ -634,6 +667,7 @@ class MorpheusPanel(tk.Frame):
                 lambda e, t=r.get("title", "(untitled)"), u=url, g=save_glyph:
                     self._save_from_search(t, u, g),
             )
+            virgil_tooltip.attach(save_glyph, self._ROW_TIPS["search_save"])
 
         title = tk.Label(
             outer, text=r.get("title", "(untitled)"),

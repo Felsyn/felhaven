@@ -5,9 +5,10 @@ Metis Toolbox | Anti-Legion: ONE JOB
 
 Job:         Draw Euterpe's song ledger as plain editable JSON, with SAVE and
              RELOAD. The text box is pre-filled from euterpe.raw_text(). Its ONE
-             job is to turn edits into euterpe.replace_all() calls — every
-             validation rule and the write itself live in tools/euterpe.py,
-             and this module never opens euterpe_ledger.json directly.
+             job is to turn edits into euterpe.replace_all() calls, and the
+             base-copy row into base_snapshot() and take_base() — every
+             validation rule and every write live in tools/euterpe.py, and
+             this module never opens euterpe_ledger.json directly.
 
 Why it       The ledger is what builds out the music taste: taste_anchor()
 exists:      returns the last few keys whose source is "user", and nothing
@@ -45,8 +46,9 @@ Base copy:   Its own row, because RESTORE and TAKE FROM SAVED act on a
              dirty: the base is copied from the ledger on disk, so taking one
              mid-edit would capture the older state and report success.
 
-Staleness:   Awen records plays on a 2 s tick, so this tab can be holding text
-             the file no longer matches — a song ending mid-edit. The editor
+Staleness:   Awen records the listener's plays on a 2 s tick, Auto-DJ on or
+             off, so this tab can be holding text the file no longer matches —
+             a new song starting mid-edit. The editor
              keeps the euterpe.stamp() it loaded at and compares it back before
              writing, so SAVE refuses rather than silently clobbering that
              play. RELOAD is the way forward, and it is the operator's call
@@ -54,17 +56,31 @@ Staleness:   Awen records plays on a 2 s tick, so this tab can be holding text
 
 Upstream:    panels/vox_array_panel.py (hosts this as the TUNES tab)
 Downstream:  tools/euterpe.py (the text, the validation and the write),
-             theme.py (colors/fonts/PhosphorScroll/the context menu)
+             theme.py (colors/fonts/PhosphorScroll/the context menu),
+             tools/virgil.py and panels/virgil_tooltip.py (the base row's
+             tips)
 
-Requires:    tkinter (stdlib). No JSON handling here — that is euterpe's job.
+Requires:    tkinter, time (stdlib). No JSON handling here — that is
+             euterpe's job.
+
+V0.03:       Walked through 2026-11-18 (the V0.03 walkthrough, CONVENTIONS
+             §3), its first audit (landed 2026-09-25 in #21; scroll lane #58,
+             tips #66). No thread, no timer, every slug mapped to a sentence,
+             and SAVE still refused on a stale stamp. The owner's picks: the
+             header says "the songs you chose" (it said "what Awen has
+             played", the ledger's job before 2026-09-17), the stale-save
+             message names what really changed the file, and read_failed has
+             its own sentence. The editor stops repeating the theme's cursor;
+             Job, Staleness, Downstream and Requires caught up.
 """
 
 import time
 import tkinter as tk
 from typing import Any, Callable, Optional
 
+from panels import virgil_tooltip
 from theme import C, FONTS, PhosphorScroll, themed_menu, popup_menu
-from tools import euterpe
+from tools import euterpe, virgil
 
 
 _HINT = ('The songs you chose. Auto-DJ reads this list and never adds to it, so '
@@ -90,18 +106,29 @@ _ERROR_TEXT = {
                      "not taken. Nothing was changed.",
     "write_failed":  "The ledger could not be written — see the log. Nothing "
                      "was changed.",
+    "read_failed":   "The ledger could not be read — see the log. No base copy "
+                     "was taken.",
     "no_ledger":     "There is no ledger to take a base copy from yet — play "
                      "something first.",
 }
 
-_STALE_MSG = ("Auto-DJ recorded a play while you were editing, so this box is "
-              "out of date. Press RELOAD before saving — nothing has been "
-              "written, and your text is still here until you do.")
+_STALE_MSG = ("The list changed on disk while you were editing (a song you play "
+              "is added as it starts), so this box is out of date. Press RELOAD "
+              "before saving — nothing has been written, and your text is still "
+              "here until you do.")
 
 
 class EuterpePanel(tk.Frame):
     """The song ledger as editable text. A bare Frame tab body inside
     VoxArrayPanel; no Kairos worker, no update() — purely request-driven."""
+
+    # Hover tooltips (Virgil) for the base-copy row, each a glossary entry
+    # (CONVENTIONS §7). Keys name the widgets in self.tip_targets.
+    _TIPS = {
+        "base_copy": virgil.term("base_copy"),
+        "restore": virgil.term("base_restore"),
+        "take": virgil.term("base_take"),
+    }
 
     def __init__(self, parent: tk.Widget):
         super().__init__(parent, bg=C["card"])
@@ -110,7 +137,7 @@ class EuterpePanel(tk.Frame):
         # Set here so _load() below has something to overwrite, not create.
         self._stamp = 0.0
 
-        tk.Label(self, text="TUNES — what Awen has played",
+        tk.Label(self, text="TUNES — the songs you chose",
                  font=FONTS["card_header"], fg=C["text2"], bg=C["card"],
                  anchor="w").pack(fill="x", pady=(8, 2))
         tk.Label(self, text=_HINT, font=FONTS["small_italic"], fg=C["text3"],
@@ -130,7 +157,7 @@ class EuterpePanel(tk.Frame):
         editor_row.pack(fill="both", expand=True)
         self._editor = tk.Text(
             editor_row, font=FONTS["small"], bg=C["bar_bg"], fg=C["text1"],
-            insertbackground=C["text1"], highlightbackground=C["border"],
+            highlightbackground=C["border"],
             highlightcolor=C["amber"], highlightthickness=1, borderwidth=0,
             wrap="word", height=1, padx=6, pady=4, undo=True,
         )
@@ -162,11 +189,16 @@ class EuterpePanel(tk.Frame):
         # the one control here that does not write anything at all.
         self._base_row = tk.Frame(self, bg=C["card"])
         self._base_row.pack(fill="x", pady=(6, 0))
-        tk.Label(self._base_row, text="BASE COPY", font=FONTS["tiny"],
-                 fg=C["text3"], bg=C["card"]).pack(side="left", padx=(0, 10))
-        self._button(self._base_row, "RESTORE", C["text2"], self._on_restore)
-        self._button(self._base_row, "TAKE FROM SAVED", C["text2"],
-                     self._on_take_base, pad=(14, 0))
+        base_lbl = tk.Label(self._base_row, text="BASE COPY", font=FONTS["tiny"],
+                            fg=C["text3"], bg=C["card"])
+        base_lbl.pack(side="left", padx=(0, 10))
+        restore = self._button(self._base_row, "RESTORE", C["text2"], self._on_restore)
+        take = self._button(self._base_row, "TAKE FROM SAVED", C["text2"],
+                            self._on_take_base, pad=(14, 0))
+        self.tip_targets: dict[str, tk.Misc] = {
+            "base_copy": base_lbl, "restore": restore, "take": take}
+        for key, tip in self._TIPS.items():
+            virgil_tooltip.attach(self.tip_targets[key], tip)
         self._base_caption = tk.Label(self._base_row, text="", font=FONTS["tiny"],
                                       fg=C["text3"], bg=C["card"])
         self._base_caption.pack(side="left", padx=(14, 0))

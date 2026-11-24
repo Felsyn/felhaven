@@ -24,19 +24,36 @@ Exports:
     Card            — base card widget used by all panels
     TabHost         — Card subclass: a tab bar plus one packed active body
     PhosphorScroll  — in-theme vertical scrollbar (drop-in tk.Scrollbar replacement)
+    ScrollColumn    — the §7 scroll frame as one widget: rows go in .body;
+                      set_size() asks for room, scroll_to_top()/scroll_to_end()
     themed_menu(parent) / popup_menu(menu, event)
                     — build + show an in-theme right-click popup menu
+    place_alert(win, width=0, height=0)
+                    — centre an alert popup over the main window, or over
+                      the screen while that is minimised
 
 Upstream:    felhaven.py and sphynx_panel.py own a tk.Tk() root and call
              _init_fonts + _init_widget_defaults; felhaven also drives
              rescale_fonts on <Configure>.
              Every GUI panel imports C / FONTS / Card / TabHost /
-             PhosphorScroll / the menu helpers.
+             PhosphorScroll / ScrollColumn / the menu helpers; Iris's and
+             Ammit's alert popups call place_alert.
 Downstream:  palette.py (the colour values), tkinter
 
-V0.02:       Audited 2026-07-26 — corrected the Upstream/rescale docstrings off
-             the retired standalone-Scribe window; extracted TabHost and
-             themed_menu/popup_menu (each was copy-pasted 3x); first tests.
+Requires:    tkinter, tkinter.font (stdlib); palette.py.
+
+2026-07-26:  The first audit corrected the Upstream/rescale docstrings off
+             the retired standalone-Scribe window, extracted TabHost and
+             themed_menu/popup_menu (each was copy-pasted 3x) and added the
+             first tests.
+
+V0.03: Walked through 2026-11-21 (in the repo's first commit, 2026-06-10;
+       first audited 2026-07-26). ScrollColumn gained set_size() and
+       scroll_to_end(): THEMIS's form, SCRIBE's task list and the
+       Cartograph's cached-areas list each reached into its _canvas to size
+       it, and SCRIBE to scroll it (BACKLOG, routed here by S24). Exports
+       gains ScrollColumn, which it had never listed; TabHost's docstring
+       counted three hosts, and Pheme's makes four; Requires added.
 """
 
 import tkinter as tk
@@ -160,7 +177,9 @@ class Card(tk.Frame):
     def __init__(self, parent, label_text: str, dot_color: str, **kw):
         super().__init__(parent, bg=C["card"], highlightbackground=C["border"],
                          highlightthickness=2, padx=14, pady=12, **kw)
-        header = tk.Frame(self, bg=C["card"])
+        # Public so a panel can put a control at the header line's right end
+        # (Atmospherics' PLACE dropdown).
+        header = self.header = tk.Frame(self, bg=C["card"])
         header.pack(fill="x", anchor="w")
         dot = tk.Canvas(header, width=8, height=8, bg=C["card"], highlightthickness=0)
         dot.create_oval(1, 1, 7, 7, fill=dot_color, outline="")
@@ -184,8 +203,8 @@ class Card(tk.Frame):
 class TabHost(Card):
     """A thin tabbed card: a top tab bar plus one packed active body.
 
-    Base for the three tab hosts (Moderati, Cogitator, Vox Array), which used
-    to copy this verbatim. Two-phase build, because the tab bodies must be
+    Base for the four tab hosts (Moderati, Cogitator, Vox Array, and Pheme's
+    Scriptorium); the first three used to copy this verbatim. Two-phase build, because the tab bodies must be
     children of self.body (created by Card.__init__): the subclass calls
     super().__init__(...) first, builds its bodies, then calls
         self._build_tabs([(key, label, body, accent), ...], default=<key>)
@@ -371,6 +390,82 @@ class PhosphorScroll(tk.Canvas):
         self._redraw()
 
 
+class ScrollColumn(tk.Frame):
+    """The §7 scroll frame as one widget: put rows in `.body`, and the column
+    scrolls when it is taller than the space it gets.
+
+    The PhosphorScroll is packed first (test_scroll_lanes' rule, for the same
+    reason), and the canvas asks for a token 1 x 1, so the column claims
+    nothing a sibling needs (§7). The wheel is bound while the pointer is over
+    the column and judged by the pointer, not by <Leave>: the canvas hears
+    <Leave> as the pointer moves onto its own rows. VitalsPanel
+    (panels/hephaestus_panel.py) is the same frame written out by hand; this
+    is its shape for the panels that came after it (2026-11-10).
+    """
+
+    def __init__(self, parent, bg: str | None = None, **kw):
+        bg = bg or C["card"]
+        super().__init__(parent, bg=bg, **kw)
+        self._canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0,
+                                 width=1, height=1)
+        self._scroll = PhosphorScroll(self, command=self._canvas.yview, bg=bg)
+        self._canvas.configure(yscrollcommand=self._scroll.set)
+        self._scroll.pack(side="right", fill="y")
+        self._canvas.pack(side="left", fill="both", expand=True)
+        self.body = tk.Frame(self._canvas, bg=bg)
+        self._win = self._canvas.create_window((0, 0), window=self.body, anchor="nw")
+        self.body.bind("<Configure>", lambda _e: self._sync_region())
+        self._canvas.bind("<Configure>", self._on_canvas_config)
+        self.bind("<Enter>", self._bind_wheel, add="+")
+        self.bind("<Leave>", self._maybe_unbind_wheel, add="+")
+
+    def set_size(self, height: int | None = None, width: int | None = None) -> None:
+        """Ask for this much room for the rows, in px; past it the column
+        scrolls. The canvas asks for a token 1 x 1 until told, so a panel that
+        fits the column to its room (a _fit on <Configure>) calls this. Only a
+        size that changed is set, so the <Configure> it causes settles."""
+        if height is not None and int(self._canvas.cget("height")) != height:
+            self._canvas.configure(height=height)
+        if width is not None and int(self._canvas.cget("width")) != width:
+            self._canvas.configure(width=width)
+
+    def scroll_to_top(self) -> None:
+        self._canvas.yview_moveto(0)
+
+    def scroll_to_end(self) -> None:
+        self._canvas.yview_moveto(1.0)
+
+    def _sync_region(self) -> None:
+        self._canvas.configure(scrollregion=(
+            0, 0, self.body.winfo_reqwidth(), self.body.winfo_reqheight()))
+
+    def _on_canvas_config(self, event) -> None:
+        self._canvas.itemconfigure(self._win, width=event.width)
+
+    def _bind_wheel(self, _event=None) -> None:
+        self._canvas.bind_all("<MouseWheel>", self._on_wheel)
+
+    def _pointer_inside(self) -> bool:
+        try:
+            x, y = self.winfo_pointerxy()
+            left, top = self.winfo_rootx(), self.winfo_rooty()
+            return (left <= x < left + self.winfo_width()
+                    and top <= y < top + self.winfo_height())
+        except tk.TclError:
+            return False
+
+    def _maybe_unbind_wheel(self, _event=None) -> None:
+        if not self._pointer_inside():          # onto a row is still "over" it
+            self._canvas.unbind_all("<MouseWheel>")
+
+    def _on_wheel(self, event) -> None:
+        # Only when there is something to scroll: a column that fits would
+        # otherwise drift its rows up under a wheel turn.
+        first, last = self._canvas.yview()
+        if last - first < 1:
+            self._canvas.yview_scroll(int(-event.delta / 120), "units")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Right-click context menu
 #  Two primitives the panels compose; the item set stays panel-specific.
@@ -393,3 +488,27 @@ def popup_menu(menu: tk.Menu, event) -> None:
         menu.tk_popup(event.x_root, event.y_root)
     finally:
         menu.grab_release()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Alert popups
+# ─────────────────────────────────────────────────────────────────────────────
+
+def place_alert(win: tk.Toplevel, width: int = 0, height: int = 0) -> None:
+    """Put an alert popup a third of the way down and centred: across the
+    main window while it shows, across the screen while it is minimised.
+    For a popup that stands alone, never `transient`: Windows hides a window
+    tied to a minimised one (§12, 2026-11-17). Width and height default to
+    what the popup asks for; one of a fixed size passes it, and gets it."""
+    win.update_idletasks()
+    top = win.master.winfo_toplevel()
+    w = width or win.winfo_reqwidth()
+    h = height or win.winfo_reqheight()
+    if top.winfo_viewable():
+        x = top.winfo_rootx() + (top.winfo_width() - w) // 2
+        y = top.winfo_rooty() + (top.winfo_height() - h) // 3
+    else:
+        x = (win.winfo_screenwidth() - w) // 2
+        y = (win.winfo_screenheight() - h) // 3
+    size = f"{width}x{height}" if width and height else ""
+    win.geometry(f"{size}+{max(0, x)}+{max(0, y)}")

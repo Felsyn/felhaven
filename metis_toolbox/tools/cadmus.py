@@ -57,7 +57,17 @@ Bounds:      read_pair checks the .dbf's declared record count against the
              (2026-10-03). Now the .dbf can hold no more records than the
              .shp, whose smallest record is 12 bytes.
 
-Requires:    stdlib only — array, logging, struct, sys.
+Requires:    stdlib only — array, collections.abc, logging, struct, sys.
+
+V0.03:       Walked through 2026-11-17 (the V0.03 walkthrough, CONVENTIONS
+             §3), its first audit (born 2026-08-09 with the Cartograph). No
+             network, no files, no domain words; parts stay flat arrays and
+             the .dbf count is checked before decoding. Two malformed shapes
+             slipped the ValueError contract and now refuse: a header length
+             under the header's own 100 bytes read as "no shapes", and a
+             record too short for a shape's header escaped as struct.error
+             when it came last. Requires gained collections.abc; __main__
+             lost a second `import sys`.
 """
 
 import array
@@ -102,6 +112,8 @@ def read_shp(data: bytes) -> list[ShapeRecord]:
         raise ValueError(f"bad_shp: magic {magic} != {_SHP_MAGIC}")
     (file_words,) = struct.unpack_from(">i", data, 24)
     file_len = file_words * 2
+    if file_len < _SHP_HEADER_LEN:      # read as "no shapes", it would pass silently
+        raise ValueError(f"bad_shp: header says {file_len} bytes, less than the header")
     if file_len > len(data):
         raise ValueError(f"bad_shp: header says {file_len} bytes, have {len(data)}")
 
@@ -132,7 +144,12 @@ def _read_shape(data: bytes, view: memoryview, offset: int,
     if shape_type not in (_TYPE_POLYLINE, _TYPE_POLYGON):
         raise ValueError(f"unsupported_shape: type {shape_type} at byte {offset}")
     # PolyLine and Polygon share a layout: bbox (4 doubles), numParts,
-    # numPoints, part start indices, then the points.
+    # numPoints, part start indices, then the points. The 44 bytes up to the
+    # indices are checked first: a short last record would otherwise read
+    # past the data, and struct.error is not the ValueError callers catch.
+    if content_len < 44:
+        raise ValueError(f"bad_shp: record at {offset} holds {content_len} bytes, "
+                         f"too few for a shape's header")
     num_parts, num_points = struct.unpack_from("<ii", data, offset + 36)
     need = 44 + 4 * num_parts + 16 * num_points
     if num_parts < 0 or num_points < 0 or content_len < need:
@@ -256,7 +273,6 @@ def read_pair(shp: bytes, dbf: bytes) -> list[tuple[ShapeRecord, dict[str, str]]
 
 if __name__ == "__main__":
     import os
-    import sys
 
     if len(sys.argv) != 2 or not sys.argv[1].lower().endswith(".shp"):
         print("[Cadmus] usage: python tools/cadmus.py <path-to.shp>  "

@@ -3,10 +3,11 @@ test_orpheus.py — hermetic tests for tools/orpheus.py.
 
 No real ffmpeg process, no real audio device, no network, no real Recycle Bin:
 subprocess.run, harmonia.play/stop/is_playing and SHFileOperationW are all
-mocked. Covers available(), the local_audio/ listing, the safe-path guard (bad
-names never reach ffmpeg or the shell), decode success/failure/timeout, duration
-probing (+ its cache), delete_file()'s refusals/cache purge, and fetch()'s
-never-raise / no-ffmpeg shape.
+mocked, and the cache and fetch() tests list a scratch local_audio/. Covers
+available(), the local_audio/ listing, the safe-path guard (bad names never
+reach ffmpeg or the shell), decode success/failure/timeout, duration probing
+(+ its cache, keyed by name, size and mtime), delete_file()'s refusals, and
+fetch()'s never-raise / no-ffmpeg shape.
 
     python -X utf8 -m unittest tests.test_orpheus
 """
@@ -217,37 +218,97 @@ class TestProbeDuration(unittest.TestCase):
                 run.assert_not_called()
 
 
-class TestFileRows(unittest.TestCase):
+class _ScratchAudio(unittest.TestCase):
+    """A scratch local_audio/ with real files (the cache keys on their size
+    and mtime) and an empty duration cache, both restored afterwards."""
+
     def setUp(self):
-        self._saved_cache = dict(orpheus._duration_cache)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        patcher = mock.patch.object(orpheus, "_LOCAL_AUDIO_DIR", tmp.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        saved = dict(orpheus._duration_cache)
         orpheus._duration_cache.clear()
+        self.addCleanup(lambda: (orpheus._duration_cache.clear(),
+                                 orpheus._duration_cache.update(saved)))
 
-    def tearDown(self):
-        orpheus._duration_cache.clear()
-        orpheus._duration_cache.update(self._saved_cache)
+    def _write(self, name, data=b"opus bytes", mtime_ns=None):
+        path = os.path.join(self.dir, name)
+        with open(path, "wb") as f:
+            f.write(data)
+        if mtime_ns is not None:
+            os.utime(path, ns=(mtime_ns, mtime_ns))
+        return path
 
+
+class TestFileRows(_ScratchAudio):
     def test_probes_each_file_once_then_caches(self):
+        self._write("a.opus")
         with mock.patch.object(orpheus, "_resolve", return_value="ffmpeg"), \
-                mock.patch.object(orpheus, "list_files", return_value=["a.opus"]), \
                 mock.patch.object(orpheus, "_probe_duration", return_value=12.5) as probe:
             rows = orpheus._file_rows()
             self.assertEqual(rows, [{"name": "a.opus", "duration": 12.5}])
-            orpheus._file_rows()   # second tick: cached, no re-probe
+            orpheus._file_rows()   # second tick: unchanged, so no re-probe
         probe.assert_called_once()
 
     def test_failed_probe_is_not_cached_and_retried(self):
+        self._write("a.opus")
         with mock.patch.object(orpheus, "_resolve", return_value="ffmpeg"), \
-                mock.patch.object(orpheus, "list_files", return_value=["a.opus"]), \
                 mock.patch.object(orpheus, "_probe_duration", return_value=None) as probe:
             orpheus._file_rows()
             orpheus._file_rows()
         self.assertEqual(probe.call_count, 2)   # retried, not stuck at None forever
 
     def test_no_ffmpeg_yields_none_durations_without_probing(self):
+        self._write("a.opus")
         with mock.patch.object(orpheus, "_resolve", return_value=None), \
-                mock.patch.object(orpheus, "list_files", return_value=["a.opus"]), \
                 mock.patch.object(orpheus, "_probe_duration") as probe:
             self.assertEqual(orpheus._file_rows(), [{"name": "a.opus", "duration": None}])
+        probe.assert_not_called()
+
+    def test_a_file_still_being_written_is_probed_again_once_it_grows(self):
+        # Echo's ffmpeg writes in place; a probe mid-write reads a partial
+        # duration (46 s at 0.8 s into encoding a 24:37 file, measured
+        # 2026-11-21). Keyed by name alone, that stuck until a restart.
+        path = self._write("a.opus", b"x" * 100, mtime_ns=1_000_000_000)
+        with mock.patch.object(orpheus, "_resolve", return_value="ffmpeg"), \
+                mock.patch.object(orpheus, "_probe_duration",
+                                  side_effect=[46.0, 1477.4]) as probe:
+            self.assertEqual(orpheus._file_rows()[0]["duration"], 46.0)
+            with open(path, "ab") as f:
+                f.write(b"x" * 900)
+            os.utime(path, ns=(2_000_000_000, 2_000_000_000))
+            self.assertEqual(orpheus._file_rows()[0]["duration"], 1477.4)
+        self.assertEqual(probe.call_count, 2)
+
+    def test_a_new_file_under_a_dead_files_name_is_probed_again(self):
+        # Removed outside Felhaven (or by delete_file), then made again.
+        path = self._write("a.opus", b"old", mtime_ns=1_000_000_000)
+        with mock.patch.object(orpheus, "_resolve", return_value="ffmpeg"), \
+                mock.patch.object(orpheus, "_probe_duration",
+                                  side_effect=[10.0, 300.0]):
+            orpheus._file_rows()
+            os.remove(path)
+            self._write("a.opus", b"a longer new file", mtime_ns=3_000_000_000)
+            self.assertEqual(orpheus._file_rows(), [{"name": "a.opus", "duration": 300.0}])
+
+    def test_the_cache_keeps_only_files_still_listed(self):
+        self._write("a.opus")
+        gone = self._write("b.opus")
+        with mock.patch.object(orpheus, "_resolve", return_value="ffmpeg"), \
+                mock.patch.object(orpheus, "_probe_duration", return_value=5.0):
+            orpheus._file_rows()
+            os.remove(gone)
+            orpheus._file_rows()
+        self.assertEqual([key[0] for key in orpheus._duration_cache], ["a.opus"])
+
+    def test_a_file_gone_before_its_stat_is_left_out(self):
+        with mock.patch.object(orpheus, "_resolve", return_value="ffmpeg"), \
+                mock.patch.object(orpheus, "list_files", return_value=["ghost.opus"]), \
+                mock.patch.object(orpheus, "_probe_duration", return_value=5.0) as probe:
+            self.assertEqual(orpheus._file_rows(), [])
         probe.assert_not_called()
 
 
@@ -293,28 +354,6 @@ class TestDeleteFile(unittest.TestCase):
                 self.assertEqual(orpheus.delete_file("a.opus"),
                                  {"error": "delete_failed"})
 
-    def test_success_purges_the_duration_cache(self):
-        # Left behind, a stale entry would give a later same-named file the
-        # dead one's duration.
-        with tempfile.TemporaryDirectory() as tmp:
-            open(os.path.join(tmp, "a.opus"), "wb").close()
-            orpheus._duration_cache["a.opus"] = 12.5
-            with mock.patch.object(orpheus, "_LOCAL_AUDIO_DIR", tmp), \
-                    mock.patch.object(orpheus, "_send_to_recycle_bin",
-                                      return_value=True):
-                orpheus.delete_file("a.opus")
-        self.assertNotIn("a.opus", orpheus._duration_cache)
-
-    def test_failure_leaves_the_duration_cache_alone(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            open(os.path.join(tmp, "a.opus"), "wb").close()
-            orpheus._duration_cache["a.opus"] = 12.5
-            with mock.patch.object(orpheus, "_LOCAL_AUDIO_DIR", tmp), \
-                    mock.patch.object(orpheus, "_send_to_recycle_bin",
-                                      return_value=False):
-                orpheus.delete_file("a.opus")
-        self.assertEqual(orpheus._duration_cache.get("a.opus"), 12.5)
-
 
 class TestSendToRecycleBin(unittest.TestCase):
     """The shell call itself — mocked at the ctypes boundary, so no file is
@@ -357,16 +396,23 @@ class TestSendToRecycleBin(unittest.TestCase):
             self.assertFalse(orpheus._send_to_recycle_bin("C:\\nope\\a.opus"))
 
 
-class TestFetch(unittest.TestCase):
-    def test_no_ffmpeg_degrades(self):
-        # The slug matches play_file()/Echo — one vocabulary for "ffmpeg missing".
-        with mock.patch.object(orpheus, "available", return_value={"ffmpeg": None}):
+class TestFetch(_ScratchAudio):
+    def test_no_ffmpeg_still_lists_the_files(self):
+        # The slug matches play_file()/Echo — one vocabulary for "ffmpeg
+        # missing". The listing still comes: an empty one made a tab built
+        # while ffmpeg was there say "no files" over files it couldn't play.
+        # "playing" is still Harmonia's: Pythia may be speaking.
+        self._write("a.opus")
+        with mock.patch.object(orpheus, "_resolve", return_value=None), \
+                mock.patch.object(harmonia, "is_playing", return_value=True):
             self.assertEqual(orpheus.fetch(),
-                             {"playing": False, "files": [], "error": "ffmpeg_unavailable"})
+                             {"playing": True,
+                              "files": [{"name": "a.opus", "duration": None}],
+                              "error": "ffmpeg_unavailable"})
 
     def test_reports_playing_and_files(self):
         rows = [{"name": "a.opus", "duration": 12.5}]
-        with mock.patch.object(orpheus, "available", return_value={"ffmpeg": "ffmpeg"}), \
+        with mock.patch.object(orpheus, "_resolve", return_value="ffmpeg"), \
                 mock.patch.object(harmonia, "is_playing", return_value=True), \
                 mock.patch.object(orpheus, "_file_rows", return_value=rows):
             self.assertEqual(orpheus.fetch(), {"playing": True, "files": rows})

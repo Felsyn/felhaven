@@ -23,6 +23,7 @@ Run from the package root:
 """
 
 import http.client
+import json
 import os
 import socket
 import ssl
@@ -293,6 +294,89 @@ class TheCapRefusesBigBodies(unittest.TestCase):
                 _get(srv.url(), deadline=5)
 
 
+def _read_request(conn):
+    """The whole request: its head, then the body its Content-Length names."""
+    data = read_head(conn)
+    head, _, body = data.partition(b"\r\n\r\n")
+    length = 0
+    for line in head.split(b"\r\n")[1:]:
+        name, _, value = line.partition(b":")
+        if name.strip().lower() == b"content-length":
+            length = int(value.strip())
+    while len(body) < length:
+        chunk = conn.recv(4096)
+        if not chunk:
+            break
+        body += chunk
+    return head, body
+
+
+class ThePost(unittest.TestCase):
+    """post(): one JSON body out, the reply read under get()'s bounds."""
+
+    def _post(self, url, **kw):
+        kw.setdefault("cap", 65536)
+        kw.setdefault("timeout", _OP_TIMEOUT)
+        kw.setdefault("deadline", 5)
+        kw.setdefault("allow_http", True)
+        return hermes.post(url, json={"model": "m", "n": 1}, **kw)
+
+    def test_it_sends_the_json_body_as_a_post(self):
+        seen = []
+
+        def script(conn, stop):
+            seen.append(_read_request(conn))
+            conn.sendall(_head("200 OK", "Content-Length: 2") + b"ok")
+        with Loopback(script) as srv:
+            reply = self._post(srv.url("/api/show"))
+        self.assertEqual((reply.status_code, reply.content), (200, b"ok"))
+        head, body = seen[0]
+        self.assertTrue(head.startswith(b"POST /api/show HTTP/1.1"))
+        self.assertIn(b"content-type: application/json", head.lower())
+        self.assertIn(b"accept-encoding: identity", head.lower())
+        self.assertEqual(json.loads(body), {"model": "m", "n": 1})
+
+    def test_the_reply_is_capped(self):
+        def script(conn, stop):
+            _read_request(conn)
+            conn.sendall(_head("200 OK", "Content-Length: 5000") + b"x" * 5000)
+        with Loopback(script) as srv, self.assertRaises(hermes.TooLarge):
+            self._post(srv.url(), cap=1000)
+
+    def test_the_reply_is_bounded_by_the_deadline(self):
+        def script(conn, stop):
+            _read_request(conn)
+            conn.sendall(_head("200 OK", "Content-Length: 60"))
+            drip(conn, stop, _DRIP, _INTERVAL)
+        with Loopback(script) as srv:
+            t0 = time.monotonic()
+            with self.assertRaises(hermes.DeadlinePassed):
+                self._post(srv.url(), deadline=_DEADLINE)
+        self.assertLess(time.monotonic() - t0, _DEADLINE + _SLACK)
+
+    def test_a_redirect_is_never_followed(self):
+        """303 See Other is the redirect a POST would follow (urllib turns it
+        into a GET of the new address; it never follows a 307 for a POST, so a
+        307 here would pass with or without the rule)."""
+        calls = []
+
+        def script(conn, stop):
+            calls.append(_read_request(conn))
+            conn.sendall(_head("303 See Other", "Location: /elsewhere",
+                               "Content-Length: 0"))
+        with Loopback(script) as srv:
+            reply = self._post(srv.url("/api/show"))
+        self.assertEqual(reply.status_code, 303)
+        self.assertEqual(len(calls), 1)
+
+    def test_the_scheme_policy_is_the_same(self):
+        with self.assertRaises(hermes.Refused):
+            hermes.post("http://127.0.0.1:9/", json={}, cap=1000, timeout=1)
+        for url in ("file:///C:/Windows/win.ini", "ftp://example.invalid/x", ""):
+            with self.subTest(url=url), self.assertRaises(hermes.Refused):
+                hermes.post(url, json={}, cap=1000, timeout=1, allow_http=True)
+
+
 class ThePolicy(unittest.TestCase):
 
     def test_plain_http_needs_allow_http(self):
@@ -321,7 +405,7 @@ class ThePolicy(unittest.TestCase):
 
     def test_redirects_are_followed_by_default(self):
         def script(conn, stop):
-            head = read_head(conn)
+            head = read_head(conn, srv.requests)
             if head.startswith(b"GET /final"):
                 conn.sendall(_head("200 OK", "Content-Length: 2") + b"ok")
             else:
@@ -329,7 +413,8 @@ class ThePolicy(unittest.TestCase):
         with Loopback(script) as srv:
             reply = _get(srv.url("/start"), deadline=5)
         self.assertEqual((reply.status_code, reply.content), (200, b"ok"))
-        self.assertTrue(reply.url.endswith("/final"))
+        self.assertEqual([h.split(b" ", 2)[1] for h in srv.requests],
+                         [b"/start", b"/final"])
 
     def test_follow_redirects_false_hands_back_the_3xx(self):
         def script(conn, stop):
@@ -416,6 +501,47 @@ class ThePolicy(unittest.TestCase):
         self.assertNotIn("fake-secret-token", str(caught.exception))
         self.assertNotIn("fake-secret-token", "\n".join(logs.output))
 
+    def test_a_reply_never_holds_the_url(self):
+        """No caller reads the URL back, and an object that never holds the
+        key can't leak it into a log or onto a panel."""
+        def script(conn, stop):
+            read_head(conn)
+            conn.sendall(_head("200 OK", "Content-Length: 2") + b"ok")
+        with Loopback(script) as srv:
+            reply = _get(srv.url("/q?token=fake-secret-token"), deadline=5)
+        self.assertEqual(reply.content, b"ok")
+        for name, value in vars(reply).items():
+            self.assertNotIn("fake-secret-token", str(value), name)
+
+
+class AFailureNamesWhatFailed(unittest.TestCase):
+    """The arms of _translate the tests above don't reach. Aura answers a
+    failed handshake with words of its own (cert_error), and its tests raise
+    CertError themselves, so only a real failed handshake proves Hermes still
+    sends one."""
+
+    def test_a_handshake_that_fails_is_a_cert_error(self):
+        """A server that answers TLS with plain HTTP. OpenSSL rejects the
+        answer before any certificate is looked at, so none is needed."""
+        def script(conn, stop):
+            conn.recv(4096)                         # the ClientHello
+            conn.sendall(_head("400 Bad Request", "Content-Length: 0"))
+            while conn.recv(4096):                  # until the client hangs up
+                pass
+        with Loopback(script) as srv:
+            with self.assertRaises(hermes.CertError):
+                _get(srv.url(scheme="https"), deadline=5)
+
+    def test_a_malformed_status_line_is_a_plain_net_error(self):
+        """Not Offline: the connection worked, and the answer didn't."""
+        def script(conn, stop):
+            read_head(conn)
+            conn.sendall(b"NOT HTTP AT ALL\r\n\r\n")
+        with Loopback(script) as srv:
+            with self.assertRaises(hermes.NetError) as caught:
+                _get(srv.url(), deadline=5)
+        self.assertIs(type(caught.exception), hermes.NetError)
+
 
 class TheReply(unittest.TestCase):
 
@@ -430,6 +556,11 @@ class TheReply(unittest.TestCase):
     def test_text_uses_the_declared_charset(self):
         reply = self._reply(body="café".encode("latin-1"),
                             ctype="text/plain; charset=latin-1")
+        self.assertEqual(reply.text, "café")
+
+    def test_an_unknown_charset_falls_back_to_utf8(self):
+        reply = self._reply(body="café".encode("utf-8"),
+                            ctype="text/plain; charset=no-such-charset")
         self.assertEqual(reply.text, "café")
 
     def test_json(self):

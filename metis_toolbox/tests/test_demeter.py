@@ -12,6 +12,7 @@ Cerberus seam.
 import array
 import gzip
 import os
+import random
 import shutil
 import struct
 import sys
@@ -394,6 +395,95 @@ class TestBanding(unittest.TestCase):
         self.assertAlmostEqual(high, 600, delta=5)
 
 
+def _reference_cuts(cells):
+    """The cuts as a sorted copy finds them: the code before 2026-11-18."""
+    valid = sorted(v for v in cells if v != demeter.NODATA)
+    if not valid or valid[-1] - valid[0] < demeter.LOW_RELIEF_M:
+        return None
+    return (valid[len(valid) // 3], valid[2 * len(valid) // 3])
+
+
+def _reference_ppm(cells, size):
+    """The PPM as a list of one colour per cell built it: the code before
+    2026-11-18."""
+    cuts = _reference_cuts(cells)
+    lut = (bytes(demeter.RGB_NODATA), bytes(demeter.RGB_VALLEY),
+           bytes(demeter.RGB_MID), bytes(demeter.RGB_PEAK))
+    out = bytearray(b"P6\n%d %d\n255\n" % (size, size))
+    for v in cells:
+        if v == demeter.NODATA:
+            out += lut[0]
+        elif cuts is None:
+            out += lut[2]
+        else:
+            out += lut[1] if v < cuts[0] else lut[2] if v < cuts[1] else lut[3]
+    return bytes(out)
+
+
+class TestTheRasterStageIsTheSameBytes(unittest.TestCase):
+    """The raster stage builds no object per cell since 2026-11-18 (the
+    memory guard below). Same cuts, same PPM, same min and max as the code
+    it replaced, on every awkward grid."""
+
+    @staticmethod
+    def _grids(size=16):
+        rnd = random.Random(11)
+        n = size * size
+        nodata = demeter.NODATA
+        yield "random with gaps", array.array(
+            "h", (nodata if i % 7 == 0 else rnd.randint(300, 2200) for i in range(n)))
+        yield "few heights, cuts on duplicates", array.array(
+            "h", (rnd.choice((500, 500, 600, 700, 700, 700)) for _ in range(n)))
+        yield "below sea level", array.array("h", (rnd.randint(-86, 120) for _ in range(n)))
+        yield "the int16 ends", array.array(
+            "h", (rnd.choice((-32767, 0, 32767)) for _ in range(n)))
+        yield "low relief", array.array("h", (rnd.randint(400, 405) for _ in range(n)))
+        yield "one valid cell", array.array("h", [nodata] * (n - 1) + [812])
+        yield "all missing", array.array("h", [nodata] * n)
+
+    def test_the_cuts_and_the_ppm(self):
+        for label, cells in self._grids():
+            with self.subTest(label):
+                self.assertEqual(demeter.band_thresholds(cells), _reference_cuts(cells))
+                self.assertEqual(demeter.render_ppm(cells, size=16),
+                                 _reference_ppm(cells, 16))
+
+    def test_write_bins_min_and_max(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for label, cells in self._grids():
+                valid = [v for v in cells if v != demeter.NODATA]
+                with self.subTest(label):
+                    if not valid:
+                        with self.assertRaises(artemis.IngestError):
+                            demeter.write_bin(os.path.join(tmp, "t.bin"), cells,
+                                              _FIX, size=16)
+                        continue
+                    info = demeter.write_bin(os.path.join(tmp, "t.bin"), cells,
+                                             _FIX, size=16)
+                    self.assertEqual((info["elev_min_m"], info["elev_max_m"]),
+                                     (min(valid), max(valid)))
+
+
+class TestTheRasterStageMemory(unittest.TestCase):
+
+    def test_write_bin_and_write_derived_cost_a_few_grids(self):
+        """A list per cell cost 45.8x the grid here at 256 x 256 (95.5 MB at
+        the real 1024); arrays and byte tables cost 3.8x (measured
+        2026-11-18). A literal limit, never a constant under test."""
+        size = 256
+        rnd = random.Random(7)
+        cells = array.array("h", (rnd.randint(300, 2200) for _ in range(size * size)))
+        with tempfile.TemporaryDirectory() as tmp:
+            tracemalloc.start()
+            try:
+                demeter.write_bin(os.path.join(tmp, "t.bin"), cells, _FIX, size=size)
+                demeter.write_derived(tmp, cells, size=size)
+                peak = tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+        self.assertLess(peak, 10 * len(cells) * cells.itemsize)
+
+
 class TestRaster(_CacheBase):
 
     def _banded_cells(self, size=6):
@@ -452,11 +542,34 @@ class TestRaster(_CacheBase):
         self.assertTrue(os.path.exists(os.path.join(
             area_dir, demeter._DERIVED_DIR, demeter._PPM_NAME)))
 
+    def test_a_corrupt_cached_raster_is_rebuilt(self):
+        """A damaged deflate stream is zlib.error, not an OSError: it escaped
+        raster(), and the Cartograph's catch, where a missing one is rebuilt."""
+        size = 6
+        cells = self._banded_cells(size)
+        area_dir = artemis.area_dir(self.area)
+        os.makedirs(area_dir)
+        demeter.write_bin(os.path.join(area_dir, demeter._BIN_NAME),
+                          cells, _FIX, size=size)
+        demeter.write_derived(area_dir, cells, size=size)
+        ppm_path = os.path.join(area_dir, demeter._DERIVED_DIR, demeter._PPM_NAME)
+        with open(ppm_path, "rb") as fh:
+            good = fh.read()
+        with open(ppm_path, "wb") as fh:          # header intact, stream garbled
+            fh.write(good[:12] + bytes(b ^ 0xFF for b in good[12:40]) + good[40:])
+        try:
+            ppm = demeter.raster(self.area)
+        except Exception as exc:                  # noqa: BLE001 — the point
+            self.fail(f"raster() escaped with {type(exc).__name__}")
+        self.assertEqual(ppm, demeter.render_ppm(cells, size=size))
+        with open(ppm_path, "rb") as fh:          # and the cache is mended
+            self.assertEqual(gzip.decompress(fh.read()), ppm)
+
     def test_raster_without_terrain_raises(self):
         with self.assertRaises(FileNotFoundError):
             demeter.raster(self.area)
 
-    def test_elevation_at(self):
+    def test_sample_reads_the_committed_grid_north_up(self):
         size = 8
         cells = array.array("h", [r * 10 for r in range(size)
                                   for _ in range(size)])
@@ -464,12 +577,11 @@ class TestRaster(_CacheBase):
         os.makedirs(area_dir)
         demeter.write_bin(os.path.join(area_dir, demeter._BIN_NAME),
                           cells, _FIX, size=size)
-        north = demeter.elevation_at(self.area, 0.0,
-                                     artemis.HALF_WIDTH_M * 0.9)
-        south = demeter.elevation_at(self.area, 0.0,
-                                     -artemis.HALF_WIDTH_M * 0.9)
+        info, loaded = demeter.load(self.area)
+        north = demeter.sample(info, loaded, 0.0, artemis.HALF_WIDTH_M * 0.9)
+        south = demeter.sample(info, loaded, 0.0, -artemis.HALF_WIDTH_M * 0.9)
         self.assertLess(north, south)
-        self.assertIsNone(demeter.elevation_at(self.area, 1e7, 0.0))
+        self.assertIsNone(demeter.sample(info, loaded, 1e7, 0.0))
 
 
 class TestIngest(_CacheBase):
@@ -477,7 +589,7 @@ class TestIngest(_CacheBase):
     @staticmethod
     def _Resp(payload, status=200):
         """What hermes.get returns: a finished Reply."""
-        return hermes.Reply(status, {}, payload, "https://ot.example.invalid/")
+        return hermes.Reply(status, {}, payload)
 
     def test_sealed_vault_is_slugged_before_any_network(self):
         with mock.patch.object(cerberus, "is_unlocked", return_value=False), \
@@ -638,6 +750,37 @@ class TestIngest(_CacheBase):
                                threading.Event(), lambda m: None)
         self.assertEqual(len(logs.output), 1)
         self.assertLess(len(logs.output[0]), 500)
+
+    def test_a_reply_repeating_the_key_never_puts_it_in_the_log(self):
+        """OpenTopography's error replies repeat the key they were sent
+        (measured 2026-11-18, with a made-up key, as a 401). One that arrives
+        as a 200 fails the parse, and its first 200 bytes went to the log."""
+        key = "Ab3dEf9FakeKey0123456789abcdefXY"    # a fixture, never a key
+        bodies = {
+            # OpenTopography's own wording, as it answered.
+            "the API's error": (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><error>'
+                f"Error: Not a valid format API Key: {key}. Please register for "
+                "an API key at www.opentopography.org</error>"),
+            # The key across the excerpt's 200th byte: no head of it may stay.
+            "across the cut": "x" * 195 + key + " was refused",
+            # The key as the first token: quoted, lowercased, in the slug.
+            "in the slug": f"{key.upper()} is not a key we know so please "
+                           "register for a new one at the portal today",
+        }
+        for label, body in bodies.items():
+            with self.subTest(label):
+                p1, p2 = self._unlocked()
+                with p1, mock.patch.object(cerberus, "vault_get", return_value=key), \
+                     mock.patch("tools.demeter.hermes.get",
+                                return_value=self._Resp(body.encode())), \
+                     self.assertLogs("METIS.demeter", "ERROR") as logs:
+                    with self.assertRaises(artemis.IngestError) as ctx:
+                        demeter.ingest(self.area, _FIX, artemis.bbox(*_FIX),
+                                       threading.Event(), lambda m: None)
+                said = " ".join(logs.output + [str(ctx.exception)]).lower()
+                self.assertNotIn(key[:6].lower(), said)
+                self.assertIn("<key>", " ".join(logs.output))
 
     def test_cancel_after_download(self):
         cancel = threading.Event()

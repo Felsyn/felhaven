@@ -75,6 +75,17 @@ class TestCheckWifi(unittest.TestCase):
                         side_effect=subprocess.TimeoutExpired("netsh", 2)):
             self.assertEqual(aether._check_wifi(), "unknown")
 
+    def test_netsh_runs_by_its_absolute_system32_path(self):
+        # A bare "netsh" runs a netsh.exe from the working folder before
+        # System32's (measured 2026-11-17).
+        with mock.patch("subprocess.run",
+                        return_value=_run_returning(_NETSH_CONNECTED)) as run:
+            aether._check_wifi()
+        program = run.call_args.args[0][0]
+        self.assertTrue(os.path.isabs(program), program)
+        self.assertTrue(os.path.normcase(program).endswith(
+            os.path.normcase(os.path.join("System32", "netsh.exe"))), program)
+
 
 def _http(status=200, text=""):
     """A hermes.Reply stand-in: status code and body text."""
@@ -159,6 +170,7 @@ class TestCheckOllama(unittest.TestCase):
         # this is what keeps the two derivations in lockstep.
         import pythia
         self.assertEqual(aether._OLLAMA_VERSION_URL, pythia._BASE_URL + "/api/version")
+        self.assertEqual(aether.ollama_base_url(), pythia._BASE_URL)   # Talos's too
 
     def test_a_stray_scheme_in_the_host_is_tolerated(self):
         for host in ("127.0.0.1:11435", "http://127.0.0.1:11435",
@@ -192,9 +204,8 @@ class TestHandleContract(unittest.TestCase):
         import inspect
         source = inspect.getsource(aether).lower()
         self.assertNotIn("anthropic.com", source)
-        desc = aether.TOOL_DEFINITION["function"]["description"].lower()
-        for word in ("anthropic", "claude"):
-            self.assertNotIn(word, desc)
+        # The description half moved to test_asclepius with get_machine_status
+        # (2026-11-14): Aether no longer has a tool description of its own.
 
     def test_fetch_is_handle(self):
         # Kairos polls fetch(); the model calls handle(). They are the same object

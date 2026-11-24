@@ -24,21 +24,55 @@ Idempotent:  Calling setup_logging() more than once will NOT attach
              duplicate handlers — guarded by a flag on the root logger.
              Without this guard, two callers double every log line.
 
-Upstream:    felhaven.py (and any other program entry point)
-Downstream:  emanon.py reads the files this writes
+Errors:      Both entry points run under pythonw (Felhaven.bat starts Sphynx,
+             which spawns felhaven.py), where sys.stderr is None, so anything
+             Python or Tk would print about an uncaught exception went nowhere.
+             setup_logging() therefore also installs threading.excepthook and
+             sys.excepthook, and log_tk_errors(root) points a Tk root's
+             report_callback_exception here. Each logs the exception with its
+             traceback, as METIS.<program>: ERROR for a Tk callback or a
+             thread, CRITICAL for one that ended the program. log_uncaught()
+             is the one path, so a failure (class, file, line) is logged once a
+             run: a <Motion> handler that raises can't fill the log, and an
+             entry point that logged its own start failure isn't logged twice
+             by sys.excepthook. sys.excepthook passes the exception on to the
+             hook it replaced, so a console run still prints it. The console
+             handler is added only when there is a stderr to write to.
 
-Requires:    stdlib only (logging, logging.handlers, sys, pathlib)
+Contract:    setup_logging(program, level) -> Path
+             log_tk_errors(root)        — call once per Tk root, after it exists
+             log_uncaught(where, exc_type, exc, tb, level=ERROR)
+                                        — log one exception nothing caught
 
-V0.02:       Audited 2026-07-26 — dropped an unused `import os`; added the used
-             `sys` to Requires. emanon keeps its own DELIM / LOG_DIR, re-derived
-             independently per §5 and lockstep-tested (kept two copies by choice
-             this session, not collapsed). First tests.
+Upstream:    felhaven.py and sphynx_panel.py, the two program entry points.
+Downstream:  emanon.py reads the files this writes (every logs/*.log).
+
+Requires:    stdlib only (logging, logging.handlers, sys, threading, traceback,
+             pathlib)
+
+2026-07-26:  The first audit dropped an unused `import os` and added the used
+             `sys` to Requires. emanon keeps its own DELIM / LOG_DIR,
+             re-derived independently per §5 and lockstep-tested (kept two
+             copies by choice that session, not collapsed). First tests.
+
+V0.03: Walked through 2026-11-21 (in the repo's first commit, 2026-06-10;
+       first audited 2026-07-26). The error hooks S25 put in felhaven.py moved here, with
+       sys.excepthook added, so Sphynx's gate gets them too: it ran under
+       pythonw without logging at all (BACKLOG, routed here by S25), and
+       now writes logs/sphynx.log. The console handler wrote to a stderr of
+       None under pythonw, so every record failed inside it and was
+       swallowed; it is now added only when there is one. Upstream named
+       "any other program entry point" while Sphynx called nothing.
 """
 
 import logging
 import logging.handlers
 import sys
+import threading
+import traceback
 from pathlib import Path
+from types import TracebackType
+from typing import Any
 
 # ── Where logs live ───────────────────────────────────────────────────────────
 # Anchored to THIS file's directory, not sys.argv[0] — the lesson from the
@@ -134,10 +168,12 @@ def setup_logging(program: str, level: int = logging.INFO) -> Path:
     except Exception as e:
         print(f"[metis_logging] file handler failed: {e}", file=sys.stderr)
 
-    # Console handler — handy while developing; harmless in production.
-    console = logging.StreamHandler(sys.stderr)
-    console.setFormatter(formatter)
-    handlers.append(console)
+    # Console handler — handy while developing. Only when there is a stderr:
+    # under pythonw it is None, and a handler on it failed on every record.
+    if sys.stderr is not None:
+        console = logging.StreamHandler(sys.stderr)
+        console.setFormatter(formatter)
+        handlers.append(console)
 
     root.setLevel(level)
     for h in handlers:
@@ -147,10 +183,78 @@ def setup_logging(program: str, level: int = logging.INFO) -> Path:
     setattr(root, _GUARD_ATTR, True)
     setattr(root, "_metis_log_path", log_path)
 
+    # Exceptions nothing caught go to this program's log (see Errors).
+    _program[0] = program
+    if sys.excepthook is not _log_program_exception:    # never chain to itself
+        _previous_excepthook[0] = sys.excepthook
+    threading.excepthook = _log_thread_exception
+    sys.excepthook = _log_program_exception
+
     logging.getLogger("METIS.logging").info(
         f"logging online → {log_path} (level={logging.getLevelName(level)})"
     )
     return log_path
+
+
+# ── Exceptions nothing caught (see the module docstring's Errors) ─────────────
+# The program's name, for the logger (METIS.<program>), and the sys.excepthook
+# setup_logging replaced, which still prints to a console that has one.
+_program: list[str] = ["logging"]
+_previous_excepthook: list[Any] = [sys.__excepthook__]
+# Each failure, (class, file, line it was raised from), is logged once a run.
+# Tk callbacks report on the main thread and threads on their own: hence the lock.
+_seen_failures: set[tuple[str, str, int]] = set()
+_seen_lock = threading.Lock()
+
+
+def log_uncaught(where: str, exc_type: type[BaseException],
+                 exc: BaseException | None, tb: TracebackType | None,
+                 level: int = logging.ERROR) -> None:
+    """Log an exception nothing caught, with its traceback, as METIS.<program>
+    — the first time this failure is seen this run."""
+    frames = traceback.extract_tb(tb) if tb is not None else []
+    last = frames[-1] if frames else None
+    key = (exc_type.__name__, last.filename if last else "",
+           (last.lineno or 0) if last else 0)
+    with _seen_lock:
+        if key in _seen_failures:
+            return
+        _seen_failures.add(key)
+    # A thread's exception value may be None (threading.ExceptHookArgs);
+    # logging formats that as it is, though its annotation wants an instance.
+    info: Any = (exc_type, exc, tb)
+    logging.getLogger(f"METIS.{_program[0]}").log(
+        level, f"{where} raised {exc_type.__name__}", exc_info=info)
+
+
+def _log_callback_exception(exc_type: type[BaseException], exc: BaseException,
+                            tb: TracebackType | None) -> None:
+    """A Tk root's report_callback_exception: Tk printed to stderr."""
+    log_uncaught("a Tk callback", exc_type, exc, tb)
+
+
+def _log_thread_exception(args: threading.ExceptHookArgs) -> None:
+    """threading.excepthook. SystemExit is a thread's way of stopping, as in
+    the default hook."""
+    if args.exc_type is SystemExit:
+        return
+    name = args.thread.name if args.thread is not None else "a thread"
+    log_uncaught(f"thread {name}", args.exc_type, args.exc_value, args.exc_traceback)
+
+
+def _log_program_exception(exc_type: type[BaseException], exc: BaseException,
+                           tb: TracebackType | None) -> None:
+    """sys.excepthook: an exception that ended the program. Logged, then
+    handed to the hook it replaced, which prints it where there is a console."""
+    if not issubclass(exc_type, KeyboardInterrupt):
+        log_uncaught("the program", exc_type, exc, tb, logging.CRITICAL)
+    _previous_excepthook[0](exc_type, exc, tb)
+
+
+def log_tk_errors(root: Any) -> None:
+    """Send a Tk root's callback exceptions to the log (see Errors). Call once,
+    after the root exists."""
+    root.report_callback_exception = _log_callback_exception
 
 
 # ── Standalone test ───────────────────────────────────────────────────────────

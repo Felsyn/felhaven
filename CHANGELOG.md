@@ -14,6 +14,312 @@ New here? Start with [`README.md`](README.md) for what Felhaven is,
 [`SETUP.md`](SETUP.md) to run it, and [`CONVENTIONS.md`](CONVENTIONS.md) for how
 the code is put together.
 
+- `2026-11-23` — `tests/test_home_panel_smoke.py`: both status-wrap tests raise Auto-DJ's line through Home's own poll. The flake was the poll, not the settle: a line set by hand went back to "ask the oracle" mid-settle, 22 runs in 24 at four at once.
+- `2026-11-23` — `tests/test_tool_output_contract.py`: `_ALLOWED_VERSIONS` is `{"0.03"}`; all 92 source files carry `V0.03`, and the V0.03 walkthrough ends (S36).
+- `2026-11-23` — `panels/cerberus_panel.py`: five entry boxes drop the theme's own cursor colour, the last such boxes in the tree.
+- `2026-11-23` — `README.md`, `CONVENTIONS.md`, `README_PANTHEON/`: the Scriptorium and Atmospherics rows, §1's layout line, §3's marker wording, and six stubs' Files and Test lines catch up.
+- `2026-11-23` — `tests/test_home_panel_smoke.py`: the wrap test settles until the geometry stops moving; three fixed rounds lost to a loaded full run twice.
+- `2026-11-23` — `tools/morpheus.py`: `play_music` answers once the track plays or fails (the owner's pick); it said `now_playing` while YouTube refused the stream. `play()` now says whether it sent anything.
+- `2026-11-23` — `tools/morpheus.py`: `set_volume(nan)` no longer sets full volume; a level that isn't a finite number changes nothing.
+- `2026-11-23` — `panels/morpheus_panel.py`, `tools/morpheus.py`: a playlist row that isn't an object, or a `playlists` that isn't a list, no longer stops Felhaven opening; the row is skipped where it stands.
+- `2026-11-23` — `panels/morpheus_panel.py`: both lists scroll with `theme.ScrollColumn` (the wheel worked only over empty space); three entry boxes drop the theme's cursor colour.
+- `2026-11-23` — `tools/morpheus.py`, `panels/morpheus_panel.py`: words, Contract, Upstream/Downstream, Requires; both marked `V0.03` (S35). Five Morpheus test files stop printing to the console.
+- `2026-11-23` — `tools/daedalus.py`, `panels/daedalus_panel.py`: words (V0.02 called the only marker, a closed BACKLOG item cited, timings re-measured at 0.36 s and 0.23 s); both marked `V0.03` (S34); a test's warning no longer reaches the console.
+- `2026-11-23` — `tools/callimachus.py`: the address guard refuses ::/96, the old IPv4-compatible form Python counts as global; `::127.0.0.1` passed as public (Windows answered "unreachable network").
+- `2026-11-23` — `tools/callimachus.py`: `fetch_page` refuses a page that isn't text before reading its body; a PDF or an image came back as 4,000 characters of its bytes, about 1,700 of them replacement characters.
+- `2026-11-23` — `tools/callimachus.py`: a result's title is capped like its snippet, and `search_web`'s catch-all logs the exception's class only, since that request carries the Brave key.
+- `2026-11-23` — `tools/callimachus.py`: words, Contract, Requires; marked `V0.03` (S33). `tests/test_callimachus.py`: seven warnings that reached the console are caught with `assertLogs`.
+- `2026-11-23` — `tools/herodotus.py`: one document whose time Windows can't convert (before 1970, past 9999) no longer fails the whole listing; it lists with a blank time, and one it can't stat is skipped.
+- `2026-11-23` — `tools/herodotus.py`: list and search skip an entry that resolves outside the archive; search read the file at the far end of a symlink, which read and edit already refused.
+- `2026-11-23` — `tools/herodotus.py`: an infinite offset is `bad_arguments` (it raised out of `read_document`), and `source` stays on one line (a newline in it closed the front matter early).
+- `2026-11-23` — `tools/herodotus.py`: words, Contract, Law, Requires; marked `V0.03` (S32). `tests/test_herodotus.py`: four warnings that reached the console are caught with `assertLogs`.
+- `2026-11-23` — `tools/zeno.py`: `round()`'s hidden power is bounded and the steps have a 4,000-character budget; `round(5, -100000000)` ran past 20 s, and a 1,703-character expression returned 19.3 MB of steps.
+- `2026-11-23` — `tools/zeno.py`: a negative base to a fractional power is `math_domain_error`, and a call with the wrong arguments `bad_arguments: <function>`; both were `evaluation_failed: TypeError`, logged as an ERROR.
+- `2026-11-23` — `panels/zeno_panel.py`: ANS keeps the result as Zeno returned it; `2**100`'s ANS read 1.26765e+30, and an integer past ~1e308 raised out of the Return key.
+- `2026-11-23` — `tools/eudoxus.py`: `convert()` reads "5. cups", "+5 m" and "1,000 ft"; each was an unknown unit, the number's tail taken for the unit.
+- `2026-11-23` — `tools/zeno.py`, `tools/eudoxus.py`, `panels/zeno_panel.py`, `panels/eudoxus_panel.py`: words, Contract, Upstream/Downstream, Requires; two entry boxes drop the theme's cursor colour; all four marked `V0.03` (S31).
+- `2026-11-23` — `tools/pheme.py`: a feed that declares an XML entity is refused, and each story field is bounded; one 1,000,000-character title froze the Scriptorium for 137 s, and one entity grew a 900 KB feed into a 54 M-character title.
+- `2026-11-23` — `tools/pheme.py`, `panels/pheme_panel.py`: the feed config is checked row by row (`load_feeds()`); a row with no id stopped Felhaven from opening, and a bad row now costs only that feed.
+- `2026-11-23` — `tools/pheme.py`: the per-feed byte cap is 2 MiB, 4x the largest feed again (The Register, 300,830 B; the owner's pick), so its deadline is about 21 s.
+- `2026-11-23` — `tools/pheme.py`: the read marks load on first use, not at import; importing Pythia read this checkout's `pheme_read.json` in every test run.
+- `2026-11-23` — `panels/pheme_panel.py`: both surfaces scroll with `theme.ScrollColumn` (the wheel worked only below the last story); a failed save of the open sections is logged.
+- `2026-11-23` — `tools/pheme.py`, `panels/pheme_panel.py`: words, Contract, Threads, Upstream/Downstream, Requires; both marked `V0.03` (S30).
+- `2026-11-23` — `tests/test_pheme.py`: eleven warnings the tests let reach the console are caught with `assertLogs`.
+- `2026-11-22` — `tools/midas.py`: every answer carries `as_of`, and a stale ticker its own (the audit's T7); routing probe 48/56 on branch and master, its row 2/2 (+26 tokens).
+- `2026-11-22` — `tools/midas.py`, `panels/midas_panel.py`, `felhaven.py`: a cached `vault_locked` is never reused, and opening the gate asks Kairos for prices at once; both had shown "locked" for up to a minute after unlocking.
+- `2026-11-22` — `tools/midas.py`: a price that isn't a finite number is no data ("$nan"); the watchlist keeps its non-empty strings once each (a dict raised); `load_watchlist()` is public.
+- `2026-11-22` — `tools/plutus.py`: `add_event()` refuses to write over a ledger it can't read (`LedgerError`); one ADD on a garbled file had turned 40 records into 1.
+- `2026-11-22` — `tools/plutus.py`: shares and price must be finite (one NaN hid that ticker for good); the folds skip and count a record they can't read; a failed write is logged.
+- `2026-11-22` — `panels/midas_panel.py`: LEDGER says in red when the ledger can't be read or written, and counts records it can't read; the record is `theme.ScrollColumn` (the wheel died over its rows).
+- `2026-11-22` — `tools/midas.py`, `tools/plutus.py`, `panels/midas_panel.py`: words, Contract, Upstream/Downstream, Requires; two entry boxes drop the theme's cursor colour; all three marked `V0.03` (S29).
+- `2026-11-22` — `tests/test_midas_panel_smoke.py`: Plutus's ledger is a sandbox file; a test read this checkout's own `plutus_ledger.json`.
+- `2026-11-21` — `tools/ammit.py`: every read and save of the timer is under one lock; unlocked, a tight reader made 149 of 300 saves fail and two writers wiped the timer 53 times in 300 (measured).
+- `2026-11-21` — `tools/ammit.py`: a state file that parses but isn't a timer reads as no timer, logged once; a duration too big for a float is `bad_arguments`; a failed save is `write_failed`. Each had raised or passed.
+- `2026-11-21` — `panels/horai_panel.py`, `theme.py`: Ammit's popup stands alone, as Iris's does (it opened hidden while Felhaven was minimised); `place_alert()` now places both.
+- `2026-11-21` — `panels/horai_panel.py`: an expiry already dismissed stays quiet at launch (the owner's pick), and a stop, reset or restart closes an open popup.
+- `2026-11-21` — `panels/horai_panel.py`: the minutes box asks Ammit's `minutes_to_seconds()`; "0.01" started an instant alarm and "nan" raised.
+- `2026-11-21` — `tools/horai.py`, `tests/test_tool_loggers.py`: Horai has no logger by a written exemption (the owner's pick); "no I/O" was false, and the season's months and the cycle's hours are said.
+- `2026-11-21` — `tools/horai.py`, `tools/ammit.py`, `panels/horai_panel.py`: words, Upstream/Downstream, Requires; dead imports gone; all three marked `V0.03` (S28).
+- `2026-11-21` — `tests/test_ammit_alarm.py`, `test_horai_panel_smoke.py`: Themis reads a scratch settings file; 10 tests read this checkout's own 23 times.
+- `2026-11-21` — `panels/emanon_panel.py`: every line shows its date (the owner's pick); the time alone made yesterday's lines look like today's, his "Emanon's time looks wrong".
+- `2026-11-21` — `panels/emanon_panel.py`: the tail is rebuilt only when it changed, and follows new lines only from the bottom; each 2 s tick had wiped a selection and thrown a scrolled-up reader to the bottom.
+- `2026-11-21` — `tests/test_moderati_panel_smoke.py`: points the Cartograph's cache at a scratch folder; six tests listed this checkout's `artemis_cache/`.
+- `2026-11-21` — `panels/moderati_panel.py`, `cogitator_panel.py`, `vox_array_panel.py`, `emanon_panel.py`, `tools/emanon.py`: words — Moderati's polled tabs named right, Upstream/Downstream, Requires; all five marked `V0.03` (S27).
+- `2026-11-21` — `metis_logging.py`, `felhaven.py`, `sphynx_panel.py`: the error hooks move into `setup_logging()` and `log_tk_errors()`, with the program's own uncaught exception added; the Sphynx gate now logs to `logs/sphynx.log`.
+- `2026-11-21` — `metis_logging.py`: the console handler is added only when there is a stderr; under pythonw it wrote to None and every record failed inside it.
+- `2026-11-21` — `theme.py`, `panels/themis_panel.py`, `scribe_panel.py`, `artemis_panel.py`: `ScrollColumn` gains `set_size()` and `scroll_to_end()`, and the three panels stop reaching into its canvas.
+- `2026-11-21` — `palette.py`: `rgb()` checks the digits, since `int()` alone took "#+7+8+9" as (7, 8, 9); first audit, marked `V0.03`.
+- `2026-11-21` — `theme.py`, `metis_logging.py`, `palette.py`: words — Exports gains ScrollColumn, TabHost counts four hosts, Requires and Contract added; all three marked `V0.03` (S26).
+- `2026-11-21` — `kairos.py`: a panel whose `update()` raises is logged once and skipped, and the tick re-arms in a `finally`; one raise had frozen every panel until a restart, with no log line.
+- `2026-11-21` — `felhaven.py`: an exception in a Tk callback or a thread is logged with its traceback, once per distinct failure; under pythonw it had gone nowhere (reproduced through Felhaven.bat → Sphynx).
+- `2026-11-21` — `felhaven.py`: a failure while Felhaven is built is logged at CRITICAL and shown in an error box naming only its kind (the owner's pick); no window had opened and nothing said why.
+- `2026-11-21` — `scribe.py`, `panels/scribe_panel.py`, `felhaven.py`: a failed save turns the SCRIBE count line red, "not saved, see the log", until one works (the owner's pick); it was only logged.
+- `2026-11-21` — `panels/sidebar.py`: the wheel keeps the rail while the pointer is over a row; the canvas's `<Leave>` onto its own rows had dropped it, so it scrolled only over the gaps.
+- `2026-11-21` — `felhaven.py`, `kairos.py`, `panels/sidebar.py`: words — Kairos gains a Contract, felhaven a launch chain, Errors and Scribe, the sidebar Upstream/Downstream; all three marked `V0.03` (S25).
+- `2026-11-21` — `themis.py`: one lock covers each read of the settings file and each rename onto it; Windows refuses either during the other, and a racing reader got Greenwich (215 of 300 saves failed, measured).
+- `2026-11-21` — `themis.py`: `load()` falls back on a number too big for a float, a file nested too deep, a "false" clock, a true/false coordinate and a non-text weather location; `save()` refuses them.
+- `2026-11-21` — `themis.py`: a save logs the names of the fields it changed, never their values; the place had reached EMANON's screen (the owner's pick).
+- `2026-11-21` — `panels/themis_panel.py`: a write that fails says "Not saved" in red with only the error's kind, as MACHINE SPIRIT does; the OSError had escaped SAVE's callback, silent under pythonw.
+- `2026-11-21` — `scribe.py`: `load_data()` hands back only tasks and notes the panel can draw; a hand-edited file had stopped Felhaven from starting (measured).
+- `2026-11-21` — `panels/scribe_panel.py`: the task list scrolls once it would squeeze the notes below four lines (the owner's pick), a new task scrolls into view, and a long task keeps its ✕.
+- `2026-11-21` — `panels/scribe_panel.py`: Ctrl+Z can't erase the loaded notes (one did, and the empty text was saved), and a paste with no key is saved.
+- `2026-11-21` — `tests/test_scribe_panel_smoke.py` is the SCRIBE tab's first test file; `test_scribe`, `test_themis` and `test_themis_panel_smoke` test the rest.
+- `2026-11-21` — `scribe.py`, `themis.py`, `panels/scribe_panel.py`, `themis_panel.py`: words — §2 row, Threads, Upstream/Downstream, Requires; three entry boxes drop the theme's cursor colour; all four marked `V0.03` (S24).
+- `2026-11-21` — `tools/echo.py`, `panels/echo_panel.py`: a name already in `local_audio/` is refused before synthesis and claimed exclusively before ffmpeg; a failed encode had deleted the old file of that name (the owner's pick).
+- `2026-11-21` — `tools/echo.py`: `sanitize_filename()` refuses every name Windows reserves (`ntpath.isreserved`); "con .opus", "COM¹" and "CONIN$" got through; a launch that raises leaves no empty file.
+- `2026-11-21` — `tools/orpheus.py`: durations cache by name, size and mtime, keeping only listed files; a probe mid-encode had cached a partial duration until restart (measured). `fetch()` without ffmpeg still lists the files.
+- `2026-11-21` — `panels/orpheus_panel.py`: a click decodes on a daemon thread with a bounded drain chain, the EchoPanel shape (the owner's pick); a 25-minute file froze Felhaven 3.2 s. §6 names the exception.
+- `2026-11-21` — `tests/test_echo.py`, `test_orpheus.py`, `test_orpheus_panel_smoke.py`, `test_vox_array_panel_smoke.py`: write-once, the cache and the decode thread tested; both tabs' error words checked against the codes.
+- `2026-11-21` — `tools/echo.py`, `orpheus.py`, `panels/echo_panel.py`, `orpheus_panel.py`, `harmonia.py`: words — contracts, Upstream/Downstream, Requires; the ECHO boxes drop the theme's cursor colour; all four marked `V0.03` (S23).
+- `2026-11-21` — `tools/argus.py`, `panels/argus_panel.py`: a DNS cache Windows 11 shows only to an administrator reads as such, not "DNS Client service stopped?"; the dot stays teal and Pythia gets no false count of 0 (the owner's pick).
+- `2026-11-21` — `tools/argus.py`: `fetch()` runs under a lock and hands out copies, since Kairos's worker and Pythia's both call it and two at once raised (7 in 3,000, measured).
+- `2026-11-21` — `tools/argus.py`: the timeline loads on the first `fetch()`, not on import (every Pythia test read the checkout's own file), and drops entries the panel couldn't draw.
+- `2026-11-21` — `tools/argus.py`, `panels/rite_panel.py`: a failed network snapshot says `unavailable: network snapshot raised <class>`, §2's shared word, not `network_unavailable`; the Rite Log drops the last old word.
+- `2026-11-21` — `tests/test_argus.py`: `fetch()`'s tests fake psutil, netsh and ipconfig (the owner's pick), so the suite launches nothing; `tests/test_argus_panel_smoke.py` is the ARGUS tab's first test file.
+- `2026-11-21` — `tools/argus.py`, `asclepius.py`, `panels/argus_panel.py`, `config/virgil_glossary.json`: words — Argus's contract names its §2 row, the panel gains Upstream/Downstream, Asclepius re-measured; all three marked `V0.03` (S22).
+- `2026-11-20` — `tools/helios.py`, `config/virgil_glossary.json`: golden hour follows the sun's angle, −4° to +6°, not a plain hour after sunrise and before sunset (the owner's pick; it ran about 20 minutes off); checked against JPL Horizons.
+- `2026-11-20` — `panels/aura_panel.py`: on a polar day or night the HELIOS — SUN fold shows Helios's reason ("the sun does not set today") instead of "unavailable".
+- `2026-11-20` — `tools/helios.py`, `selene.py`, `panels/rite_panel.py`: a polar day and a failed sun or moon say `unavailable` (§2's shared word), not `sun_times_unavailable` / `moon_unavailable`; the Rite Log drops both.
+- `2026-11-20` — `tools/helios.py`, `selene.py`, `ptolemy.py`: words — contracts name their §2 row, crossed Upstream/Downstream untangled, Ptolemy's cost and size re-measured; all three marked `V0.03` (S21).
+- `2026-11-20` — `panels/hypatia_panel.py`: deselecting a constellation, or picking a planet, clears its highlight at once (since 2026-07-01 it stayed lit until the next redraw, up to 60 s); the dead `_ScrollFrame.clear()` is gone.
+- `2026-11-20` — `tools/hypatia.py`, `kepler.py`, `dev_build_hypatia_catalog.py`, `panels/hypatia_panel.py`: words — contracts name real §2 rows and precedents, Upstream/Downstream catch up, "Phase 2" goes; all four marked `V0.03` (S20).
+- `2026-11-20` — `tools/hypatia.py`, `panels/rite_panel.py`: a failed sky digest says `unavailable: sky snapshot raised <class>`, §2's shared word, not `sky_unavailable`; the Rite Log drops the old word.
+- `2026-11-20` — `tests/test_hypatia.py`, `test_hypatia_panel_smoke.py`: snapshots read a scratch settings file, not the checkout's own `felhaven_settings.json` (14 reads a run, now none).
+- `2026-11-19` — `panels/home_panel.py`: words only — the status bar's version is "the newest audit marker"; the Kairos paragraph counts four registrations, not two; Downstream catches up; the entry drops its cursor colour.
+- `2026-11-19` — `panels/hestia_panel.py`, `vox_controls.py`, `pythia_face.py`, `CONVENTIONS.md` §7: column widths re-measured, a "Sonus indicator" that never existed, the face's real 20 fps; all four Home files marked `V0.03` (S19).
+- `2026-11-19` — `tests/test_vox_controls_smoke.py`: switching Auto-DJ on reads a scratch play ledger, not the checkout's own `euterpe_ledger.json` (which also left a pick armed for later tests).
+- `2026-11-19` — `machine_spirit.py`: saving the default text clears the override instead of storing it (REVERT TO DEFAULT then SAVE kept that install on today's default, measured); the Contract says what `save()` and `revert()` raise.
+- `2026-11-19` — `panels/machine_spirit_panel.py`: SAVE and the voice pick say "Not saved" when the write fails instead of letting it escape; no failed save shows an OSError's path; the model status no longer promises "about a minute".
+- `2026-11-19` — `panels/machine_spirit_panel.py`, `machine_spirit.py`: the editor stops repeating the theme's cursor colour; Job, Upstream and Downstream catch up; its test stops reading the real `voice_config.json`; both marked `V0.03` (S18).
+- `2026-11-19` — `pythia.py`: tool results reach the model as real characters, not `\u` escapes (the owner's pick; six headlines measured at 344 prompt tokens against 427, quoted exactly); the Rite Log's previews too.
+- `2026-11-19` — `pythia.py`: a tool that raises is logged with credential values scrubbed (`_redact`); the July log-call flag closes there, with no guard over every log call (the owner's pick).
+- `2026-11-19` — `panels/rite_panel.py`: nine slugs that rendered bare get their lines (six are Pythia's own refusals), and a test catches the next; closing the window over its list no longer leaves the wheel on a dead canvas.
+- `2026-11-19` — `tests/_pythia_sandbox.py`: Pythia's tests stop reading the checkout's settings and prompt and stop asking the real Ollama (42 requests in one run on the owner's checkout, measured).
+- `2026-11-19` — `pythia.py`, `panels/rite_panel.py`: Contract gains `think`, `is_degraded`, `current_model`, `switch_model`; Job, Upstream, Downstream, Requires and the warm's prefix catch up; both marked `V0.03` (S17).
+- `2026-11-19` — `tools/clio.py`: a failed or interrupted face render no longer leaves the previous `face.mkv` to pass as the new narration's (measured); the track, the cache's key, lands last, and a Ctrl+C stops both child processes.
+- `2026-11-19` — `tools/clio.py`: each finished video is measured as soon as it is made (a later step that failed left one unmeasured under its finished name), and QC fails a true peak over -1.5 dBTP (the owner's call; every finished video passes).
+- `2026-11-19` — `tools/clio.py`, `panels/clio_face.py`: `load_timing()` (never called) goes; Contract, Face, QC and Downstream catch up; face frame time re-measured, 39 ms (was 49); both marked `V0.03:` (walkthrough S16).
+- `2026-11-19` — `tests/semgrep/felhaven_sinks.yml`: the tripwire ran (semgrep 1.178.0), nothing in Clio; the four System32 programs named from `%SystemRoot%` since 2026-11-17 join the reviewed hits. BACKLOG item done.
+- `2026-11-19` — `calliope.py`: the Contract names `end_turn()`, the call a whole-text caller must make; Upstream gains Awen, Ammit, Iris, Echo and Clio; a missing-model log line points at SETUP.md §4 (it named a Calliope.md that never existed).
+- `2026-11-19` — `harmonia.py`, `voices.py`, `panels/voice_bar_panel.py`: Upstream lists complete; voices' Requires names Calliope (it said stdlib only); a second `import time` and an "only other dropdown" go. All four marked `V0.03:` (S15).
+- `2026-11-19` — `BACKLOG.md`: test_machine_spirit_panel_smoke reads the real `voice_config.json` in 31 tests (S18).
+- `2026-11-18` — `awen.py`: a failed load the listener started counts toward the breaker only while Auto-DJ is on; with it off, three of them spoke "Auto-DJ is off, I couldn't get a song to play" to someone who never turned it on (measured).
+- `2026-11-18` — `tests/test_awen.py`: Pythia and the search are stubbed by default; the breaker's retry turns made two real `pythia.ask` calls in one test (they read the real settings, and with Ollama up would ask gemma4). BACKLOG item done.
+- `2026-11-18` — `awen.py`: the Contract names the flag, the status line and the queue's three functions; Upstream and Downstream are complete; marked `V0.03:` (walkthrough S14). `README_PANTHEON/awen.md` back to its fixed fields.
+- `2026-11-18` — `tools/euterpe.py`: `take_base()` removes its temp file when the base copy's write fails (it was left beside the ledger), and a ledger it cannot read is `read_failed`, not `write_failed` (the owner's call).
+- `2026-11-18` — `panels/euterpe_panel.py`: the TUNES header says "the songs you chose" (it said "what Awen has played"), the stale-save refusal names what changed the file, `read_failed` has a sentence (the owner's calls).
+- `2026-11-18` — `tools/euterpe.py`: Job says the songs the listener chose (the TUNES tooltip; the owner's call), and the stub and index follow; the Contract names every public function. `README_PANTHEON/euterpe.md` back to its fixed fields.
+- `2026-11-18` — Euterpe, TUNES and the queue window: docstrings caught up (four song tests, the denylists, Upstream), the TUNES editor stops repeating the theme's cursor; all three marked `V0.03:` (walkthrough S13). `BACKLOG.md`: test_awen (S14).
+- `2026-11-18` — `tests/test_virgil_surfaces.py`: every surface it builds reads a scratch settings file (`_fixtures.ScratchSettings`); the alerts tab read the real one (measured 1 -> 0). BACKLOG item done.
+- `2026-11-18` — `tools/virgil.py`, `panels/virgil_tooltip.py`: Upstream names every kind of tip table (`_TAB_TIPS`, `_SECTION_TIPS`, `_HEADER_TIP` too) and Home's `attach_tag()`; Requires gains sys. Both marked `V0.03:` (walkthrough S12).
+- `2026-11-18` — `README_PANTHEON/virgil.md`: the UI field, grown to fourteen lines and missing Atmospherics, is one line that points at the test listing every surface. CONVENTIONS §12 (2026-11-10) corrected: Artemis never rebound CACHE AREA.
+- `2026-11-18` — `tools/eratosthenes.py`: numbers and N/S/E/W that don't read as coordinates are refused (`bad_coordinates`), never sent to the Census geocoder, which echoed "138.8977 -77.0365" back as a place at 77°S. The owner's call; §12.
+- `2026-11-18` — `panels/artemis_panel.py`: the search says when numbers don't read as coordinates; a refresh that kept its terrain names every reason in words (it showed `download_failed`), in lockstep with the skipped-terrain words.
+- `2026-11-18` — `panels/artemis_panel.py`: `rescale()`, which nothing ever called, and a scale-bar branch identical to its twin go; the two entry boxes stop repeating the theme's cursor (`BACKLOG.md`'s cursor item drops S11).
+- `2026-11-18` — `tests/test_artemis_panel_smoke.py`: the search tests read a scratch waypoints file, never the real one. `BACKLOG.md`: the address lookup can freeze Felhaven for up to 20 s; a Virgil test reads the real settings (S12).
+- `2026-11-18` — Cartograph docstrings: CACHED AREAS, every status line, CACHE AREA's click bound once, 0.4545, the band-cut time re-measured, Upstream/Downstream; Eratosthenes's Contract lists its slugs. Both marked `V0.03:` (walkthrough S11).
+- `2026-11-18` — Security: `tools/demeter.py` cuts the OpenTopography key out of a parse failure's log excerpt and slug; the API's error replies repeat the key (measured), and a reply arriving as a 200 was logged verbatim. §12.
+- `2026-11-18` — `tools/demeter.py`: write_bin and write_derived build no list per cell (46 and 95.5 MB at 1024 x 1024 became 4.2 and 7.3 MB, the same bytes); a corrupt cached raster is rebuilt, not a `zlib.error`. BACKLOG item done.
+- `2026-11-18` — `tools/demeter.py`: `elevation_at()` (a test its only caller) goes; `_DERIVED_DIR` is Artemis's. Demeter, Hecate and Poseidon marked `V0.03:` (walkthrough S10). `BACKLOG.md`: a Callimachus log line (S33).
+- `2026-11-17` — `tools/cadmus.py`: a .shp header length under its own 100 bytes, read as "no shapes", and a record too short for a shape's header, which escaped as `struct.error`, are both `bad_shp` now.
+- `2026-11-17` — `tools/artemis.py`: `read_vec()` refuses a cut-short name table (`bad_vec`); it clipped the last name or escaped as `struct.error`, past the Cartograph's catch.
+- `2026-11-17` — `tools/artemis.py`: the docstring's three "later"s go, the Contract lists what the layers and panels share, Requires is complete; Artemis and Cadmus marked `V0.03:` (walkthrough S09).
+- `2026-11-17` — `panels/aura_panel.py`: the three class-scoped audit tags fold into one module marker; `_CLASS_MARKERS_YET` is empty. WeatherPanel's docstring says three tabs and that NOW scrolls; Upstream/Downstream added.
+- `2026-11-17` — `tools/aura.py`: `_build()` reads Home's location from Themis only when the reply names no place (a `.get()` default read it on every reading); results unchanged. Downstream gains the sidebar's row.
+- `2026-11-17` — `tests/`: Aura's tests read a scratch settings file (`_fixtures.ScratchSettings`), never the checkout's own; both Aura files marked `V0.03:` (walkthrough S08). `BACKLOG.md`: Celestarium's test reads the real one (S20).
+- `2026-11-17` — `tools/eos.py`: the space-weather reading no longer carries `kp_kind`, `kp_time` or each day's `r_major`, `s` and `kp_max`, which no display read (the owner's call, as for Iris). §12 records it.
+- `2026-11-17` — `tests/test_eos_panel_smoke.py`, `tests/test_iris_panel_smoke.py`: the tests that build the Atmospherics card read a scratch settings file and Cartograph cache, never the real ones (Eos's read both, Iris's the cache).
+- `2026-11-17` — `panels/eos_panel.py`: Downstream gains theme.py and the Virgil pair; `tools/eos.py`: Requires gains os and sys; both Eos files marked `V0.03:` (walkthrough S07).
+- `2026-11-17` — `panels/iris_panel.py`: the weather-warning popup is no longer tied to the main window, so it shows while Felhaven is minimised (tied, it opened hidden; measured), centred on the screen then. §12 records the owner's call.
+- `2026-11-17` — `panels/iris_panel.py`: two warnings at once are spoken "A and B", not "A, and B"; `set_on_open()` (no caller) and the popup's unused `_watch` are gone. `BACKLOG.md`: Ammit's popup has the same minimised gap (S28).
+- `2026-11-17` — `tools/iris.py`: alerts no longer carry `onset`, `sender`, `area` or `headline`, which no display read (the owner's call); both Iris files marked `V0.03:` (walkthrough S06).
+- `2026-11-17` — `tools/aether.py`, `tools/argus.py`, `panels/daedalus_panel.py`: netsh, ipconfig and Notepad run from System32 by absolute path; a bare name ran a same-named .exe from the working folder first (measured). §11 rule, §12 why.
+- `2026-11-17` — `tests/test_process_launches.py`: fails any launch whose program is a bare constant, module constants included; only macOS's `open` and Linux's `xdg-open` are allowed. Per-site tests in Aether's, Argus's and Daedalus's.
+- `2026-11-17` — `tests/test_tool_output_contract.py`: fails an audit marker in a class or function docstring (§3's one marker per file), panels included; `panels/aura_panel.py` is allowlisted until S08.
+- `2026-11-17` — `panels/hephaestus_panel.py`: its three class-level `V0.02:` tags fold into one module marker, with Upstream and Downstream; with no model loaded, the Ollama line no longer says "about a minute".
+- `2026-11-17` — `tools/hephaestus.py`: `handle()` fails as `unavailable: vitals read raised <class>`, not `vitals_unavailable`, and Rite's words follow; `load_avg` drops a fallback no locked psutil reaches.
+- `2026-11-17` — `tools/hephaestus.py`, `brontes.py`, `talos.py`, `aether.py` and `panels/hephaestus_panel.py` marked `V0.03:` (walkthrough S05); Aether's Upstream names Talos. `BACKLOG.md`: three items for S08, S18, S22.
+- `2026-11-17` — `sphynx_panel.py`: a gate or skip choice that can't be saved shows the error's class, not its text, which carried the file's path onto the screen (§2).
+- `2026-11-17` — `sphynx_panel.py`: the first-run screen says to use a PIN you use nowhere else, since the gate file's fast hash gives a short PIN away; `SETUP.md` §7 says so too; §12 records the owner's calls.
+- `2026-11-17` — `sphynx.py`: the threat model says what the gate guards and where its PIN stands beside Cerberus's, not that the PIN falls to "anyone reading the source"; both Sphynx files marked `V0.03:` (walkthrough S04).
+- `2026-11-17` — `sphynx_panel.py`: its entry boxes take the theme's text cursor instead of repeating it, and cite §1 for anchoring, not §11. `BACKLOG.md`: the 23 repeats left in 13 panels.
+- `2026-11-17` — `SETUP.md` §7: running `felhaven.py` directly skips the Sphynx gate; it said you'd still hit it. The Pantheon page's test line names the panel's smoke test.
+- `2026-11-17` — `panels/cerberus_panel.py`: a failed Custody open and a PIN that can't be saved show the error's class, not its text, which carried the file's path onto the screen (§2).
+- `2026-11-17` — `cerberus.py`, `tools/hypnos.py`, `panels/cerberus_panel.py`: docstrings name artemis_panel, `away_reason` and Virgil; all three marked `V0.03:` (walkthrough S03).
+- `2026-11-17` — `BACKLOG.md`: the Ledger-cap item's growth figures are the measured ones (27.8 KB on 2026-11-14), not October's first-week rate.
+- `2026-11-17` — `tools/aegis.py`: the PATH fallback finds only `<name>.exe` in full-path PATH folders, never the working folder or a `.bat`/`.cmd`; `SETUP.md` §5 says so; §12 records why.
+- `2026-11-17` — `tools/aegis.py`: `record` stores the hash it checked, not a second one taken after yt-dlp ran, so a file changed in between is refused rather than recorded.
+- `2026-11-17` — `tools/aegis.py`: the docstring names Clio as a caller and the CLI's `--checksum-source`; `verify`'s help no longer says "manifest entry"; marked `V0.03:` (walkthrough S02).
+- `2026-11-17` — `tests/test_aegis.py`: the PATH tests use a real PATH (empty by default) instead of mocking `shutil.which`; new tests for the working folder, scripts on PATH and the checked hash.
+- `2026-11-17` — `tools/hermes.py`: `Reply` drops its `url` field, which no caller read and which could hold a key; six tests' `Reply` fakes drop the argument.
+- `2026-11-17` — `tools/hermes.py`: the docstring names iris, eos and aegis as callers and `deadline_for` in the Contract; marked `V0.03:` (walkthrough S01).
+- `2026-11-17` — `tests/test_hermes.py`: a failed TLS handshake is `CertError`, a malformed status line a plain `NetError`, an unknown charset falls back to UTF-8, and a reply never holds the URL.
+- `2026-11-17` — `CONVENTIONS.md` §3: `V0.03:` means walked through against today's conventions, on every file, with one marker per file in the module docstring; §12 records the owner's six calls. `BACKLOG.md`: two walkthrough items.
+- `2026-11-17` — `tests/test_morpheus_duck.py`: `play()` no longer sizes the real `logs/mpv/mpv.log`; once that log passed its 50 MB cap, two tests errored on the owner's machine and could have deleted it.
+- `2026-11-16` — `tools/{aura,midas,pheme,morpheus,callimachus,herodotus,daedalus}.py`, `awen.py`: a shared condition says the shared word (`offline`, `unavailable`, `not_found`, `bad_arguments`, …); the detail after the colon is kept.
+- `2026-11-16` — `tools/callimachus.py`: a vault refusal reads Cerberus's reason: `vault_locked` when sealed, `no_key` when the Brave key is missing, else `unavailable`.
+- `2026-11-16` — `panels/rite_panel.py`, `panels/pheme_panel.py`, `panels/daedalus_panel.py`: error words follow the renames; Rite gains words for the shared slugs, and its `not_found` stops naming the archive.
+- `2026-11-16` — `tests/test_tool_output_contract.py`: a V0.03 module may not use a retired spelling; `tests/test_rite_panel_smoke.py`: Rite's words match the slugs tools write.
+- `2026-11-16` — `CONVENTIONS.md` §2: the shared slug table; §12 records the map; the BACKLOG's slug item is closed.
+- `2026-11-16` — `tools/` (13 brain modules): `V0.03` audit markers; each `V0.02` block becomes a dated paragraph, and the marker names any rename still to come. Home's status bar now reads V0.03.
+- `2026-11-16` — `tests/test_tool_output_contract.py`: markers may name V0.02 or V0.03, and a file with two markers fails; `tests/test_daedalus.py`'s real-tree version check moves to V0.03.
+- `2026-11-16` — `CONVENTIONS.md` §3: the `V0.03:` marker and the dated-paragraph handover; §12 records the Pythia tool audit's close; the BACKLOG's markers item is closed, its slug item reworded, and a Midas `as_of` item added.
+- `2026-11-16` — `tools/` (13 brain modules): each gains `TOOL_META` beside its schema, every tool's domain, network use and whether it changes state; the model never sees it.
+- `2026-11-16` — `tests/test_tool_meta_contract.py`: new; meta for every registered tool and no other, the allowed values, confirm tools marked `mutates`, and descriptions naming only same-domain tools.
+- `2026-11-16` — `CONVENTIONS.md` §3, §8: `TOOL_META` and its domain words; §12 records the vocabulary and why `keywords` waits; the BACKLOG's `TOOL_META` item narrows to the intro-lines generator.
+- `2026-11-16` — `machine_spirit.py`: the default prompt drops its hand-made tool list and the two tool names; the call directive stays ahead of the style rules.
+- `2026-11-16` — `tests/test_machine_spirit.py`: the default prompt names no registered tool, and its call directive comes before the no-Markdown rule.
+- `2026-11-16` — `tools/` (11 modules): every tool description follows one grammar: what it returns or does (a third-person verb), then one "Call when…" sentence, then what it is not for.
+- `2026-11-16` — `tools/zeno.py`, `tools/eudoxus.py`: what an expression may contain moves onto `expression`, and that unit names and abbreviations both work onto `from_unit`/`to_unit`.
+- `2026-11-16` — `tools/callimachus.py`: `fetch_page`'s description now allows a URL the user gave, as the gate already did, not only a search result.
+- `2026-11-16` — `tests/test_tool_schema_contract.py`: a description must open with a third-person verb and say when to call it in exactly one "Call when/whenever/only" sentence.
+- `2026-11-16` — `CONVENTIONS.md` §3: a "Description grammar" paragraph; §12 records it and the M1 prompt choice; the BACKLOG's grammar, `fetch_page` and M1 items are closed.
+- `2026-11-16` — `tools/daedalus.py`: a file whose one expression overflows the parser (RecursionError, not SyntaxError) is a `too_deep` node; before, it broke the map, the enum and Home's version line on every refresh.
+- `2026-11-16` — `panels/daedalus_panel.py`: a module that will not parse reads in words (`_ERROR_TEXT`), keeping its file and line, instead of the raw `parse_failed` slug.
+- `2026-11-16` — `tools/daedalus.py`, `panels/daedalus_panel.py`: `V0.02` audit; docstrings gain the missing `parse_failed` answer, imports, Virgil and a fresh build measurement.
+- `2026-11-16` — `tests/test_daedalus.py`, `tests/test_daedalus_panel_smoke.py`: a too-deep file stays one node; the pane says a parse failure in words.
+- `2026-11-16` — `CONVENTIONS.md` §12: the Daedalus enum keeps full glosses, measured against core+tools and keys-only. `BACKLOG.md`: the Daedalus audit item is gone.
+- `2026-11-15` — `panels/iris_panel.py`: `AlertBadge(above=)` packs just above that widget while it shows; Home passes its aurora line, so a weather warning sits above it whichever showed first. `BACKLOG.md`: that item is gone.
+- `2026-11-15` — `panels/hestia_panel.py`: the line under PYTHIA is the status line (`line`, `IDLE_LINE`): "ask the oracle" while idle; wraps inside the title column so the face stays centred.
+- `2026-11-15` — `panels/home_panel.py`: the status ("consulting the oracle…", Auto-DJ lines) is written into Hestia's line, not the status bar; the bar holds the version and the readouts, and the version shows only while it fits whole.
+- `2026-11-15` — `tests/test_home_panel_smoke.py`: the status line in Hestia, the idle line, wrapping with the face centred, and the version's fit, at real widths too.
+- `2026-11-15` — `CONVENTIONS.md` §12: why the status moved up to Hestia's line.
+- `2026-11-15` — `felhaven.py`: the launch window is placed (`start_position`: centred, the 80 px margin at the bottom) so its bottom can't open behind the taskbar; `fit_window` holds the launch sequence.
+- `2026-11-15` — `panels/home_panel.py`: the status bar's version hides while it would leave the status less room than "consulting the oracle…" needs (`_fit_version`), as at 760 px; its tooltip is no longer conditional.
+- `2026-11-15` — `tests/test_tool_output_contract.py`: the audit-marker pattern is Daedalus's `_AUDIT_MARKER`, not a copy.
+- `2026-11-15` — `tests/test_felhaven.py`: tests for `start_position` and `fit_window`; a check that could never fail is gone. `tests/test_home_panel_smoke.py`: the version yielding, at real widths too; no second "V0.02" pin.
+- `2026-11-15` — `CONVENTIONS.md` §12: the placement and version-yield decisions, why untracked files count toward the version, and two corrected claims. `BACKLOG.md`: the warning-under-aurora order.
+- `2026-11-15` — `tools/daedalus.py`: `audit_version()`, FOE's version — the newest `V0.0x:` audit marker in any module's docstring.
+- `2026-11-15` — `panels/home_panel.py`: the status bar moves under the chat input and shows FOE's version on its left; the input row, the bar and the file-change question share one dock.
+- `2026-11-15` — `config/virgil_glossary.json`: a stand-in entry, `foe_version`, for the status bar's version.
+- `2026-11-15` — `CONVENTIONS.md` §12: why the status bar's version is read off the audit markers. `BACKLOG.md`: the stand-in list grows to sixty-six.
+- `2026-11-15` — `felhaven.py`: the window opens tall enough for the whole nav rail as it stands on launch (`start_height`, measured, never past the screen); the rail's scroll lane stays.
+- `2026-11-15` — `panels/sidebar.py`: `rail_height()`, the height the rail asks for as it stands.
+- `2026-11-15` — `CONVENTIONS.md` §12: why the launch height is measured from the rail.
+- `2026-11-15` — `tools/herodotus.py`: `read_archive(action)` replaces `list_documents`, `search_documents` and `read_document` as tools; the three stay public functions, and `write_document`/`edit_document` are unchanged.
+- `2026-11-14` — `tools/aura.py`: the reading drops its `astronomy` block, and Open-Meteo is no longer asked for sunrise and sunset; `get_weather` carries weather only.
+- `2026-11-14` — `get_sun_times`, `get_moon_phase` and `get_sky_tonight` retired: Helios, Selene and Hypatia lose `TOOL_DEFINITION`; panels change only in comments, workers not at all.
+- `2026-11-14` — `tools/ptolemy.py`: one brain tool, `get_sky_report`, answers the sun, the moon and what is up now from Helios, Selene and Hypatia.
+- `2026-11-14` — `get_system_vitals`, `get_connectivity` and `get_network_summary` retired: Hephaestus, Aether and Argus lose `TOOL_DEFINITION`; their panels and workers are unchanged.
+- `2026-11-14` — `tools/asclepius.py`: one brain tool, `get_machine_status(part)`, answers vitals, online, network or all from Hephaestus, Aether and Argus.
+- `2026-11-14` — `tests/probe_routing.py`: plays the phrasings against the live model by hand (music and timers stood in, writes refused, report on stdout only).
+- `2026-11-14` — `tests/fixtures/broker_routing.json`: 28 phrasings and the tool each should reach; `tests/test_routing_corpus.py` keeps every name in it registered.
+- `2026-11-14` — `CLIO_GUIDE.md`: a private how-to for making an episode, from the script to the finished videos; listed in `publish/private_paths.txt`.
+- `2026-11-14` — `tests/test_clio_layout.py`: the drawn-text tests run from a worktree too, using the main checkout's `bin/` and manifest.
+- `2026-11-14` — `tests/_machine_root.py`: the main-checkout lookup moves out of `test_bin_manifest.py` so any test that needs `bin/` can share it.
+- `2026-11-14` — fourteen panels gain a `Job:` field (CONVENTIONS §0), so their DAEDALUS gloss says what each does; `tests/test_daedalus.py` drops `_NO_JOB_FIELD_YET`.
+- `2026-11-14` — `felhaven.py`: the opening docstring's facts are current (Python 3.13 from the lock, no hand-picked module list, palette.py for colours).
+- `2026-11-13` — `panels/eos_panel.py`: when a check fails after a good one, the folded SPACE WEATHER row turns amber and reads "· out of date" after the last levels, until a check succeeds.
+- `2026-11-10` — `panels/artemis_panel.py`: the mouse wheel over the chart zooms one stop per turn; `map_zoom`'s tooltip says so.
+- `2026-11-10` — `panels/artemis_panel.py`: the CACHED AREAS header and each row's ✎ ⟳ ✕ carry glossary tooltips; four stand-in entries.
+- `2026-11-10` — `BACKLOG.md`: the stand-in list grows to sixty-five; `specs/virgil_tooltip_surfaces.md` records the Cartograph's cached-areas tips as built at the owner's request.
+- `2026-11-10` — `panels/artemis_panel.py`: a terrain key, top-right, gives each shade's elevation band in feet (the raster's own cuts), or "low relief".
+- `2026-11-10` — `panels/artemis_panel.py`: the CACHED AREAS row for the area on screen carries an amber ●; the area you're in reads "here" instead of "0.0 mi 000°".
+- `2026-11-10` — `panels/artemis_panel.py`: each CACHED AREAS row is one line (name, range, glyphs); hovering a name shows its cache date in the reading strip; a one-row list no longer gets blank space under it.
+- `2026-11-10` — `panels/artemis_panel.py`: no compass rose (the chart is north-up and the rim has N/E/S/W); CACHED AREAS moves down into the freed corner; `palette.py`'s `map_compass` is now `map_legend`.
+- `2026-11-10` — `panels/artemis_panel.py`: CACHED AREAS starts folded; open, its rows scroll in a ScrollColumn once they outgrow the map's room above the compass rose.
+- `2026-11-10` — `panels/rite_panel.py`: each rite's status and name, each field's ▸/▾ caption, and COPY THIS RITE carry glossary tooltips; four stand-in entries.
+- `2026-11-10` — `BACKLOG.md`: the stand-in list grows to sixty-one; the Rite Log counts as covered.
+- `2026-11-10` — `panels/queue_panel.py`: each row of the Auto-DJ queue window carries a glossary tooltip saying a click removes it at once; one stand-in entry, `queue_remove`.
+- `2026-11-10` — `specs/virgil_tooltip_surfaces.md`: every phase is built; the priority B rows outside Home stay out by the owner's choice.
+- `2026-11-10` — `panels/hypatia_panel.py`: the four sky presets and the clarity row carry glossary tooltips.
+- `2026-11-10` — `panels/artemis_panel.py`: the cache status line and CACHE AREA carry glossary tooltips.
+- `2026-11-10` — `panels/midas_panel.py`: the ledger's BUY/SELL toggle carries a glossary tooltip.
+- `2026-11-10` — `panels/euterpe_panel.py`: BASE COPY, RESTORE and TAKE FROM SAVED carry glossary tooltips.
+- `2026-11-10` — `panels/zeno_panel.py`: the ANS readout carries a glossary tooltip while it has a value.
+- `2026-11-10` — `panels/emanon_panel.py`, `panels/argus_panel.py`: the status and summary rows carry glossary tooltips that say what the dot's colours mean.
+- `2026-11-10` — `panels/daedalus_panel.py`: the graph legend carries a glossary tooltip.
+- `2026-11-10` — `panels/machine_spirit_panel.py`: the MODEL, THINKING and TEMPERATURE rows carry glossary tooltips.
+- `2026-11-10` — `config/virgil_glossary.json`: fifteen stand-in entries for the jargon readouts and controls.
+- `2026-11-10` — `tests/test_virgil_surfaces.py`: the phase 4 tables join the words, source and orphan checks; each panel's smoke test holds its table to its widgets.
+- `2026-11-10` — `CONVENTIONS.md` §12: phase 4's decisions. `BACKLOG.md`: the stand-in list grows to fifty-six.
+- `2026-11-10` — `panels/midas_panel.py`: PRICES shows Midas's gloss as a tooltip and LEDGER shows Plutus's.
+- `2026-11-10` — `panels/pheme_panel.py`, `panels/morpheus_panel.py`: the SCRAPSTREAM, SOURCE FONTS, PLAYLISTS and SEARCH tabs carry glossary tooltips.
+- `2026-11-10` — `panels/horai_panel.py`, `panels/hephaestus_panel.py`: the AMMIT and AETHER headers show their modules' glosses as tooltips.
+- `2026-11-10` — `panels/argus_panel.py`, `panels/cerberus_panel.py`: every section header carries a glossary tooltip; `_Section.header` holds the header frame.
+- `2026-11-10` — `config/virgil_glossary.json`: thirteen stand-in entries for the tabs and section headers.
+- `2026-11-10` — `tests/test_virgil_surfaces.py`: the tab, header and section tables join the words, source and orphan checks; Argus's sections and Aether's header are built there.
+- `2026-11-10` — `CONVENTIONS.md` §12: when a tab shows a module's gloss and when a glossary entry.
+- `2026-11-10` — `BACKLOG.md`: the tooltip-surfaces item counts the tabs and headers as covered; the stand-in list grows to forty-one.
+- `2026-11-10` — `panels/morpheus_panel.py`: the transport glyphs, `＋ save`, each playlist's ✕ and each search result's ＋ carry glossary tooltips.
+- `2026-11-10` — `panels/orpheus_panel.py`: ⏹ and each file's ✕ carry glossary tooltips.
+- `2026-11-10` — `panels/scribe_panel.py`: each task's box and ✕ carry glossary tooltips.
+- `2026-11-10` — `panels/horai_panel.py`: Ammit's minutes entry, ▶/■ and ↺ carry glossary tooltips.
+- `2026-11-10` — `panels/pheme_panel.py`: each headline's ↗ carries a glossary tooltip.
+- `2026-11-10` — `panels/artemis_panel.py`: the zoom stops and ⌂ HOME carry glossary tooltips.
+- `2026-11-10` — `config/virgil_glossary.json`: sixteen stand-in entries for the glyph controls.
+- `2026-11-10` — `tests/test_virgil_surfaces.py`: the glyph tables join the words, source and orphan checks; Scribe's rows are built there.
+- `2026-11-10` — `CONVENTIONS.md`: §7 names `_ROW_TIPS`; §12 records the glyph-control decisions.
+- `2026-11-10` — `BACKLOG.md`: the tooltip-surfaces item counts the glyph controls as covered; a new item lists the twenty-eight stand-in glossary entries that need the owner's edit.
+- `2026-11-10` — `panels/virgil_tooltip.py`: the tip's handlers ride bindtags (`VirgilTip`, `VirgilPress`), bound once per root, so a widget's own `bind` or `unbind` can no longer strip its tip; a click goes to the nearest attached widget.
+- `2026-11-10` — `panels/virgil_tooltip.py`: `attach_tag(text, tag, tip)` gives a tagged span of a Text a tip; `attach(..., when=)` shows a tip only while `when()` is true.
+- `2026-11-10` — `panels/vox_controls.py`: Vox Response, Vox End, Auto-DJ and Reset Session carry glossary tooltips, from `_TIPS`.
+- `2026-11-10` — `panels/hestia_panel.py`: Pythia's face carries its module's gloss as a tooltip.
+- `2026-11-10` — `panels/home_panel.py`: the Cerberus lamp, Scraptoken Flux, Rites, the Ammit badge, the status line (while it says something), the Allow/Deny bar, the alert strip, the aurora line, "speak aloud" and the per-answer stats line carry glossary tooltips.
+- `2026-11-10` — `config/virgil_glossary.json`: twelve entries for Home.
+- `2026-11-10` — `tests/test_virgil_surfaces.py`: Home's three tables join the words, source and orphan checks.
+- `2026-11-10` — `CONVENTIONS.md`: §7 adds controls, spans and `when=` to the tooltip rule and drops the `add="+"` caveat; §12 records the bindtag decision.
+- `2026-11-10` — `specs/virgil_tooltip_surfaces.md`: new; the plan for tooltips on every panel. Phases 0 and 1 are built.
+- `2026-11-10` — `BACKLOG.md`: the tooltip-surfaces item counts Home as covered and points at the plan.
+- `2026-11-10` — `panels/aura_panel.py`, `panels/eos_panel.py`: hover tooltips (Virgil) on every Atmospherics tab, fold header and readout; NOW and FORECAST show Aura's gloss, ALERTS Iris's, the sun and moon headers Helios's and Selene's.
+- `2026-11-10` — `config/virgil_glossary.json`: nineteen entries for the Atmospherics readouts, from the PLACE dropdown to the three space-weather scales.
+- `2026-11-10` — `BACKLOG.md`: the tooltip-surfaces item counts Atmospherics as covered.
+- `2026-11-10` — `panels/aura_panel.py`: a PLACE dropdown on Atmospherics (Home, or a cached Cartograph area); NOW and FORECAST follow it, and a line says the warnings, sun, moon and space weather stay on Home.
+- `2026-11-10` — `tools/aura.py`: the Kairos worker adds the picked place's reading under `picked`; Home's reading, the sidebar, Celestarium and `get_weather` stay Home.
+- `2026-11-10` — `tools/artemis.py`: `place_of()` and `is_area_id()`, a cached area's centre and name by its id.
+- `2026-11-10` — `themis.py`, `panels/themis_panel.py`: `atmos_place`, saved the moment either PLACE dropdown picks; SETTINGS gains "Atmospherics opens on".
+- `2026-11-10` — `theme.py`: `Card.header` is public, for a control at the right of the header line.
+- `2026-11-10` — `BACKLOG.md`: "Atmospherics only shows the weather at home" is done.
+- `2026-11-10` — `tools/eos.py`: new; NOAA's R/S/G scales and the Kp index from SWPC every 10 minutes, and an aurora estimate computed from the Settings coordinates.
+- `2026-11-10` — `panels/eos_panel.py`: new; the SPACE WEATHER fold row on NOW, Celestarium's aurora row, and a quiet aurora notice on Home.
+- `2026-11-10` — `panels/aura_panel.py`: NOW scrolls (ScrollColumn), so its open fold rows fit the minimum window.
+- `2026-11-10` — `panels/hypatia_panel.py`: an aurora row in OBSERVATION CONDITIONS; the conditions are packed before the star map, which shrinks instead.
+- `2026-11-10` — `themis.py`, `panels/themis_panel.py`: Settings › ALERTS › Space weather (panel only, or the aurora notice too).
+- `2026-11-10` — `config/virgil_glossary.json`: space_weather, aurora_estimate.
+- `2026-11-10` — `tools/iris.py`: new; the National Weather Service's active alerts at the Settings coordinates, tiered warning / watch / advisory, a Kairos worker every 60 s.
+- `2026-11-10` — `panels/iris_panel.py`: new; one AlertWatch hands the NOW banner, the ALERTS tab, Home's warning strip, the sidebar row and a popup read aloud the same view, so acknowledging turns them all amber together.
+- `2026-11-10` — `panels/aura_panel.py`: an ALERTS tab, and a warning banner above the temperature on NOW.
+- `2026-11-10` — `panels/sidebar.py`: `SidebarRow.set_alert()` puts a warning in the Atmospherics row's subtitle and gives the temperature back.
+- `2026-11-10` — `themis.py`, `panels/themis_panel.py`: an ALERTS section (weather alerts on/off, warnings or warnings and watches pop up, read aloud); the form scrolls with SAVE kept on screen.
+- `2026-11-10` — `theme.py`: `ScrollColumn`, the §7 scroll frame as one widget.
+- `2026-11-10` — `config/virgil_glossary.json`: weather_alert, alert_severity, alert_certainty, the ALERTS tab's tooltips.
+- `2026-11-10` — `panels/hephaestus_panel.py`, `panels/machine_spirit_panel.py`: the loaded-model lines show the GPU share, not Ollama's GB figure, which under-counts gemma4's GPU memory.
+- `2026-11-10` — `tools/talos.py`: the docstring says `size_gb` and `vram_gb` are Ollama's figures, not GPU memory.
+- `2026-11-10` — `CONVENTIONS.md` §12: gemma4:e4b and qwen3.5:4b tested against gemma4:e2b; e2b stays, re-pulled to its faster, smaller November build.
+- `2026-11-10` — `BACKLOG.md`: the download item carries the test results; its list is gemma4:e2b's November build, with measured requirements.
+- `2026-11-09` — `tools/brontes.py`: new; the NVIDIA GPU's name, temperature, memory and load through NVML, by ctypes, the DLL loaded by absolute path from System32.
+- `2026-11-09` — `tools/talos.py`: new; Ollama's installed and loaded models (`/api/tags`, `/api/ps`, `/api/show` once per digest), a Kairos worker every 5 s.
+- `2026-11-09` — `tools/hermes.py`: `post()`, one JSON POST read back under get()'s cap and deadline, never following a redirect.
+- `2026-11-09` — `tools/aether.py`: `ollama_base_url()` is public, so Talos asks the same server.
+- `2026-11-09` — `tools/hephaestus.py`: fetch() adds the boot drive, uptime and the GPU; `get_system_vitals` says so.
+- `2026-11-09` — `panels/hephaestus_panel.py`: one scrolling column, SYSTEM (both drives, uptime), GPU, OLLAMA — LOADED MODEL and AETHER; BarMeter gains `set_label()` and a value text.
+- `2026-11-09` — `config/virgil_glossary.json`: tips for the boot drive, uptime, the GPU, its memory and load, and the loaded model.
+- `2026-11-09` — `themis.py`: `pythia_model` (None = the `PYTHIA_MODEL` default) and `save_pythia_model()`; every save keeps it.
+- `2026-11-09` — `pythia.py`: the model is the owner's pick, read once per question; think goes only to a model that can; `switch_model()` unloads Felhaven's previous model and warms the new one.
+- `2026-11-09` — `panels/machine_spirit_panel.py`: a MODEL row of the installed models that can use tools, with a status line; THINKING greys out for a model that can't think; the stepper starts from the model's own temperature.
+- `2026-11-09` — `panels/machine_spirit_panel.py`: SAVE and its status line are packed first, so at the 760 x 500 minimum the editor shrinks instead.
+- `2026-11-09` — `SETUP.md`: a model is picked on MACHINE SPIRIT; `PYTHIA_MODEL` is the default for an install that hasn't picked one.
+- `2026-11-09` — `BACKLOG.md`: the Hephaestus and model-dropdown items are done; the download, alerts and location items carry the owner's decisions.
 - `2026-11-09` — `panels/machine_spirit_panel.py`: the editor gets the right-click Cut / Copy / Paste / Select All, Control-a and undo every editable box has; its scrollbar is packed first, so a narrow window no longer squeezes it out.
 - `2026-11-09` — `CONVENTIONS.md` §7: pack the scrollbar before the widget it scrolls.
 - `2026-11-09` — `panels/home_panel.py`, `panels/emanon_panel.py`, `panels/daedalus_panel.py`, `panels/euterpe_panel.py`: each text box's scrollbar is packed first, so a narrow window no longer squeezes it out.

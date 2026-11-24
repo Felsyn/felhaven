@@ -5,11 +5,11 @@ Metis Toolbox | Anti-Legion: ONE JOB
 
 Job:         Compute the positions of the five classical planets.
 
-Contract:    Pure-function module (the Helios/Selene row of CONVENTIONS §2 —
-             no fetch(), no handle(), no TOOL_DEFINITION, absent from
-             pythia._TOOL_MODULES). Imported only by tools/hypatia.py,
-             which composes it the way Midas composes Plutus. Out of LLM scope on purpose —
-             this is orbital math feeding a display, not a brain tool.
+Contract:    Pure functions, none of CONVENTIONS §2's flavors: no fetch(), no
+             handle(), no TOOL_DEFINITION, absent from pythia._TOOL_MODULES.
+             Imported only by tools/hypatia.py, whose snapshot carries the
+             planets. Out of LLM scope on purpose — this is orbital math
+             feeding a display, not a brain tool.
 
 Source:      Low-precision Keplerian elements: J2000 mean elements + secular
              (per-Julian-century) rates from Standish, E.M. (2006),
@@ -39,12 +39,23 @@ Upstream:    tools/hypatia.py (_build_snapshot calls positions())
 Downstream:  tools/hypatia.py — reuses its _altaz / _julian_date / compass (see
              Method; a documented, order-independent circular import, §12)
 
-Requires:    math, logging (stdlib only). No network, no state.
+Requires:    logging, math, os, sys, typing (stdlib; time for the demo). No
+             network, no state.
 
-V0.02:       Audited 2026-07-25 — positions() never-raises verified (per-planet
+2026-07-25:  walkthrough audit — positions() never-raises verified (per-planet
              degrade, per-body try/except). Dropped the demo's duplicate _compass
              for the shared hypatia.compass; Downstream corrected to name hypatia
              (it reuses hypatia's math, the circular half §12 documents).
+
+V0.03:       Walked through 2026-11-20 (the V0.03 walkthrough's S20). Words
+             only. The Contract cited "the Helios/Selene row" of §2 (Helios
+             and Selene are polled now, and §2 has no such row) and Midas
+             composing Plutus (it doesn't; the Midas panel calls both);
+             Requires caught up. Checked and true: Mars against its JPL
+             Horizons fixture (re-run: within 0.004 degrees, well inside the
+             test's 2), the Newton solver, the per-planet degrade, the
+             circular import's safety (neither module touches the other at
+             import).
 """
 
 import logging

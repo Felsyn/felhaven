@@ -672,7 +672,7 @@ class TestMusicEvidence(_EuterpeCase):
     # ── degradation ─────────────────────────────────────────────────────────
     def test_a_failed_describe_falls_back_to_the_two_argument_answer(self):
         """One bad network call must not take the DJ off the air."""
-        failed = {"error": "describe_failed"}
+        failed = {"error": "unavailable"}
         self.assertIsNone(euterpe.is_a_song("Artist - Song", 240, failed))
         self.assertEqual(euterpe.is_a_song("Artist - Song", 20, failed),
                          "too_short")
@@ -729,7 +729,7 @@ class TestMusicEvidence(_EuterpeCase):
                 self.assertFalse(euterpe.has_music_evidence({"channel": channel}))
 
     def test_a_failed_describe_is_NOT_evidence(self):
-        self.assertFalse(euterpe.has_music_evidence({"error": "describe_failed"}))
+        self.assertFalse(euterpe.has_music_evidence({"error": "unavailable"}))
         self.assertFalse(euterpe.has_music_evidence(None))
 
     def test_absence_of_evidence_is_never_evidence_of_absence(self):
@@ -1353,6 +1353,25 @@ class TestBaseCopy(_EditorCase):
             with self.assertLogs("METIS.euterpe", level="ERROR"):
                 self.assertEqual(euterpe.take_base(), "write_failed")
         self.assertEqual(euterpe.base_snapshot()["text"], kept)
+
+    def test_a_failed_write_leaves_no_temp_file(self):
+        """The temp file goes with the failure, as _save()'s does: a stray
+        .euterpe-base-*.tmp beside the ledger is litter nothing else removes."""
+        self._play("Artist - First")
+        with mock.patch("tools.euterpe.os.replace", side_effect=OSError("denied")):
+            with self.assertLogs("METIS.euterpe", level="ERROR"):
+                self.assertEqual(euterpe.take_base(), "write_failed")
+        leftovers = [n for n in os.listdir(self._tmp.name) if n.endswith(".tmp")]
+        self.assertEqual(leftovers, [], f"temp files left: {leftovers}")
+
+    def test_a_ledger_that_cannot_be_read_is_read_failed(self):
+        """Nothing was written, so the slug must not say write_failed: the
+        operator would go looking for a disk problem that isn't there."""
+        with open(euterpe._LEDGER_PATH, "wb") as handle:
+            handle.write(b'{"plays": [\xff\xfe]}')          # not UTF-8
+        with self.assertLogs("METIS.euterpe", level="ERROR"):
+            self.assertEqual(euterpe.take_base(), "read_failed")
+        self.assertIsNone(euterpe.base_snapshot())
 
     def test_a_corrupt_base_is_still_handed_back_to_be_looked_at(self):
         """plays=None, not None-the-whole-snapshot. A restore point you cannot

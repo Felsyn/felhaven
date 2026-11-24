@@ -20,8 +20,9 @@ Drawing:     Canvas items are built once per index revision and only
              recoloured after that (itemconfig on hover and click), never
              deleted and recreated per interaction. A resize moves them with
              coords(). The force layout runs inside daedalus.layout() the
-             first time the tab is SHOWN (~0.2 s), not when Felhaven builds
-             the tab at launch, and is cached until a file changes.
+             first time the tab is SHOWN (0.23 s, measured 2026-11-23), not
+             when Felhaven builds the tab at launch, and is cached until a
+             file changes.
 
 Refresh:     <Map> — each time the tab comes into view — asks for the index,
              which costs one stat per file when nothing moved. An edited
@@ -29,8 +30,10 @@ Refresh:     <Map> — each time the tab comes into view — asks for the index,
              loop, no thread, not Kairos-registered: request-driven, like
              Cerberus, Settings and Machine Spirit.
 
-Notepad:     OPEN IN NOTEPAD runs `notepad.exe <path>` — and never
-             os.startfile. The default action for a .py on Windows is often to
+Notepad:     OPEN IN NOTEPAD runs System32's `notepad.exe <path>`, by
+             absolute path (a bare name would find one in the working folder
+             first; CONVENTIONS §12, 2026-11-17) — and never os.startfile.
+             The default action for a .py on Windows is often to
              RUN it with the Python launcher, which is the one thing a button
              labelled "open" must never do (cerberus_panel's open-folder
              helper uses startfile on a FOLDER, where that is safe; not here).
@@ -39,11 +42,26 @@ Notepad:     OPEN IN NOTEPAD runs `notepad.exe <path>` — and never
              Off Windows the button is disabled with a note, with no
              xdg-open/open fallback, for the same reason.
 
+Contract:    DaedalusPanel(parent), a tab body; select(key) picks a module.
+             No update() (nothing polls it); refresh() runs on <Map>.
+
 Upstream:    panels/moderati_panel.py (hosts this as the DAEDALUS tab)
 Downstream:  tools/daedalus.py (the index, the layout, the docstrings, the
-             paths), theme.py (colors/fonts/PhosphorScroll)
+             paths), theme.py (colors/fonts/PhosphorScroll), tools/virgil.py
+             and panels/virgil_tooltip.py (the legend's tooltip)
 
-Requires:    tkinter, subprocess (stdlib).
+Requires:    os, subprocess, sys, tkinter, typing (stdlib).
+
+2026-11-16:  audited — a module that will not parse showed its raw slug
+             ("parse_failed: ...") in the pane; it now reads in words through
+             _ERROR_TEXT (§2), keeping the file and line. Downstream now names
+             Virgil, added after this panel was written.
+
+V0.03:       Walked through 2026-11-23 (the V0.03 walkthrough, S34; born
+             2026-09-27). Every path was read against Daedalus's Contract, the
+             Notepad rule and §7's layout; nothing in the code needed
+             changing. Words: a Contract, the layout's measured time, Requires,
+             and one Notepad line an earlier edit had run together.
 """
 
 import os
@@ -52,11 +70,17 @@ import sys
 import tkinter as tk
 from typing import Any, Optional
 
+from panels import virgil_tooltip
 from theme import C, FONTS, PhosphorScroll
-from tools import daedalus
+from tools import daedalus, virgil
 
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _IS_WINDOWS = sys.platform == "win32"
+# Notepad by its absolute path. A bare name is looked for in Python's folder
+# and the working folder before System32, so a notepad.exe left in either
+# would open in its place (measured 2026-11-17; CONVENTIONS §12).
+_NOTEPAD = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                        "System32", "notepad.exe")
 
 # Folder → palette key. The theme is a phosphor ramp, so folders separate by
 # brightness, plus amber for the core that ties them together.
@@ -64,10 +88,23 @@ _GROUP_COLOR = {"core": "amber", "tools": "text1", "panels": "text2"}
 _R = 4                 # node radius, px
 _R_SELECTED = 6
 
+# Daedalus's slugs in words (CONVENTIONS §2). The detail after the colon is
+# kept: which file, and which line, is what the owner opens next.
+_ERROR_TEXT = {
+    "parse_failed": "this module does not parse",
+    "not_found": "Daedalus no longer finds this module",
+}
+
 
 class DaedalusPanel(tk.Frame):
     """Felhaven's import graph and a docstring reader. A bare Frame tab body
     inside ModeratiPanel; no Kairos worker, no update() — request-driven."""
+
+    # Hover tooltip (Virgil) for the graph's legend, a glossary entry
+    # (CONVENTIONS §7): what the colours and the two line styles mean.
+    _TIPS = {
+        "legend": virgil.term("import_legend"),
+    }
 
     def __init__(self, parent: tk.Widget):
         super().__init__(parent, bg=C["card"])
@@ -138,6 +175,8 @@ class DaedalusPanel(tk.Frame):
                      bg=C["card"]).pack(side="left", padx=(0, 10))
         tk.Label(legend, text="── import   ┄┄ lazy import",
                  font=FONTS["tiny"], fg=C["text3"], bg=C["card"]).pack(side="left")
+        self.tip_targets: dict[str, tk.Misc] = {"legend": legend}
+        virgil_tooltip.attach(legend, self._TIPS["legend"])
 
         # height=1: a bare Canvas asks for 265 px (§7) — let expand do the growing.
         self._canvas = tk.Canvas(self, bg=C["bar_bg"], height=1, borderwidth=0,
@@ -282,7 +321,9 @@ class DaedalusPanel(tk.Frame):
         found = daedalus.docstring(key)
         path = found.get("path") or self._nodes.get(key, {}).get("path", "")
         if "error" in found:
-            body = f"(this module could not be read — {found['error']})"
+            code, _sep, detail = str(found["error"]).partition(": ")
+            words = _ERROR_TEXT.get(code, f"error: {code}")
+            body = f"({words} — {detail})" if detail else f"({words})"
         elif found.get("docstring") is None:
             body = "(no module docstring)"
         else:
@@ -331,7 +372,7 @@ class DaedalusPanel(tk.Frame):
                               fg=C["red"])
             return
         try:
-            subprocess.Popen(["notepad.exe", path],
+            subprocess.Popen([_NOTEPAD, path],
                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except OSError as exc:
             self._note.config(text=f"Notepad could not start ({type(exc).__name__}).",

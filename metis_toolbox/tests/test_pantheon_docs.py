@@ -49,7 +49,7 @@ def _claimed_tools(text):
     """Tool names a stub claims, or [] when it says 'none'.
 
     A "none" field may still name a tool in prose (kepler reaches the model
-    through hypatia's get_sky_tonight), so "none" short-circuits before the
+    through get_sky_report, via Hypatia), so "none" short-circuits before the
     backtick scan — otherwise the explanation reads as a claim.
     """
     m = _TOOL_FIELD.search(text)

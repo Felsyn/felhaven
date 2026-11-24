@@ -12,9 +12,13 @@ Job:         Resolve a typed location query to a latitude and longitude.
 
 Contract:    Plain functions, not a brain tool:
                • parse_coordinates(text) -> (lat, lon) | None   (pure, offline)
+               • format_coordinates(lat, lon) -> "39.2806°N 80.3440°W"
                • waypoints()             -> list of saved places (never raises)
                • resolve(text)           -> {"lat","lon","label","source"}
                                             | {"error": "<slug>"}
+             resolve()'s source is "coordinates", "waypoint" or "address";
+             its slugs are empty_query, bad_coordinates, no_results and
+             geocode_failed: <detail>.
              resolve() NEVER raises and never caches: it answers a question,
              it does not remember anything. Storing the fix is Themis's job
              and always was — this module was deliberately scoped down from
@@ -28,6 +32,16 @@ Order:       Coordinates, then waypoints, then the geocoder — cheapest and
              convenience at the end of the list rather than the design
              centre. Named waypoints are the path that actually gets used in
              the field.
+
+             Between the waypoints and the geocoder, text made only of
+             numbers and hemisphere letters that didn't parse is refused as
+             bad_coordinates. It is a mistyped coordinate, which is a
+             location, and the geocoder only guesses at such text: it echoed
+             "138.8977 -77.0365" back as an x/y pair at 77°S, and matched
+             "1600 20500" to a numbered road in Kansas (2026-11-18). The
+             refusal comes after the waypoints, so a waypoint named in
+             digits still resolves; an address made only of numbers and
+             letters (a grid address with its ZIP) needs its city added.
 
 Grammars:    Three, because that is what you can read off the things you
              actually carry:
@@ -60,7 +74,16 @@ Downstream:  none. This module knows nothing about the chart it serves; it
              hands back a pair of numbers and forgets them.
 
 Requires:    tools/hermes.py (the bounded network read), and json, logging,
-             os, re (stdlib).
+             os, re, sys (stdlib).
+
+V0.03:       Walked through 2026-11-18 (the V0.03 walkthrough, CONVENTIONS
+             §3), its first audit (born 2026-08-10, Artemis M5). The
+             geocoder read goes through Hermes with a measured cap (re-measured
+             live: 673 B for a match, 246 B for none), resolve() never raises,
+             no slug carries exception text, and the waypoints file is read
+             fresh on every search. A mistyped coordinate no longer goes to
+             the geocoder (bad_coordinates, the owner's pick, see Order);
+             Contract gained format_coordinates and the slugs, Requires sys.
 """
 
 import json
@@ -85,8 +108,8 @@ _WAYPOINTS_PATH = os.path.join(_APP_ROOT, "config", "artemis_waypoints.json")
 _GEOCODER_URL = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
 _BENCHMARK = "Public_AR_Current"
 _HTTP_TIMEOUT = 10
-# Measured 2026-10-01: a one-match answer is 665 B, no match 234 B. The cap is
-# hermes' 64 KiB floor.
+# Measured 2026-10-01: a one-match answer is 665 B, no match 234 B (673 B and
+# 246 B on 2026-11-18). The cap is hermes' 64 KiB floor.
 _MAX_BYTES = 64 * 1024
 _USER_AGENT = "Felhaven/1.0 (Artemis chart search)"
 
@@ -101,14 +124,12 @@ _NUMBER = re.compile(r"^[+-]?\d+(\.\d+)?$")
 
 # ── Coordinates ───────────────────────────────────────────────────────────────
 
-def parse_coordinates(text: str) -> "tuple[float, float] | None":
-    """Parse the three grammars above. None (not an exception) when the text
-    isn't coordinates at all — the caller then tries waypoints and the
-    geocoder, so "unparseable" is a normal outcome here."""
+def _coordinate_tokens(text: str) -> "tuple[list[float], list[str]] | None":
+    """The numbers and hemisphere letters in `text`, or None when it holds a
+    word or no number at all. Text this returns something for is
+    COORDINATE-SHAPED: if it then fails to parse, resolve() refuses it as
+    bad_coordinates rather than send a mistyped location to the geocoder."""
     cleaned = _SEPARATORS.sub(" ", text.strip().lower())
-    if not cleaned:
-        return None
-
     numbers: list[float] = []
     letters: list[str] = []
     for token in cleaned.split():
@@ -126,6 +147,19 @@ def parse_coordinates(text: str) -> "tuple[float, float] | None":
         if not _NUMBER.match(token):
             return None                    # a word: not coordinates
         numbers.append(float(token))
+    if not numbers:
+        return None
+    return numbers, letters
+
+
+def parse_coordinates(text: str) -> "tuple[float, float] | None":
+    """Parse the three grammars above. None (not an exception) when the text
+    isn't coordinates at all — the caller then tries waypoints and the
+    geocoder, so "unparseable" is a normal outcome here."""
+    tokens = _coordinate_tokens(text)
+    if tokens is None:
+        return None
+    numbers, letters = tokens
 
     if len(numbers) not in (2, 4, 6) or len(letters) not in (0, 2):
         return None
@@ -250,7 +284,10 @@ def _geocode(text: str) -> dict[str, Any]:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def resolve(text: str) -> dict[str, Any]:
-    """Coordinates -> waypoint -> geocoder. Never raises."""
+    """Coordinates -> waypoint -> geocoder. Never raises. Coordinate-shaped
+    text that reaches the geocoder's turn stops at bad_coordinates instead
+    (see Order: it is taken as a mistyped location, and a word is what makes
+    text an address)."""
     if not text or not text.strip():
         return {"error": "empty_query"}
 
@@ -264,6 +301,8 @@ def resolve(text: str) -> dict[str, Any]:
         return {"lat": entry["lat"], "lon": entry["lon"],
                 "label": entry["name"], "source": "waypoint"}
 
+    if _coordinate_tokens(text) is not None:
+        return {"error": "bad_coordinates"}
     return _geocode(text)
 
 

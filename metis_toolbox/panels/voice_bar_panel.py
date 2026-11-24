@@ -33,6 +33,13 @@ Downstream:  voices.py (the roster + labels), theme.py (colors/fonts)
 
 Requires:    tkinter (stdlib). No persistence here — that is voices.py's job,
              and Echo's pick is deliberately not persisted at all.
+
+V0.03:       Walked through 2026-11-19 (the V0.03 walkthrough, CONVENTIONS
+             §3), its first audit (born 2026-08-02). Display and one action as
+             promised: no state beyond the StringVar, ids in and out, colours
+             from the palette, mounted in exactly the two tabs it names. One
+             comment called Midas's picker the app's only other dropdown;
+             there are three now.
 """
 
 import tkinter as tk
@@ -64,7 +71,7 @@ class VoiceBar(tk.Frame):
                  bg=C["card"], anchor="w").pack(side="left", padx=(0, 6))
 
         # tk.OptionMenu styling copied verbatim from the watchlist picker in
-        # panels/midas_panel.py — the app's only other dropdown.
+        # panels/midas_panel.py, the app's first dropdown.
         self._var = tk.StringVar(value=voices.label(initial))
         menu = tk.OptionMenu(self, self._var, *self._ids.keys(),
                              command=self._on_pick)

@@ -120,6 +120,16 @@ class TestGate(_PanelBase):
         self.assertIn("attempt", self.panel._gate_status.cget("text").lower())
         self.assertEqual(cerberus.attempts_left(), 2)
 
+    def test_each_section_header_carries_its_tip(self):
+        from panels import virgil_tooltip
+        from panels.cerberus_panel import CerberusPanel
+        self._unlock()
+        self.assertEqual(sorted(CerberusPanel._SECTION_TIPS), sorted(self.panel._sections))
+        shared = virgil_tooltip._shared(self.root)
+        for key, tip in CerberusPanel._SECTION_TIPS.items():
+            self.assertEqual(shared._tips.get(str(self.panel._sections[key].header)),
+                             tip, key)
+
     def test_correct_pin_unlocks_and_builds_sections(self):
         self._unlock()
         self.assertTrue(self.panel._unlocked_built)
@@ -154,6 +164,21 @@ class TestGate(_PanelBase):
         self.assertTrue(os.path.exists(cerberus._DATA_PATH))
         self.assertTrue(cerberus.is_unlocked())
         self.assertTrue(panel._unlocked_built)
+        panel.destroy()
+
+    def test_a_pin_that_cannot_be_saved_shows_the_class_not_the_path(self):
+        """§2: the error's text names cerberus_data.json's full path."""
+        os.remove(cerberus._DATA_PATH)
+        panel = self._make_panel()
+        panel._entry.insert(0, "fake-first-pin")
+        panel._confirm_entry.insert(0, "fake-first-pin")
+        boom = PermissionError(13, "Access is denied", str(cerberus._DATA_PATH))
+        with mock.patch.object(cerberus, "set_pin", side_effect=boom):
+            panel._create_pin()
+        text = panel._gate_status.cget("text")
+        self.assertIn("PermissionError", text)
+        self.assertNotIn("cerberus_data.json", text)
+        self.assertTrue(panel._first_run)
         panel.destroy()
 
     def test_first_run_mismatched_pins_do_not_write(self):
@@ -403,6 +428,15 @@ class TestCustody(_PanelBase):
         self.panel._open_folder()
         self.assertEqual(len(self._opened), 1)
         self.assertEqual(os.path.realpath(self._opened[0]), os.path.realpath(self._dir))
+
+    def test_a_failed_open_shows_the_error_class_not_its_text(self):
+        """§2: an OSError's text carries the path onto the screen."""
+        path = os.path.join(self._dir, "fake-private-name.json")
+        boom = OSError(1155, "No application is associated", path)
+        with mock.patch.object(cpanel.platform, "system", return_value="Windows"), \
+                mock.patch.object(cpanel.os, "startfile", side_effect=boom, create=True):
+            err = self._orig_open(path)
+        self.assertEqual(err, "OSError")
 
     def test_sections_render_without_error(self):
         self._unlock()

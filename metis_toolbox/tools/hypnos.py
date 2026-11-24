@@ -59,6 +59,12 @@ Upstream:    cerberus.py (fetch)
 Downstream:  user32, kernel32, wtsapi32 (Windows, through ctypes)
 
 Requires:    stdlib only (ctypes, dataclasses, logging, sys)
+
+V0.03:       Walked through 2026-11-17 (the V0.03 walkthrough, CONVENTIONS
+             §3); its first marker. Clean: the three readings, the 32-bit
+             wrap, the neutral off-Windows answer and HypnosError on a failed
+             call all match this docstring, and Cerberus is still its only
+             caller. Its logger stays though nothing logs (§3's rule).
 """
 
 import logging

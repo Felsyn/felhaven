@@ -15,9 +15,28 @@ Hestia:      The title/face/controls block at the top is HestiaBar
              thread, self._history, and the running session totals
              (Scraptoken Flux = tokens, Rites = tool calls). Hestia never
              touches any of that state itself. The two readouts sit on this
-             panel's own status row, bottom-right, opposite the in-flight
-             status — near the numbers that compute them and clear of the
+             panel's own status bar, under the input row at the bottom
+             edge — near the numbers that compute them and clear of the
              controls.
+
+Status line: What Pythia or the Auto-DJ is doing ("consulting the oracle…",
+             "waiting for your OK…", "Auto-DJ: 2 queued") is written into
+             Hestia's line under the PYTHIA title, which says "ask the
+             oracle" while nothing is happening (self._status IS that label;
+             _set_status is its one writer). It used to sit on the status
+             bar, where the readouts left it too little room to be read at
+             narrow widths (CONVENTIONS §12, 2026-11-15).
+
+Status bar:  Under the input row: FOE's version on the left, the readouts
+             (Cerberus, Scraptoken Flux, Rites, Ammit) on the right. The
+             version is daedalus.audit_version() — the newest audit marker
+             in the code (§3), read once as the panel is built — so it is
+             never a number someone forgot to bump (CONVENTIONS §3, §12
+             2026-11-15). It shows only while it fits whole beside the
+             readouts, which grow as Scraptoken Flux and Rites climb
+             (_fit_version). The input row, the status bar and the
+             file-change question share one dock frame, so the alert and
+             aurora strips always land above all three.
 
 Streaming:   pythia.ask() streams the answer token-by-token via an on_delta
              callback, so the transcript fills in live instead of appearing all
@@ -120,17 +139,24 @@ Why a thread: LLM answers are slow (up to ~100s cold, seconds warm). tkinter
 
 Not Kairos-registered (mostly): the chat itself is event-driven (you press
              Enter), not timed, so it runs its own poll rather than riding
-             Kairos's tick. There are two exceptions, and they attach
-             differently on purpose.
+             Kairos's tick. Four registrations reach this view all the same
+             (the panel itself and three of its parts), plus one strip fed
+             from elsewhere, and they attach differently on purpose.
 
              AmmitBadge (panels/horai_panel.py) is a display-only Ammit status
-             readout on the status row, next to Scraptoken Flux/Rites. It has
+             readout on the status bar, next to Scraptoken Flux/Rites. It has
              no state of its own worth ticking on this panel's 60 ms poll, so
              this PANEL registers under "horai" in felhaven.py purely to
              refresh that one badge on Kairos's 1 s tick; see update() below.
              Ammit's alarm (popup + spoken announcement) is NOT owned here —
              that lives in AmmitAlarm on HoraiPanel, which persists across view
              switches and fires regardless of which sidebar view is showing.
+
+             AlertBadge (panels/iris_panel.py) is the weather-warning strip
+             just above the dock, hidden while nothing is active, and above
+             the aurora line whenever both show, whichever came first. It
+             is not registered here at all: AlertWatch, on Kairos's "iris"
+             worker, hands it the same view as every other alert display.
 
              DjRider is Auto-DJ's line (awen.py), and the RIDER registers, not
              the panel — because update() is already spoken for by the badge
@@ -144,23 +170,41 @@ Not Kairos-registered (mostly): the chat itself is event-driven (you press
              LAMP registers itself under Kairos's "cerberus" worker, for the
              same reason the rider does.
 
+             AuroraNotice (panels/eos_panel.py) is the quiet aurora line just
+             above the dock, shown only with Settings' "Aurora notice too".
+             It registers itself under Kairos's "eos" worker, the lamp's way.
+
 Face:        Hestia's wireframe face is told what Pythia is doing from that
              same 60 ms drain chain — no second timer, the _tick_status trick.
-             The mapping is derived, never stored: audible → speaking,
-             thinking → a live worker or a warming model, otherwise idle.
+             The mapping is derived, never stored: audible → speaking, a live
+             worker or a warming model → thinking, music audible → playing,
+             otherwise idle.
 
-Upstream:    felhaven.py (builds it as the "felhaven" view, registers it under
-             Kairos's "horai" for the Ammit badge — see above)
+Upstream:    felhaven.py (builds it as the "felhaven" view; registers the
+             panel under Kairos's "horai" for the Ammit badge, dj_rider under
+             "awen", cerberus_lamp under "cerberus" and aurora_notice under
+             "eos" — see above)
 Downstream:  pythia.py (the oracle, and via on_verbatim the text some
              tools show exactly), calliope.py (narration),
-             awen.py (Auto-DJ's flag, via HestiaBar's vox row),
+             harmonia.py (is_playing, and tick_yield on the drain chain),
+             tools/morpheus.py (is_audible, and tick_fade on the chain),
+             tools/daedalus.py (FOE's version, for the status bar),
+             awen.py (Auto-DJ's line, status and queue; its flag via
+             HestiaBar's vox row),
              panels/hestia_panel.py (title, face, controls),
+             panels/queue_panel.py (QueueBox, the Auto-DJ queue window),
+             panels/rite_panel.py (RiteLog),
+             panels/virgil_tooltip.py + tools/virgil.py (the hover tips),
              panels/horai_panel.py (AmmitBadge; transitively tools/ammit.py),
-             theme.py (colors)
+             panels/cerberus_panel.py (CerberusLamp),
+             panels/iris_panel.py (AlertBadge),
+             panels/eos_panel.py (AuroraNotice),
+             theme.py (colors, fonts, PhosphorScroll, the right-click menu)
 
-Requires:    tkinter, threading, queue (stdlib); pythia, calliope.
+Requires:    tkinter, threading, queue, logging, re, time, collections,
+             typing (stdlib); pythia, calliope, harmonia, awen.
 
-V0.02: Audited 2026-07-26 — verified honest, no dead code. Added HomePanel's
+2026-07-26:  walkthrough audit — verified honest, no dead code. Added HomePanel's
 pythia.ask worker thread + persistent after()-poll to CONVENTIONS §6's threading
 exceptions, and narrowed §6 (a single one-shot UI-feedback after() is now
 permitted). Themed right-click menu is still
@@ -171,6 +215,17 @@ override (the EchoPanel precedent). Before this, the suite printed ~53 Tcl
 `invalid command name "..._poll"` lines — the chain outlived the widget whose
 Tcl command it named. §6 updated to match. (A latency-filler timer was cancelled
 alongside it until 2026-09-07, when the pre-rendered fillers were removed.)
+
+V0.03:       Walked through 2026-11-19 (the V0.03 walkthrough's S19). Words
+             only, no behaviour change. The status bar's version is "the
+             newest audit marker", no longer a V0.02 one; the Kairos
+             paragraph counts four registrations, not two, and gains the
+             aurora line; the face mapping gains "playing"; Upstream,
+             Downstream and Requires catch up (Harmonia, Morpheus, the queue
+             and Rite windows, the lamp, the aurora line); stale comments on
+             the status line's writers and the readouts' home are fixed, and
+             comments say "the owner" where they used a name; the entry stops
+             repeating the theme's cursor colour (§7).
 """
 
 import logging
@@ -186,12 +241,15 @@ import awen
 import calliope
 import harmonia
 import pythia
+from panels import virgil_tooltip
 from panels.queue_panel import QueueBox
-from tools import morpheus
+from tools import daedalus, morpheus, virgil
 from theme import C, FONTS, PhosphorScroll, themed_menu, popup_menu
 from panels.cerberus_panel import CerberusLamp
 from panels.hestia_panel import HestiaBar
 from panels.horai_panel import AmmitBadge
+from panels.eos_panel import AuroraNotice
+from panels.iris_panel import AlertBadge
 from panels.rite_panel import RiteLog
 
 log = logging.getLogger("METIS.home_panel")
@@ -213,6 +271,9 @@ _POLL_FAIL_QUIET = 60.0   # seconds
 # Deny. Long enough to read a note through; short enough that a question
 # nobody saw doesn't hold the turn open all night.
 _CONFIRM_WAIT_S = 600.0
+# The least gap, in px, the status bar's version keeps from the readouts; with
+# less room than its own width plus this, it hides (_fit_version).
+_VERSION_GAP = 12
 
 # A sentence ends at .!? (optionally closed by a quote/bracket) FOLLOWED by
 # whitespace — the trailing space proves the sentence is complete, so "3.5" or
@@ -282,6 +343,30 @@ class DjRider:
 
 
 class HomePanel(tk.Frame):
+    # Hover tooltips (Virgil) for this panel's own readouts and controls: each
+    # says what a number or a lamp means, or what a click does, so each is a
+    # glossary entry (CONVENTIONS §7). Keys name the targets in
+    # self._tip_targets; test_home_panel_smoke holds the two in lockstep.
+    # "speak", "meta" and "meta_fail" are spans of the transcript, named by
+    # the tag every such span shares. "alerts" and "aurora" are the two strips
+    # above the dock, and reuse the entries Atmospherics shows for the
+    # same readings. The face and the vox controls carry their own tips
+    # (HestiaBar._TIPS, VoxControls._TIPS).
+    _TIPS = {
+        "cerberus":  virgil.term("cerberus_lamp"),
+        "flux":      virgil.term("scraptoken_flux"),
+        "rites":     virgil.term("rites"),
+        "ammit":     virgil.term("ammit_badge"),
+        "status":    virgil.term("status_line"),
+        "version":   virgil.term("foe_version"),
+        "confirm":   virgil.term("file_change"),
+        "speak":     virgil.term("speak_aloud"),
+        "meta":      virgil.term("answer_stats"),
+        "meta_fail": virgil.term("answer_stats"),
+        "alerts":    virgil.term("weather_alert"),
+        "aurora":    virgil.term("aurora_estimate"),
+    }
+
     def __init__(self, parent: tk.Widget) -> None:
         super().__init__(parent, bg=C["bg"])
 
@@ -314,17 +399,15 @@ class HomePanel(tk.Frame):
         self._last_stats: Optional[dict[str, Any]] = None
         # The pending after() id, so destroy() can cancel it (see destroy()).
         self._poll_after_id: Optional[str] = None
-        # Whether the status line is currently showing the warmup notice. Kept
-        # so _poll() only writes on a transition — otherwise it would repaint
-        # every 60 ms and could clobber a message set by the request path.
-        # What _tick_status last wrote, so it only repaints on a real change.
-        # Was _showing_warmup (a bool) until Auto-DJ became a third claimant on
-        # the same label and the state stopped being two-valued.
+        # What the status line was last set to ("" = the idle line), so
+        # _tick_status repaints only on a real change: a repaint every 60 ms
+        # could clobber a message set by the request path. Was _showing_warmup
+        # (a bool) until Auto-DJ became a third claimant on the same label and
+        # the state stopped being two-valued.
         self._status_shown = ""
         # True while the status line is showing the Auto-DJ queue count, which
-        # is the ONE thing on that label you can click. Kept because four other
-        # sites write the label directly and every one of them has to be able
-        # to hand the affordance back.
+        # is the ONE thing on that label you can click. _set_status sets it on
+        # every write, so any write hands the affordance back.
         self._status_clickable = False
         # The one queue window, or None. One rather than RiteLog's many: those
         # each show a different frozen turn, and every one of these would show
@@ -335,7 +418,7 @@ class HomePanel(tk.Frame):
         # Failing-tick bookkeeping (see _note_poll_failure).
         self._poll_fails = 0
         self._poll_fail_reported = 0.0
-        # Session totals (Hestia readouts) — reset on Refresh.
+        # Session totals (the status bar's readouts) — reset on Refresh.
         self._sess_tokens = 0
         self._sess_tools = 0
         self._sess_fails = 0
@@ -343,11 +426,20 @@ class HomePanel(tk.Frame):
         # a time: a turn's tool calls run one after another on one worker.
         self._pending_confirm: Optional[_ConfirmReply] = None
 
-        # ── Hestia — title, narration lamp, stop, refresh, session readouts ──
+        # ── Hestia — title, status line, face, vox controls ──────────────────
         self._hestia = HestiaBar(self, on_stop=self._on_stop,
                                  on_refresh=self._on_refresh,
                                  on_notice=self.dj_says)
         self._hestia.pack(fill="x")
+
+        # ── Status line: Hestia's line under the title ───────────────────────
+        # Hestia draws it; this panel writes it (_set_status) and makes it a
+        # control while it shows the Auto-DJ queue. Up there it has the title
+        # column to itself and wraps instead of being cut off.
+        self._status = self._hestia.line
+        self._status.bind("<Button-1>", self._on_status_click)
+        self._status.bind("<Enter>", self._on_status_enter)
+        self._status.bind("<Leave>", self._on_status_leave)
 
         # Registered under Kairos's "awen" worker in felhaven.py — see DjRider
         # for why it is a rider and not a branch in update().
@@ -402,17 +494,50 @@ class HomePanel(tk.Frame):
         # selection + clipboard copy work regardless of that state.
         self._log.bind("<Button-3>", self._show_log_menu)
 
-        # ── Status line + session readouts ────────────────────────────────────
-        # One row, opposite ends: the in-flight status on the left, the session
-        # totals on the right, clear of Hestia's controls.
-        status_row = tk.Frame(self, bg=C["bg"])
-        status_row.pack(fill="x", pady=(4, 2))
+        # ── The dock: question bar, input row, status bar ─────────────────────
+        # One frame under the transcript holding, top to bottom, the
+        # file-change question (only while one is open), the input row, and
+        # the status bar under it. One frame so that the alert and aurora
+        # strips, which pack just before it, stay above all three — the order
+        # the status row used to guarantee when it sat between them.
+        dock = self._dock = tk.Frame(self, bg=C["bg"])
+        dock.pack(fill="x")
+
+        # ── Input row ─────────────────────────────────────────────────────────
+        row = tk.Frame(dock, bg=C["bg"])
+        row.pack(fill="x")
+        tk.Label(row, text=">", font=FONTS["body"],
+                 fg=C["text1"], bg=C["bg"]).pack(side="left", padx=(0, 4))
+        self._entry = tk.Entry(
+            row, font=FONTS["body"], bg=C["card"], fg=C["text1"],
+            highlightbackground=C["border"],
+            highlightcolor=C["text1"], highlightthickness=1, borderwidth=0,
+        )
+        self._entry.pack(side="left", fill="x", expand=True, ipady=3)
+        self._entry.bind("<Return>", self._on_submit)
+        self._entry.bind("<Button-3>", self._show_entry_menu)
+
+        # ── Status bar: version, session readouts ─────────────────────────────
+        # Under the input row, the bottom edge of the window: FOE's version on
+        # the left and the session totals on the right, clear of Hestia's
+        # controls. (What Pythia is doing is Hestia's line, up top.)
+        status_row = self._bar = tk.Frame(dock, bg=C["bg"])
+        status_row.pack(fill="x", pady=(4, 0))
+        # Two strips above the dock, each hidden while it has nothing to say.
+        # The aurora, quietly: only with Settings "Aurora notice too", on
+        # Kairos's "eos" worker (felhaven.py).
+        self.aurora_notice = AuroraNotice(self, before=dock)
+        # Weather warnings, above the aurora line whenever both show, whichever
+        # came first (above=): a warning matters more. Fed by AlertWatch on
+        # Kairos's "iris" worker (felhaven.py); the status bar has no room for
+        # it at the minimum window.
+        self.alert_badge = AlertBadge(self, before=dock, above=self.aurora_notice)
 
         # Readouts are packed FIRST on purpose. Pack allocates in order, so
-        # claiming their width up front means a long status string is clipped
-        # rather than shoving the counters off the edge — at the old 700 px
-        # minimum window this row had only ~20 px to spare (~80 at today's 760).
-        readouts = tk.Frame(status_row, bg=C["bg"])
+        # claiming their width up front means the counters are never shoved
+        # off the edge; the version takes what is left, and _fit_version hides
+        # it rather than let it be cut off.
+        readouts = self._readouts = tk.Frame(status_row, bg=C["bg"])
         readouts.pack(side="right")
         # Cerberus at a glance. felhaven.py registers it on Kairos's `cerberus`
         # worker; like AmmitBadge it holds no state of this panel's.
@@ -432,42 +557,85 @@ class HomePanel(tk.Frame):
         self._ammit_badge = AmmitBadge(readouts)
         self._ammit_badge.pack(side="left", padx=(12, 0))
 
-        self._status = tk.Label(status_row, text="", font=FONTS["small_italic"],
-                                fg=C["amber"], bg=C["bg"], anchor="w")
-        self._status.pack(side="left", fill="x", expand=True)
-        self._status.bind("<Button-1>", self._on_status_click)
-        self._status.bind("<Enter>", self._on_status_enter)
-        self._status.bind("<Leave>", self._on_status_leave)
-
-        # ── Input row ─────────────────────────────────────────────────────────
-        row = tk.Frame(self, bg=C["bg"])
-        row.pack(fill="x")
-        tk.Label(row, text=">", font=FONTS["body"],
-                 fg=C["text1"], bg=C["bg"]).pack(side="left", padx=(0, 4))
-        self._entry = tk.Entry(
-            row, font=FONTS["body"], bg=C["card"], fg=C["text1"],
-            insertbackground=C["text1"], highlightbackground=C["border"],
-            highlightcolor=C["text1"], highlightthickness=1, borderwidth=0,
-        )
-        self._entry.pack(side="left", fill="x", expand=True, ipady=3)
-        self._entry.bind("<Return>", self._on_submit)
-        self._entry.bind("<Button-3>", self._show_entry_menu)
+        # FOE's version, read off the code once, as this panel is built: the
+        # running Felhaven's, which an edit on disk afterwards does not change.
+        # Daedalus takes it from the audit markers (§3), so nothing here is a
+        # number someone has to remember to bump. Blank, and never packed, if
+        # none is found.
+        version = daedalus.audit_version()
+        self._version = tk.Label(status_row,
+                                 text=f"FOE {version}" if version else "",
+                                 font=FONTS["small"], fg=C["text3"], bg=C["bg"])
+        if version:
+            self._version.pack(side="left")
+        # The room beside the readouts changes when the bar is resized and
+        # when the readouts grow (Scraptoken Flux and Rites climb); either is
+        # a <Configure> on one of the two.
+        status_row.bind("<Configure>", self._fit_version, add="+")
+        readouts.bind("<Configure>", self._fit_version, add="+")
 
         # ── File-change question (hidden until one is asked) ──────────────────
-        # Packed just above the input row only while a question is open. Clicks
-        # only: no key answers it, so an Enter meant for the next question can
-        # never say yes to this one.
+        # Packed in the dock just above the input row, only while a question
+        # is open. Clicks only: no key answers it, so an Enter meant for the
+        # next question can never say yes to this one.
         self._input_row = row
-        self._confirm_bar = tk.Frame(self, bg=C["bg"])
+        self._confirm_bar = tk.Frame(dock, bg=C["bg"])
         tk.Label(self._confirm_bar, text="Pythia asks to change a file. Allow it?",
                  font=FONTS["small"], fg=C["amber"], bg=C["bg"]).pack(side="left")
         self._confirm_deny = self._bar_button("DENY", self._on_deny)
         self._confirm_allow = self._bar_button("ALLOW", self._on_allow)
 
+        # ── Tooltips (Virgil) ─────────────────────────────────────────────────
+        # After every widget above exists: a tip also hides on a click of any
+        # descendant its widget has when attached (the bar's two buttons).
+        self._tip_targets: "dict[str, tk.Misc | tuple[tk.Text, str]]" = {
+            "cerberus": self.cerberus_lamp, "flux": self._flux,
+            "rites": rites_wrap, "ammit": self._ammit_badge,
+            "status": self._status, "version": self._version,
+            "confirm": self._confirm_bar,
+            "speak": (self._log, "speak"), "meta": (self._log, "meta"),
+            "meta_fail": (self._log, "meta_fail"),
+            "alerts": self.alert_badge, "aurora": self.aurora_notice,
+        }
+        for key, tip in self._TIPS.items():
+            target = self._tip_targets.get(key)
+            if isinstance(target, tuple):
+                virgil_tooltip.attach_tag(*target, tip)
+            elif target is not None:
+                virgil_tooltip.attach(target, tip, when=self._tip_when(key))
+
         self._print("Pythia is listening. Ask a question and press Enter.\n",
                     "pythia")
 
         self._arm_poll()
+
+    def _tip_when(self, key: str) -> "Optional[Callable[[], bool]]":
+        """The status line's tip explains a status. While nothing is
+        happening the line says "ask the oracle", which needs no explaining,
+        so the tip shows only while a status is up. Every other tip always
+        shows — the version's too: it never changes once built, and a blank
+        one is never packed."""
+        if key == "status":
+            return lambda: bool(self._status_shown)
+        return None
+
+    def _fit_version(self, _event: "Optional[tk.Event[Any]]" = None) -> None:
+        """Show the version only while it fits whole beside the readouts,
+        with _VERSION_GAP to spare; hide it otherwise.
+
+        The readouts are packed first, so they get their whole width whether
+        the version is shown or not: the room left beside them doesn't
+        depend on the version, so hiding it can't make room that brings it
+        straight back, and it can't flicker."""
+        if not self._version.cget("text"):
+            return
+        room = self._bar.winfo_width() - self._readouts.winfo_reqwidth()
+        fits = room >= self._version.winfo_reqwidth() + _VERSION_GAP
+        shown = bool(self._version.winfo_manager())
+        if shown and not fits:
+            self._version.pack_forget()
+        elif fits and not shown:
+            self._version.pack(side="left")
 
     # ── Kairos contract ─────────────────────────────────────────────────────
     def update(self, data: Any) -> None:
@@ -630,9 +798,9 @@ class HomePanel(tk.Frame):
         Awen has already waited for quiet before producing this text (see its
         *Trigger*), so cutting off whatever is talking would undo that.
 
-        Never enters self._history: this is not a turn Pythia took on Matthew's
-        behalf, and a few songs of patter would evict his actual conversation
-        from a three-turn window (see *History*)."""
+        Never enters self._history: this is not a turn Pythia took on the
+        owner's behalf, and a few songs of patter would evict their actual
+        conversation from a three-turn window (see *History*)."""
         self._print(f"dj › {text}\n\n", "dj")
         calliope.speak(text)
         calliope.end_turn()
@@ -824,18 +992,20 @@ class HomePanel(tk.Frame):
     def _set_status(self, text: str, *, clickable: bool = False) -> None:
         """Write the status line, and say whether it is a control right now.
 
-        FIVE sites write this label — this method, _on_submit, _on_refresh,
-        _on_delta and _on_done — and only one of them ever sets a clickable
-        state. Without one owner, the hand cursor from "Auto-DJ: 4 queued"
-        survives into "consulting the oracle…" and stays for the whole answer,
-        because _tick_status returns early while a request is in flight and
-        never gets to repaint. A cursor that promises a click nothing handles
-        is worse than no cursor.
+        Every write comes through here (submit, refresh, the first token,
+        the end of a turn, a file-change question, _tick_status), and only
+        _tick_status ever asks for a clickable state. Without one owner, the
+        hand cursor from "Auto-DJ: 4 queued" survived into "consulting the
+        oracle…" and stayed for the whole answer, because _tick_status returns
+        early while a request is in flight and never gets to repaint. A cursor
+        that promises a click nothing handles is worse than no cursor.
         """
         self._status_shown = text
         self._status_clickable = clickable
-        self._status.config(text=text, cursor="hand2" if clickable else "",
-                            fg=C["amber"])
+        # The line is Hestia's: blank here means it goes back to asking.
+        self._status.config(text=text or HestiaBar.IDLE_LINE,
+                            cursor="hand2" if clickable else "",
+                            fg=C["amber"] if text else C["text3"])
 
     def _on_status_enter(self, _event: "tk.Event[Any]") -> None:
         """Brighten WITHIN the state, never into amber. The label is already
@@ -845,7 +1015,9 @@ class HomePanel(tk.Frame):
             self._status.config(fg=C["amber_bright"])
 
     def _on_status_leave(self, _event: "tk.Event[Any]") -> None:
-        self._status.config(fg=C["amber"])
+        # Back to the colour _set_status gave it: the idle line is dim, and a
+        # pointer passing over it must not leave it amber.
+        self._status.config(fg=C["amber"] if self._status_shown else C["text3"])
 
     def _on_status_click(self, _event: "tk.Event[Any]") -> None:
         """Open the queue, or lift the one already open."""
@@ -895,7 +1067,7 @@ class HomePanel(tk.Frame):
 
           1. a question in flight. 'consulting the oracle…' is set by
              _on_submit and cleared by _on_done, and nothing here may touch the
-             line while that is true — Matthew asked, so Matthew's turn wins.
+             line while that is true — the owner asked, so their turn wins.
           2. the startup warm. Only reachable before anything else can be
              happening, so the order between it and Auto-DJ is academic; it is
              written down anyway because "academic today" is how precedence
@@ -1006,9 +1178,9 @@ class HomePanel(tk.Frame):
 
     # ── File-change questions (pythia.ask's on_confirm) ───────────────────────
     # A tool that changes files (pythia._CONFIRM_TOOLS: write_document,
-    # edit_document) runs only after Matthew says yes to its exact arguments:
-    # a web page Pythia read must not be able to talk her into rewriting his
-    # notes. See CONVENTIONS §12, 2026-09-30.
+    # edit_document) runs only after the owner says yes to its exact
+    # arguments: a web page Pythia read must not be able to talk her into
+    # rewriting their notes. See CONVENTIONS §12, 2026-09-30.
 
     def _bar_button(self, text: str,
                     command: "Callable[[tk.Event[Any]], None]") -> tk.Label:
@@ -1101,7 +1273,7 @@ class HomePanel(tk.Frame):
 
     def _on_stats(self, stats: dict[str, Any]) -> None:
         """One stats event per ask() call — cache it for _on_done's meta-line,
-        and roll it into the session totals Hestia displays."""
+        and roll it into the session totals the status bar displays."""
         self._last_stats = stats
         self._sess_tokens += stats["prompt_tokens"] + stats["output_tokens"]
         self._sess_tools += stats["tools_called"]

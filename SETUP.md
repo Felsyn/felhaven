@@ -79,10 +79,12 @@ Pythia talks to a **local Ollama** over `/api/chat`.
    ```
    ollama pull gemma4:e2b
    ```
-   This is the default (`PYTHIA_MODEL`, in `pythia.py`) and the tag this project
-   was developed against. To use a different tool-calling model, set the
-   `PYTHIA_MODEL` environment variable to its Ollama tag instead — any model
-   Ollama can serve that supports tool calling will do.
+   This is the default and the tag this project was developed against. To use a
+   different model, pull it the same way and pick it on **Moderati › MACHINE
+   SPIRIT › MODEL**: the list shows every installed model that supports tool
+   calling, and the pick is saved for this install. The `PYTHIA_MODEL`
+   environment variable still sets the default for an install that hasn't
+   picked one.
 3. Endpoint: Pythia reads `OLLAMA_HOST` (default **`127.0.0.1:11435`**). If your
    Ollama listens on the standard `11434`, set `OLLAMA_HOST=127.0.0.1:11434`.
 
@@ -147,7 +149,10 @@ the manifest once per launch (`tools/aegis.py`):
   ERROR. This is what you will see on a new machine before recording, and after
   updating a program without recording it.
 - **A program only on PATH** (nothing in `bin/`) runs unverified, with one
-  WARNING per launch. That copy is your own install, outside the manifest.
+  WARNING per launch. That copy is your own install, outside the manifest. It
+  must be the `.exe` itself, in a PATH folder written as a full path: Felhaven
+  never looks in the folder it was started from, and never runs a `.bat` or
+  `.cmd` wrapper.
 
 Check everything at any time, from `metis_toolbox\`:
 
@@ -257,7 +262,9 @@ setting your own** instead of inheriting the author's:
 - **Sphynx** — on first launch `sphynx_data.json` is absent, so Sphynx shows a
   one-time **setup screen**: write your own riddle/statement and choose a PIN, or
   click **skip the gate** (it's soft theater; a solo user may not want it — the
-  choice is remembered). Later launches pose your riddle and take your PIN; three
+  choice is remembered). Use a PIN you use nowhere else: `sphynx_data.json`
+  keeps it as a fast hash, so anyone who can read that file can work a short PIN
+  out in seconds. Later launches pose your riddle and take your PIN; three
   wrong tries close the window (relaunch for a fresh three — nothing is ever
   locked on disk).
 - **Cerberus** — guards your API keys (§6). The keys are encrypted to your
@@ -271,9 +278,8 @@ setting your own** instead of inheriting the author's:
   put the PC to sleep, or leave it untouched for an hour.
 
 Both PIN files are gitignored, so they never leave your machine and a future clone
-starts fresh. If you only want the dashboard panels (no chat, no keys), you can
-skip the launcher and run `python felhaven.py` directly — but you'll still hit the
-Sphynx gate, which `Felhaven.bat` normally fronts.
+starts fresh. You can also skip the launcher and run `python felhaven.py`
+directly. That skips the Sphynx gate too: it guards only `Felhaven.bat`'s launch.
 
 ## 8. Personalize
 

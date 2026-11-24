@@ -11,7 +11,9 @@ Job:         Watch the stack's logs and report what broke — read-only, never
              something goes wrong. (The one module whose name won't tell
              future-you what it does — so this docstring carries the weight.)
 
-Contract:    Diagnoses, never treats. Borrowed wholesale from Hygieia:
+Contract:    §2's "Dashboard-only watcher" flavor: fetch(), no handle() and no
+             TOOL_DEFINITION. Diagnoses, never treats. Borrowed wholesale from
+             Hygieia:
                - Read-only to the log files. Writes nothing.
                - Never kills, restarts, or signals anything.
                - Makes no decisions based on what it reads.
@@ -26,27 +28,39 @@ Data source: logs/*.log, written by metis_logging.py. Each line is
              folded into one entry with a count, so a fast-repeating error
              doesn't bury the tail.
 
-Status verdict (Hygieia's precedence, collapsed for one sidebar dot):
-             failed   — an ERROR/CRITICAL line in the recent window
+Status verdict (Hygieia's precedence, collapsed for the EMANON tab's one dot):
+             failed   — an ERROR/CRITICAL line in the recent window (the
+                        last _TAIL_LINES rows, after folding)
              degraded — a WARNING line in the recent window
              nominal  — only INFO, everything humming
+             error_count / warning_count count the whole tail read (up to
+             _TAIL_BYTES of each file), before folding, so a repeated error
+             is still N errors.
 
-Polling:     NONE. Kairos owns the clock. fetch() is called on each tick
-             and returns a fresh rolling snapshot of the log tail. No
-             while-loop, no sleep, no snapshot file — that was Hygieia's
-             cross-process daemon design; Emanon lives in-process.
+Polling:     NONE. Kairos owns the clock: its "emanon" worker calls fetch()
+             every 2 s, and each call returns a fresh rolling snapshot of the
+             log tail. No while-loop, no sleep, no snapshot file — that was
+             Hygieia's cross-process daemon design; Emanon lives in-process.
 
 Upstream:    metis_logging.py (writes the files), kairos.py (calls fetch)
 Downstream:  panels/emanon_panel.py (display surface)
 
-Requires:    stdlib only (pathlib, logging)
+Requires:    stdlib only (logging, re, pathlib, typing)
 
-V0.02:       Audited 2026-07-24 — removed the unused deque and json imports; the
+2026-07-24:  The first audit removed the unused deque and json imports; the
              " | " delimiter's required match with metis_logging._DELIM
              (CONVENTIONS §5) is now enforced by a test, not only a comment;
              first test coverage (tests/test_emanon.py); fetch() now folds
              consecutive repeating lines (digit runs in the message ignored)
              into one entry with a count.
+
+V0.03: Walked through 2026-11-21 (in the repo's first commit, 2026-06-10;
+       first audited 2026-07-24). Checked against the owner's real log,
+       read-only: no timestamp in early October runs backwards and no
+       restart moved the clock, so "Emanon's time looks wrong" was the
+       panel's time-without-a-date (fixed there). The verdict's dot is the
+       EMANON tab's, not a sidebar's; the window each count covers is now
+       said; the Contract names the §2 row; Requires lists re and typing.
 """
 
 import logging

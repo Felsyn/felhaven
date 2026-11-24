@@ -1,13 +1,24 @@
 """
 Emanon panel — log-watch display for the Felhaven dashboard.
 
-EmanonPanel — a rolling tail of the stack's log lines in a read-only,
-word-wrapped text view. White for INFO, amber for WARNING, red for
-ERROR/CRITICAL. A status dot reflects the overall verdict (green nominal /
-amber degraded / red failed) and blinks briefly when the verdict first turns
-"failed". Consecutive-duplicate lines arrive already folded by emanon.fetch()
-and render with a "×N" count. The tail is cleared and re-inserted each Kairos
-tick.
+Job:         Show a live tail of Felhaven's log, coloured by severity, with a health dot.
+
+EmanonPanel — a rolling tail of the stack's log lines (every logs/*.log:
+Felhaven's and the Sphynx gate's) in a read-only, word-wrapped text view.
+Bright phosphor (text1) for INFO, amber for WARNING, red for ERROR/CRITICAL.
+A status dot reflects the overall verdict (green nominal / amber degraded /
+red failed) and blinks briefly when the verdict first turns "failed".
+Consecutive-duplicate lines arrive already folded by emanon.fetch() and
+render with a "×N" count. Every line shows its full date and time (the
+owner's pick, 2026-11-21): the time alone made a line from yesterday look
+like today's, which is what "Emanon's time looks wrong" turned out to be.
+
+Refresh:     Kairos delivers a snapshot every 2 s. The tail is rebuilt only
+             when what it shows has changed, and it follows the newest line
+             only while the reader is already at the bottom. Before, every
+             tick rebuilt it: a selection was wiped and a reader scrolled up
+             was thrown back to the bottom within 2 s (measured 2026-11-21),
+             so the select-and-paste below barely worked.
 
 Right-click the log for the standard themed Copy / Select All / Copy all menu
 (the home_panel transcript precedent) — so an error and its trace can be
@@ -19,17 +30,34 @@ Report-only: this panel reads what emanon.fetch() hands it and shows it.
 It never acts on, fixes, or restarts anything. Kairos owns all timing — the
 only self.after used here is a one-shot blink that terminates on its own.
 
-V0.02:  Audited 2026-07-24. Events area rebuilt as a read-only word-wrapped
-        tk.Text with the standard right-click Copy/Select-All menu (home_panel
-        precedent) and ×N de-dup rendering, replacing the truncating Label rows
-        and hover tooltip. Tests: tests/test_emanon_panel_smoke.py.
+Upstream:    panels/moderati_panel.py (the EMANON tab), felhaven.py (registers
+             it on Kairos's "emanon" worker: tools.emanon.fetch, 2 s).
+Downstream:  theme.py (C, FONTS, PhosphorScroll, the menu helpers),
+             tools/virgil.py and panels/virgil_tooltip.py (the status tip).
+
+Requires:    tkinter (stdlib), datetime, typing.
+
+2026-07-24:  The first audit rebuilt the events area as a read-only
+             word-wrapped tk.Text with the standard right-click
+             Copy/Select-All menu (home_panel precedent) and ×N de-dup
+             rendering, replacing the truncating Label rows and hover tooltip.
+             Tests: tests/test_emanon_panel_smoke.py.
+
+V0.03: Walked through 2026-11-21 (in the repo's first commit, 2026-06-10;
+       first audited 2026-07-24). The date on every line (the owner's
+       pick, closing the BACKLOG report) and Refresh (a selection or a
+       scroll survives a tick). "White for INFO" was text1, the bright
+       phosphor, since the palette went monochrome. Upstream, Downstream
+       and Requires added.
 """
 
 import tkinter as tk
 from datetime import datetime
 from typing import Any
 
+from panels import virgil_tooltip
 from theme import C, FONTS, PhosphorScroll, themed_menu, popup_menu
+from tools import virgil
 
 # Fixed pixel height for the events area so the footer doesn't jump as the
 # number of rows changes tick to tick. The Text scrolls within it.
@@ -42,6 +70,12 @@ class EmanonPanel(tk.Frame):
     A bare Frame tab body inside ModeratiPanel (the EMANON tab); keeps its own
     update() and one-shot "failed" blink, and is registered with Kairos directly.
     """
+
+    # Hover tooltip (Virgil) for the status dot and line, a glossary entry
+    # that says what the colours mean (CONVENTIONS §7).
+    _TIPS = {
+        "status": virgil.term("log_status"),
+    }
 
     def __init__(self, parent):
         super().__init__(parent, bg=C["card"])
@@ -60,6 +94,8 @@ class EmanonPanel(tk.Frame):
                                     font=FONTS["card_header"], fg=C["text2"],
                                     bg=C["card"], anchor="w")
         self._status_lbl.pack(side="left")
+        self.tip_targets: dict[str, tk.Misc] = {"status": status_row}
+        virgil_tooltip.attach(status_row, self._TIPS["status"])
 
         # ── Events tail: fixed height; a read-only, word-wrapped, copyable log ─
         self._events_frame = tk.Frame(self, bg=C["card"], height=_EVENTS_H)
@@ -101,6 +137,9 @@ class EmanonPanel(tk.Frame):
         # blink is a chain of one-shot self.after calls that stops itself.
         self._status = "nominal"
         self._flash_after_id = None
+        # What the tail shows now, so a tick that brings nothing new leaves it
+        # (and the reader's selection and scroll) alone. See Refresh.
+        self._shown: "tuple | None" = None
 
     # ── Color helpers ──────────────────────────────────────────────────────
 
@@ -110,7 +149,7 @@ class EmanonPanel(tk.Frame):
             return "error"
         if level == "WARNING":
             return "warn"
-        return "info"  # INFO and anything unexpected → white
+        return "info"  # INFO and anything unexpected → text1, the bright phosphor
 
     def _status_color(self, status: str) -> str:
         return {"failed": C["red"], "degraded": C["amber"]}.get(status, C["green"])
@@ -178,17 +217,24 @@ class EmanonPanel(tk.Frame):
     # ── Rendering ────────────────────────────────────────────────────────────
 
     def _render_events(self, entries: list, note: "str | None") -> None:
-        """Clear and re-insert the log tail. Each entry is one wrapped line;
-        a folded run shows its message plus a muted ×N."""
+        """Clear and re-insert the log tail, if it changed (see Refresh). Each
+        entry is one wrapped line, its full date and time first; a folded run
+        shows its message plus a muted ×N."""
+        shown = (note, tuple((e["ts"], e["level"], e["logger"], e["message"],
+                              e.get("count", 1)) for e in entries))
+        if shown == self._shown:
+            return                              # nothing new: keep selection and scroll
+        self._shown = shown
+        # Follow the newest line only if the reader was already at the bottom.
+        at_bottom = self._log.yview()[1] >= 0.999
+        top = self._log.yview()[0]
         self._log.configure(state="normal")
         self._log.delete("1.0", "end")
         if not entries:
             self._log.insert("end", note or "no events yet", ("muted",))
         else:
             for e in entries:
-                ts = e["ts"]
-                if " " in ts:
-                    ts = ts.split(" ")[-1]      # time only — the date is too wide
+                ts = e["ts"]                    # the date too (see the docstring)
                 logger_name = e["logger"]
                 if logger_name.startswith("METIS."):
                     logger_name = logger_name[len("METIS."):]
@@ -200,7 +246,10 @@ class EmanonPanel(tk.Frame):
                 if e.get("count", 1) > 1:
                     self._log.insert("end", f"  ×{e['count']}", ("count",))
                 self._log.insert("end", "\n")
-        self._log.see("end")                    # keep the newest line in view
+        if at_bottom:
+            self._log.see("end")                # keep the newest line in view
+        else:
+            self._log.yview_moveto(top)         # where the reader had scrolled to
         self._log.configure(state="disabled")
 
     # ── Kairos update contract ─────────────────────────────────────────────

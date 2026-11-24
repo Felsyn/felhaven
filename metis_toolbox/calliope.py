@@ -24,13 +24,11 @@ Contract:    speak(text) -> None
                  narration voice (see "Voice" below). `speed` likewise, for this
                  call only; None means the configured speed. Live narration
                  never passes it.
-
-Shared seam:  synthesize(), take_chunk(), save_wav() and SAMPLE_RATE
-              are the public kokoro-audio helpers. Echo (tools/echo.py) and Clio
-              (tools/clio.py) reuse them so there is ONE source of truth for how
-              kokoro PCM is chunked and written to a WAV — neither owns a model
-              instance or a second WAV writer (the same "one source of truth"
-              spirit as the singleton model). Do not re-privatise them.
+             end_turn() -> None
+                 This turn's text is all in: releases the prebuffer gate so a
+                 short answer plays at once. A caller that hands speak()
+                 complete text MUST call it straight after, or a one-chunk
+                 answer waits out _PREBUFFER_TIMEOUT. Never raises.
              prewarm() -> Thread
                  Load the kokoro-onnx model on a background thread at startup so
                  the first spoken line isn't delayed by the one-time model load.
@@ -41,6 +39,13 @@ Shared seam:  synthesize(), take_chunk(), save_wav() and SAMPLE_RATE
                  the owned output stream keeps running and simply emits silence,
                  so audio falls quiet within ~its device latency with no
                  cross-thread device call (see harmonia.py's docstring).
+
+Shared seam:  synthesize(), take_chunk(), save_wav() and SAMPLE_RATE
+              are the public kokoro-audio helpers. Echo (tools/echo.py) and Clio
+              (tools/clio.py) reuse them so there is ONE source of truth for how
+              kokoro PCM is chunked and written to a WAV — neither owns a model
+              instance or a second WAV writer (the same "one source of truth"
+              spirit as the singleton model). Do not re-privatise them.
 
 Device:      Calliope does not touch sounddevice or own an audio queue anymore.
              Every synthesized chunk is handed to
@@ -86,17 +91,34 @@ Model files: kokoro-onnx needs two binaries (a *.onnx voice model and
 Upstream:    panels/home_panel.py (per-response speak button + auto-speak),
              panels/vox_controls.py (the Vox Response toggle),
              panels/machine_spirit_panel.py (set_voice via the voice bar),
-             felhaven.py (seeds set_voice from voices.pythia_voice() at startup)
-Downstream:  kokoro-onnx (synthesis) → harmonia.py (playback ownership)
+             panels/horai_panel.py (the Ammit alarm's line),
+             panels/iris_panel.py (a weather warning read aloud),
+             awen.py (whether to read the DJ's line, auto_speak_enabled),
+             tools/echo.py and tools/clio.py (the shared seam above),
+             felhaven.py (seeds set_voice from voices.pythia_voice() at
+             startup, and prewarm())
+Downstream:  kokoro-onnx (synthesis) → harmonia.py (playback ownership);
+             config/calliope_config.json
 
 Requires:    kokoro-onnx, numpy. Stdlib otherwise. (sounddevice is Harmonia's
              dependency now, not Calliope's.)
 
-V0.02:       Audited 2026-07-24 — never-raise contract verified across
+2026-07-24:  walkthrough audit — never-raise contract verified across
              speak/synthesize/stop and the two-stage pipeline; no error-dict
              surface (infrastructure, not a brain tool, so never in the §2
              output-contract allowlist); shared seam + call sites confirmed.
-             No code change, only this marker.
+             No code change, only the marker.
+
+V0.03:       Walked through 2026-11-19 (the V0.03 walkthrough, CONVENTIONS
+             §3). Never raises on any path, threads only in its own two
+             workers, the epoch still discards a barged-in turn, and every
+             caller that hands over whole text calls end_turn(). The words
+             caught up: the Contract names end_turn(), the one call a caller
+             cannot skip, and no longer splits around the shared seam;
+             Upstream gains the five callers it had missed; a missing-model
+             log line points at SETUP.md §4, not a Calliope.md that never
+             existed; a comment names Harmonia's "Sample rate" section, not
+             a "D3" it no longer has.
 """
 
 import json
@@ -194,8 +216,8 @@ def _load_model() -> Any:
         if not model_path.is_file() or not voices_path.is_file():
             log.error(
                 "Calliope: model files missing (model=%s exists=%s, voices=%s "
-                "exists=%s) — narration disabled. See Calliope.md for the "
-                "download step.",
+                "exists=%s) — narration disabled. See SETUP.md section 4 for "
+                "the download step.",
                 model_path, model_path.is_file(), voices_path, voices_path.is_file(),
             )
             return None
@@ -271,8 +293,8 @@ def synthesize(text: str, *, voice: Optional[str] = None,
 # ── kokoro sample rate ─────────────────────────────────────────────────────────
 # 24 kHz is a fact about kokoro's output, not about playback — save_wav (the
 # shared WAV seam Echo reuses) needs it for the file format regardless of who
-# owns the device. Every call to harmonia.play() below
-# passes it explicitly (harmonia.py itself assumes no rate — see its D3).
+# owns the device. Every call to harmonia.play() below passes it explicitly
+# (harmonia.py itself assumes no rate — see its "Sample rate" section).
 SAMPLE_RATE = 24000
 
 

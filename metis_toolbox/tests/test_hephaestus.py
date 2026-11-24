@@ -12,6 +12,7 @@ to an error dict for Pythia — plus the happy-path shape and the disk anchor
 
 import os
 import sys
+import time
 import types
 import unittest
 from contextlib import contextmanager
@@ -41,12 +42,22 @@ def _mock_psutil():
         cpu_count=mock.DEFAULT,
         virtual_memory=mock.DEFAULT,
         disk_usage=mock.DEFAULT,
-    ) as m:
+        boot_time=mock.DEFAULT,
+    ) as m, mock.patch("tools.hephaestus.brontes.read", return_value=_GPU) as gpu:
         m["cpu_percent"].return_value = 12.5
         m["cpu_count"].return_value = 8
         m["virtual_memory"].return_value = mem
         m["disk_usage"].return_value = disk
+        m["boot_time"].return_value = time.time() - 3 * 86400 - 4 * 3600
+        m["gpu"] = gpu
         yield m
+
+
+_GPU = {"name": "Test GPU", "temp_c": 48, "memory_used_gb": 1.7,
+        "memory_total_gb": 6.0, "memory_pct": 28.3, "load_pct": 12}
+# Felhaven's own drive, as hephaestus works it out.
+_HERE = os.path.splitdrive(os.path.abspath(hephaestus.__file__))[0]
+_HERE = _HERE + os.sep if _HERE else "/"
 
 
 class TestHappyPath(unittest.TestCase):
@@ -78,18 +89,21 @@ class TestFailureContracts(unittest.TestCase):
         with mock.patch("tools.hephaestus.psutil.cpu_percent",
                         side_effect=OSError("psutil is unhappy")):
             out = hephaestus.handle()          # must not raise
-        self.assertEqual(out, {"error": "vitals_unavailable"})
+        # §2's shared word, then the class, never the message's text.
+        self.assertEqual(out, {"error": "unavailable: vitals read raised OSError"})
 
     def test_handle_degrades_on_a_memory_failure_too(self):
         # Every _get_*_status() read is behind the guard, not just the first.
         with _mock_psutil() as m:
             m["virtual_memory"].side_effect = RuntimeError("no memory info")
-            self.assertEqual(hephaestus.handle(), {"error": "vitals_unavailable"})
+            self.assertEqual(hephaestus.handle(),
+                             {"error": "unavailable: vitals read raised RuntimeError"})
 
     def test_handle_degrades_on_a_storage_failure_too(self):
         with _mock_psutil() as m:
             m["disk_usage"].side_effect = OSError("no such drive")
-            self.assertEqual(hephaestus.handle(), {"error": "vitals_unavailable"})
+            self.assertEqual(hephaestus.handle(),
+                             {"error": "unavailable: vitals read raised OSError"})
 
     def test_fetch_still_raises_for_kairos(self):
         # Kairos needs the throw: it logs the cause and hands the panel None so
@@ -105,15 +119,52 @@ class TestStorageAnchor(unittest.TestCase):
     """§1: anchor to __file__, never sys.argv[0]."""
 
     def test_disk_read_ignores_argv0(self):
-        expected = os.path.splitdrive(os.path.abspath(hephaestus.__file__))[0]
-        expected = expected + os.sep if expected else "/"
         # A launcher on some other drive — the old bug read this one instead.
         argv0 = "Q:\\elsewhere\\felhaven.py" if os.name == "nt" else "/elsewhere/felhaven.py"
         with _mock_psutil() as m, mock.patch.object(sys, "argv", [argv0]):
-            hephaestus.fetch()
-            root = m["disk_usage"].call_args[0][0]
-        self.assertEqual(root, expected)
-        self.assertNotIn("Q:", root)
+            out = hephaestus.fetch()
+            roots = [c.args[0] for c in m["disk_usage"].call_args_list]
+        self.assertEqual(out["storage"]["drive"], _HERE)
+        self.assertIn(_HERE, roots)
+        self.assertFalse(any("Q:" in r for r in roots))
+
+
+class TestTheNewReadings(unittest.TestCase):
+    """The boot drive, uptime and the GPU (the HEPHAESTUS tab's depth)."""
+
+    def test_the_boot_drive_is_its_own_row_when_it_differs(self):
+        other = "Q:" if not _HERE.upper().startswith("Q") else "R:"
+        with _mock_psutil() as m, mock.patch.dict(os.environ, {"SystemDrive": other}):
+            out = hephaestus.fetch()
+            roots = [c.args[0] for c in m["disk_usage"].call_args_list]
+        self.assertEqual(out["boot_storage"]["drive"], other + "\\")
+        self.assertIn(other + "\\", roots)
+        self.assertEqual(out["storage"]["drive"], _HERE)
+
+    def test_one_drive_is_one_row(self):
+        with _mock_psutil() as m, \
+                mock.patch.dict(os.environ, {"SystemDrive": _HERE.rstrip("\\/")}):
+            out = hephaestus.fetch()
+        self.assertIsNone(out["boot_storage"])
+        self.assertEqual(m["disk_usage"].call_count, 1)
+
+    def test_uptime_comes_from_the_boot_time(self):
+        with _mock_psutil():
+            out = hephaestus.fetch()
+        self.assertAlmostEqual(out["uptime_s"], 3 * 86400 + 4 * 3600, delta=5)
+
+    def test_the_gpu_reading_is_brontes(self):
+        with _mock_psutil():
+            out = hephaestus.fetch()
+        self.assertEqual(out["gpu"], _GPU)
+
+    def test_no_gpu_is_a_field_not_a_failure(self):
+        with _mock_psutil() as m:
+            m["gpu"].return_value = {"error": "no_nvidia_gpu"}
+            out = hephaestus.fetch()
+            self.assertEqual(hephaestus.handle()["gpu"], {"error": "no_nvidia_gpu"})
+        self.assertEqual(out["gpu"], {"error": "no_nvidia_gpu"})
+        self.assertEqual(out["cpu"]["usage_percent"], 12.5)     # the rest still reads
 
 
 if __name__ == "__main__":

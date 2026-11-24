@@ -4,15 +4,17 @@ pythia.py — The Oracle (LLM brain)
 Metis Toolbox | Anti-Legion: ONE JOB
 
 Job:         Answer a question by talking to the local LLM, using toolbox
-             tools for live data. Runs gemma4:e2b via Ollama, lets the model
-             call the tools, and returns the final text. Nothing else — no
-             tkinter, no threads, no persistence. The panel owns the UI and
-             the background thread; Pythia is a pure request/response function.
+             tools for live data. Runs the owner's model (gemma4:e2b unless
+             another is picked) via Ollama, lets the model call the tools,
+             and returns the final text. Nothing else — no tkinter, no
+             persistence. The panel owns the UI and the thread a turn runs
+             on; Pythia's own threads are only the startup warm and a model
+             switch.
 
 Contract:    ask(message, history=None, on_delta=None, on_event=None,
                  cancel=None, system=None, allow_tools=None,
                  tool_overrides=None, on_verbatim=None,
-                 on_confirm=None) -> str
+                 on_confirm=None, think=None) -> str
                  Runs the Ollama tool-calling loop and returns the model's
                  final answer as plain text. Degrades gracefully — on any
                  network/LLM failure it returns a short human-readable string
@@ -26,10 +28,11 @@ Contract:    ask(message, history=None, on_delta=None, on_event=None,
                  cooperative Stop.
                  `system` and `allow_tools` narrow ONE turn — a different
                  system prompt, and a tool allowlist enforced at DISPATCH, not
-                 merely by omitting schemas. Both default to today's behaviour,
-                 so chat is unchanged. They exist for unattended callers
-                 (awen.py), which put text they did not write into a small
-                 model's context with nobody reading the transcript.
+                 merely by omitting schemas. Both default to the chat's
+                 behaviour, so the chat is unchanged. They exist for
+                 unattended callers (awen.py), which put text they did not
+                 write into a small model's context with nobody reading the
+                 transcript.
                  `on_verbatim` is the one path a tool's output takes AROUND
                  the model: a result carrying a "verbatim" payload is handed
                  to it and kept out of the model's context, and a round made
@@ -37,6 +40,11 @@ Contract:    ask(message, history=None, on_delta=None, on_event=None,
                  `on_confirm` is how a tool that changes files asks the user
                  first: it gets {"tool", "arguments"} and runs the call only
                  on True. Without it those tools are refused.
+                 `think` overrides the owner's thinking setting for one call
+                 (Awen passes False); None follows the setting.
+             Every tool result reaches the model as JSON with its characters
+             kept as they are: a curly quote is one character, never a
+             backslash-u escape (CONVENTIONS §12, 2026-11-19).
              Between the argument gate and the handler sits the DISPATCH
              GATE (CONVENTIONS §12, 2026-09-30): fetch_page opens only a URL
              the user wrote or a search_web result gave, and every tool in
@@ -49,6 +57,20 @@ Contract:    ask(message, history=None, on_delta=None, on_event=None,
              machine_spirit.py (effective_prompt(), read fresh each call) —
              Pythia owns no prompt text of its own, and a caller's `system`
              override is that caller's text, never this module's.
+
+             is_degraded(answer) -> bool
+                 Whether an ask() result is one of the "The oracle …" failure
+                 lines rather than an answer, for a caller that acts on the
+                 text (Awen speaks it) instead of printing it.
+
+             current_model() -> str
+                 The owner's pick on the MACHINE SPIRIT tab (themis), else
+                 PYTHIA_MODEL.
+
+             switch_model(previous) -> threading.Thread
+                 After the owner picks a model: unload `previous` (Felhaven's
+                 own, never another app's), then warm the new one. The
+                 prewarm's shape; never raises.
 
              is_busy() -> bool
                  True while any ask() is generating. The is_warming() shape,
@@ -70,24 +92,49 @@ Regime:      Felhaven runs with metis_toolbox/ on sys.path, so this imports
              metis_toolbox/__init__.py was retired with voice input.
 
 Endpoint:    Reads OLLAMA_HOST (default 127.0.0.1:11435 — the standalone
-             Ollama, models on D:). Model from PYTHIA_MODEL (default
-             gemma4:e2b). No API key: it's all local.
+             Ollama, models on D:). The model is the owner's pick on the
+             MACHINE SPIRIT tab (themis), read once per question; with none
+             picked, PYTHIA_MODEL (default gemma4:e2b). No API key: it's all
+             local.
 
-Upstream:    panels/home_panel.py (calls ask() on a worker thread)
-Downstream:  tools/{horai,hephaestus,aura,ammit,midas,aether,pheme,zeno,
-             eudoxus,argus,helios,hypatia,selene,morpheus,daedalus}.py — each
+Upstream:    panels/home_panel.py (ask() on a worker thread, is_warming());
+             awen.py (ask() narrowed to play_music, is_busy(), is_degraded());
+             felhaven.py (prewarm() at startup);
+             panels/machine_spirit_panel.py (current_model(), switch_model(),
+             is_warming()).
+Downstream:  tools/{horai,asclepius,aura,ammit,midas,pheme,zeno,eudoxus,
+             ptolemy,morpheus,daedalus}.py — each
              contributes TOOL_DEFINITION + handle(). tools/callimachus.py and
              tools/herodotus.py are MULTI-TOOL modules (TOOL_DEFINITIONS +
-             one function per tool). Pythia is their SOLE registry consumer —
-             the typed chat is the only path any tool is called from now that
-             the voice-side registry is retired.
+             one function per tool). Pythia is their only registry: every
+             call a model makes, the chat's and Awen's alike, goes through
+             _dispatch.
+             machine_spirit.py (effective_prompt(), the default system
+             prompt); themis.py (the owner's model, thinking and
+             temperature); tools/talos.py (capabilities(): whether the model
+             can think).
 
-Requires:    requests (already in the Felhaven stack). Stdlib otherwise.
+Requires:    requests (already in the Felhaven stack); json, logging, math,
+             os, re, threading, time, datetime, typing (stdlib).
 
-V0.02:       Audited 2026-07-24 — the dispatcher's own error returns normalized
+2026-07-24:  walkthrough audit — the dispatcher's own error returns normalized
              to §2 slugs (unknown_tool / tool_failed), and no caught exception's
              raw message now reaches the LLM context or the transcript (only its
              class name does); "never raises" contract verified, tests added.
+
+V0.03:       Walked through 2026-11-19 (the V0.03 walkthrough's S17). Tool
+             results reach the model as real characters, no longer as
+             backslash-u escapes (the owner's pick): measured on six news
+             headlines, 344 prompt tokens against 427, and the model's exact
+             quotes stayed exact (§12); the routing probe gave 49/56 on the
+             branch and on master, row for row. The Rite records' copies keep
+             real characters too. A tool that raises is logged with
+             credential values scrubbed (_redact): the line any exception
+             escaping a tool reaches. The July log-call flag closes there,
+             with no guard over every log call (§12). The Contract gains think,
+             is_degraded, current_model and switch_model; Job, Upstream,
+             Downstream and Requires catch up; the warm's prefix is re-read
+             from its own log line (about 5,160 tokens).
 """
 
 import json
@@ -105,10 +152,11 @@ import requests
 import machine_spirit
 import themis
 from tools import (
-    horai, hephaestus, aura, ammit, midas, aether, pheme, zeno, eudoxus,
-    argus, helios, hypatia, selene, morpheus, callimachus, herodotus,
+    horai, asclepius, aura, ammit, midas, pheme, zeno, eudoxus,
+    ptolemy, morpheus, callimachus, herodotus,
     daedalus,
 )
+from tools import talos      # what a model can do (not a brain tool)
 
 log = logging.getLogger("METIS.pythia")
 
@@ -120,8 +168,8 @@ log = logging.getLogger("METIS.pythia")
 # and _DISPATCH stay in lockstep with the handlers.
 
 _TOOL_MODULES = [
-    horai, hephaestus, aura, ammit, midas, aether, pheme, zeno, eudoxus,
-    argus, helios, hypatia, selene, morpheus, callimachus, herodotus,
+    horai, asclepius, aura, ammit, midas, pheme, zeno, eudoxus,
+    ptolemy, morpheus, callimachus, herodotus,
     daedalus,
 ]
 
@@ -158,7 +206,25 @@ _OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "127.0.0.1:11435")
 _BASE_URL = "http://" + _OLLAMA_HOST.replace("http://", "").replace("https://", "")
 _CHAT_URL = _BASE_URL + "/api/chat"
 
-_MODEL = os.environ.get("PYTHIA_MODEL", "gemma4:e2b")
+# The model when the owner hasn't picked one on the MACHINE SPIRIT tab.
+_DEFAULT_MODEL = os.environ.get("PYTHIA_MODEL", "gemma4:e2b")
+# Unloading a model is one small request to the local server.
+_UNLOAD_TIMEOUT = 10
+
+
+def current_model() -> str:
+    """The Ollama model Pythia uses now: the owner's pick (themis), else the
+    PYTHIA_MODEL default. ask() reads it once per question."""
+    return themis.pythia_model() or _DEFAULT_MODEL
+
+
+def _can_think(model: str) -> bool:
+    """Whether to send think=True for `model`. Ollama refuses the whole
+    request when a model without the capability is asked to think, so a
+    known non-thinker never is; an unknown model (Ollama's details unreadable)
+    is given the benefit of the doubt."""
+    caps = talos.capabilities(model)
+    return caps is None or "thinking" in caps
 
 # First call cold-loads the model (~100s on this box); later calls are quick.
 _REQUEST_TIMEOUT = 180          # seconds
@@ -259,7 +325,9 @@ _PREVIEW_CAP = 1000             # chars — the cap on a stored arguments/result
 # A tool result bigger than this, as the JSON the model reads, is logged. It is
 # a tripwire, not a cap: the tools that return long text budget it themselves
 # (fetch_page 4000, read_document 6000 chars), so this sits above both and only
-# fires on a tool with no budget at all — read_document's old whole-file read.
+# fires on a tool with no budget at all, as read_document was until #26 gave it
+# one. It counts characters; under the old \u escapes, 6000 characters of
+# accented or curly-quoted text could pass 8000 and trip it for nothing.
 _LARGE_RESULT_CHARS = 8000
 _RITE_CANCELLED = "cancelled: turn stopped before this rite ran"
 
@@ -325,9 +393,10 @@ def _argument_field(arguments: dict[str, Any]) -> tuple[Any, bool]:
     companion — arguments_truncated tells the panel which of the two to expect.
 
     Deliberately NOT redacted (§5): model-authored arguments are precisely what
-    the operator opened the Rite Log to read.
+    the operator opened the Rite Log to read. Characters are kept as they are,
+    as in the model's copy, so a cut string reads as text.
     """
-    serialized = json.dumps(arguments, default=str)
+    serialized = json.dumps(arguments, default=str, ensure_ascii=False)
     if len(serialized) <= _PREVIEW_CAP:
         return arguments, False
     return serialized[:_PREVIEW_CAP], True
@@ -336,8 +405,10 @@ def _argument_field(arguments: dict[str, Any]) -> tuple[Any, bool]:
 def _result_preview(result: dict[str, Any]) -> tuple[str, bool]:
     """A successful result as the operator will read it. Order is load-bearing:
     serialize, THEN redact, THEN truncate — so the cap applies to exactly the
-    string that gets stored, and a redaction can never expand past it."""
-    return _truncate(_redact(json.dumps(result, default=str)))
+    string that gets stored, and a redaction can never expand past it.
+    Characters are kept as they are, as in the model's copy: the Rite Log
+    shows a curly quote, not its escape."""
+    return _truncate(_redact(json.dumps(result, default=str, ensure_ascii=False)))
 
 
 def _error_text(result: dict[str, Any]) -> str:
@@ -618,7 +689,9 @@ def _dispatch(tool_name: str, arguments: Any,
     an error dict so the model can recover rather than the whole turn crashing.
     The error identifier is a §2 slug: the caught exception's *message* is kept
     out of the returned dict (it feeds straight into the LLM context) — only
-    its class name travels, the raw text stays in the log.
+    its class name travels. The log keeps the message, with credential values
+    scrubbed (_redact): this is where an unexpected exception from a tool that
+    holds a key would land (the Midas shape, CONVENTIONS §12).
 
     `allowed` restricts which tools may actually RUN, and the check sits here —
     ahead of the _DISPATCH lookup — rather than only in the schema list handed
@@ -671,7 +744,8 @@ def _dispatch(tool_name: str, arguments: Any,
     try:
         return fn(**arguments) if arguments else fn()
     except Exception as e:                       # a tool bug must not kill the chat
-        log.error(f"Pythia: tool {tool_name!r} raised: {type(e).__name__}: {e}")
+        log.error(f"Pythia: tool {tool_name!r} raised: "
+                  f"{type(e).__name__}: {_redact(str(e))}")
         return {"error": f"tool_failed: {tool_name!r} raised {type(e).__name__}"}
 
 
@@ -720,14 +794,17 @@ def _chat(
     tools: Optional[list[dict[str, Any]]] = None,
     think: bool = False,
     temperature: Optional[float] = None,
+    model: Optional[str] = None,
 ) -> tuple[dict[str, Any], dict[str, int]]:
     """One STREAMING round trip to Ollama's /api/chat. Reads the newline-delimited
     JSON stream, calls on_delta(piece) for each content token as it arrives, and
+    returns (assembled_message, round_stats).
+
     `tools` is the schema list sent to the model; None means all of TOOLS,
     which is every chat turn. A narrowed list is a HINT to the model and never a
     guarantee — the boundary that actually holds is _dispatch's `allowed` set.
 
-    returns (assembled_message, round_stats). assembled_message carries `content`
+    assembled_message carries `content`
     plus any `tool_calls`; round_stats carries this round's prompt_tokens/
     output_tokens/eval_ms/load_ms/prompt_ms (0 for any count Ollama's `done`
     chunk omits) plus thinking_chars. Raises on HTTP/connection error — the caller in ask()
@@ -747,7 +824,7 @@ def _chat(
     halt generation. Whatever content/tool_calls arrived so far are returned —
     this never raises on cancellation."""
     payload = {
-        "model": _MODEL,
+        "model": model or current_model(),
         "messages": messages,
         "tools": TOOLS if tools is None else tools,
         "stream": True,
@@ -966,8 +1043,7 @@ def ask(
     keeping the schema its module wrote. See _dispatch for why a caller's own
     preconditions do not belong inside the tool they guard.
 
-    All three default to today's behaviour exactly, so no existing caller
-    changes.
+    All three default to the chat's behaviour exactly.
 
     `on_verbatim` is where a tool's VERBATIM text goes — a result carrying a
     "verbatim" payload ({"label", "title", "text", "ack"}; Daedalus's
@@ -1006,11 +1082,14 @@ def ask(
     nudge to answer or name what's missing — a bare re-ask of the same context
     reproduces the same silence, so the nudge is the part that works. Neither
     the empty turn nor the nudge survives into `turn_messages`. Only if that
-    retry is also silent does it degrade to a readable string. The return value
-    is never empty and never a bare placeholder.
+    retry is also silent does it degrade to a readable string. Apart from a
+    Stop, which returns whatever had streamed (possibly nothing), the return
+    value is never empty and never a bare placeholder.
     """
     t_start = time.perf_counter()
-    thinking = themis.pythia_thinking() if think is None else bool(think)
+    model = current_model()
+    wanted = themis.pythia_thinking() if think is None else bool(think)
+    thinking = wanted and _can_think(model)
     temperature = themis.pythia_temperature()
     if system is not None and not system.strip():
         log.warning("Pythia: blank `system` override ignored — using the "
@@ -1075,7 +1154,7 @@ def ask(
         for round_i in range(_MAX_TOOL_ROUNDS):
             try:
                 reply, stats = _chat(messages, on_delta=on_delta, cancel=cancel,
-                                     tools=tools, think=thinking,
+                                     tools=tools, think=thinking, model=model,
                                      temperature=temperature)
             finally:
                 # Drop the nudge the moment its round is over — including a round
@@ -1183,7 +1262,12 @@ def ask(
                     preview, truncated = _result_preview(result)
                     record["result_preview"] = preview
                     record["result_truncated"] = truncated
-                content = json.dumps(result)
+                # Characters as they are (CONVENTIONS §12, 2026-11-19). The
+                # default escapes every non-ASCII one, and the model read the
+                # escapes: six headlines cost 427 prompt tokens against 344,
+                # and "quote them exactly" came back with the curly quotes and
+                # em dashes changed.
+                content = json.dumps(result, ensure_ascii=False)
                 if len(content) > _LARGE_RESULT_CHARS:
                     log.warning(
                         "Pythia: %r put %d chars into the model's context "
@@ -1274,11 +1358,13 @@ def _warm() -> None:
        the full ~70s anyway. That was the old bug: the warm "succeeded" in 1.4s
        and the question 83 seconds later still paid 71s.
 
-    2. The prefill. `messages: []` is load-only, so it left the ~2,700 tokens of
-       system prompt + tool schemas to be processed on first use (7-25s
-       measured). Sending the real prefix instead puts it in llama.cpp's prompt
-       cache, which matches on longest common prefix — so a real question with a
-       different user message still reuses the system+tools portion.
+    2. The prefill. `messages: []` is load-only, so it left the system prompt +
+       tool schemas to be processed on first use: about 5,160 tokens, 5 to
+       50 s, by this warm's own log line (2026-11-18; 2,700 tokens when this
+       was written). Sending the real prefix instead puts it in llama.cpp's
+       prompt cache, which matches on longest common prefix — so a real
+       question with a different user message still reuses the system+tools
+       portion.
 
     If the operator edits the Machine Spirit prompt between warm and first
     question the prefix simply misses and the cost falls back to what it was
@@ -1286,13 +1372,14 @@ def _warm() -> None:
 
     Best-effort: swallows EVERYTHING. If Ollama isn't running at launch, warming
     is skipped silently and the first real question pays the cold load as it
-    always did."""
+    always did. It warms the model the owner picked (current_model())."""
     try:
+        model = current_model()
         t0 = time.perf_counter()
         resp = requests.post(
             _CHAT_URL,
             json={
-                "model": _MODEL,
+                "model": model,
                 # The same prefix a real turn opens with — see docstring (2).
                 "messages": [
                     {"role": "system", "content": machine_spirit.effective_prompt()},
@@ -1304,7 +1391,7 @@ def _warm() -> None:
                 # prefix (15.4 s against 3.7 s, measured 2026-11-09), so a warm
                 # done the other way would cache a prefix the first question
                 # can't use.
-                "think": themis.pythia_thinking(),
+                "think": themis.pythia_thinking() and _can_think(model),
                 "keep_alive": _KEEP_ALIVE,
                 # Same runner as _chat() will want — see docstring (1).
                 "options": dict(_OPTIONS, num_predict=_WARM_NUM_PREDICT),
@@ -1345,11 +1432,52 @@ def prewarm() -> threading.Thread:
     return t
 
 
+# One switch at a time: a second pick waits for the first to finish loading,
+# so two models are never loading onto the GPU together.
+_SWITCH_LOCK = threading.Lock()
+
+
+def _unload(model: str) -> None:
+    """Ask Ollama to drop `model` from memory now (keep_alive 0 on an empty
+    generate). Best-effort: a model already gone, or Ollama down, is logged
+    and the switch carries on."""
+    try:
+        resp = requests.post(_BASE_URL + "/api/generate",
+                             json={"model": model, "keep_alive": 0},
+                             timeout=_UNLOAD_TIMEOUT)
+        resp.raise_for_status()
+        log.info(f"Pythia: unloaded {model} for the switch")
+    except Exception as e:  # noqa: BLE001 — best-effort, like the warm
+        log.warning(f"Pythia: could not unload {model} ({type(e).__name__})")
+
+
+def switch_model(previous: Optional[str]) -> threading.Thread:
+    """After the owner picks a model on the MACHINE SPIRIT tab (themis already
+    holds the new one): unload `previous` — the model Felhaven itself was
+    using, and only that one, never another app's model on the same Ollama —
+    then warm the new one, so the next question doesn't pay the cold load.
+    Runs on a daemon thread, the prewarm's shape: is_warming() is true from
+    here until the new model is warm (Home says "waking the oracle…").
+    Never raises. Returns the thread (mainly for tests)."""
+    _WARMING.set()
+
+    def run() -> None:
+        with _SWITCH_LOCK:
+            _WARMING.set()                 # a finished earlier switch cleared it
+            if previous and previous != current_model():
+                _unload(previous)
+            _warm()                        # clears _WARMING when done
+
+    t = threading.Thread(target=run, name="pythia-switch", daemon=True)
+    t.start()
+    return t
+
+
 # ── Standalone test ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    print(f"[Pythia] endpoint={_CHAT_URL} model={_MODEL}")
+    print(f"[Pythia] endpoint={_CHAT_URL} model={current_model()}")
     print(f"[Pythia] {len(TOOLS)} tools: {', '.join(_DISPATCH)}")
     q = "What's the weather right now, and what time is it?"
     print(f"[you]    {q}")

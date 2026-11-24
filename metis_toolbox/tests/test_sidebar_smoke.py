@@ -17,6 +17,7 @@ rather than winfo_ismapped(): the root is withdrawn, so nothing is ever mapped.
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -262,6 +263,26 @@ class TestSidebarScroll(unittest.TestCase):
         self.sidebar._on_wheel(_Wheel())
         self.top.update()
         self.assertGreater(self.sidebar._canvas.yview()[0], 0.0)
+
+    def test_the_wheel_stays_bound_while_the_pointer_is_over_a_row(self):
+        """The canvas hears <Leave> as the pointer moves onto one of its own
+        rows (§12's rule for the row tips), and the wheel used to drop there,
+        scrolling the rail only over the gaps between rows."""
+        canvas = self.sidebar._canvas
+        canvas.event_generate("<Enter>")
+        self.top.update()
+        self.addCleanup(canvas.unbind_all, "<MouseWheel>")
+        row = self.sidebar.row("horai")
+        over_row = (row.winfo_rootx() + 5, row.winfo_rooty() + 5)
+        with mock.patch.object(self.sidebar, "winfo_pointerxy", return_value=over_row):
+            canvas.event_generate("<Leave>", detail="NotifyInferior")
+            self.top.update()
+        self.assertTrue(canvas.bind_all("<MouseWheel>"), "the wheel dropped over a row")
+        off_rail = (canvas.winfo_rootx() + canvas.winfo_width() + 50, row.winfo_rooty())
+        with mock.patch.object(self.sidebar, "winfo_pointerxy", return_value=off_rail):
+            canvas.event_generate("<Leave>")
+            self.top.update()
+        self.assertFalse(canvas.bind_all("<MouseWheel>"), "the wheel kept the rail")
 
     def test_every_row_fits_beside_the_lane(self):
         # The lane sits beside the rows instead of taking their width, so no

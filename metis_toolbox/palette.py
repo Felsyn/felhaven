@@ -32,9 +32,19 @@ Guard:       tests/test_palette_guard.py fails red if a colour literal appears
              in any other file — a hex string, a colour name in a colour
              option, or an RGB triple. See CONVENTIONS §7 and §12 (2026-09-26).
 
-Upstream:    theme.py (re-exports C and rgb to every panel), tools/demeter.py
-             (terrain raster RGB), tests/test_palette_guard.py
+Upstream:    theme.py (re-exports C and rgb to every panel; pythia_face and
+             clio_face blend through it), tools/demeter.py (terrain raster
+             RGB), tools/clio.py, tests/test_palette_guard.py
 Downstream:  none (imports nothing)
+
+Requires:    nothing.
+
+V0.03: Walked through 2026-11-21 (born 2026-09-27, #23; its first audit).
+       Every key is read somewhere outside this file (checked one by one).
+       rgb() let through "#+7+8+9" and "# 7 8 9", since int() takes a sign
+       or a space, though the Contract promises a ValueError for anything
+       that is not #RRGGBB; it now checks the digits first. Upstream named
+       one of the two tools/ modules that import it.
 """
 
 
@@ -105,7 +115,7 @@ C: dict[str, str] = {
     "map_road_lo":     "#8A6524",   # local streets
     "map_road_track":  "#6B4F1E",   # vehicular trail / private, dashed
     "map_ring":        "#264A33",   # dim chrome — the scale bar's metric line
-    "map_compass":     "#3E7A55",   # the compass rose and the scale bar
+    "map_legend":      "#3E7A55",   # the scale bar and the terrain key
 }
 
 
@@ -135,11 +145,17 @@ _SAME_AS: dict[str, str] = {
 C.update({alias: C[target] for alias, target in _SAME_AS.items()})
 
 
+# In three pieces: as one string, test_secret_fixtures reads it as a key.
+_HEX_DIGITS = frozenset("0123456789") | frozenset("abcdef") | frozenset("ABCDEF")
+
+
 def rgb(hex_colour: str) -> tuple[int, int, int]:
     """'#7CFC7C' -> (124, 252, 124). The one hex parser in the stack: code that
     blends or rasterises in RGB converts a palette value here rather than
-    carrying its own copy of the numbers."""
-    if len(hex_colour) != 7 or hex_colour[0] != "#":
+    carrying its own copy of the numbers. The digits are checked first: int()
+    alone takes a sign or a space, so "#+7+8+9" read as (7, 8, 9)."""
+    if (len(hex_colour) != 7 or hex_colour[0] != "#"
+            or not _HEX_DIGITS.issuperset(hex_colour[1:])):
         raise ValueError(f"not a #RRGGBB colour: {hex_colour!r}")
     return (int(hex_colour[1:3], 16), int(hex_colour[3:5], 16),
             int(hex_colour[5:7], 16))

@@ -54,6 +54,16 @@ class TestEmanonPanelSmoke(unittest.TestCase):
     def tearDownClass(cls):
         cls.root.destroy()
 
+    def test_the_status_row_carries_its_tip(self):
+        from panels import virgil_tooltip
+        shared = virgil_tooltip._shared(self.root)
+        panel = self.panel
+        self.assertIs(panel.tip_targets["status"], panel._status_lbl.master)
+        self.assertIs(panel._dot.master, panel._status_lbl.master)
+        self.assertEqual(sorted(type(panel)._TIPS), sorted(panel.tip_targets))
+        for key, tip in type(panel)._TIPS.items():
+            self.assertEqual(shared._tips.get(str(panel.tip_targets[key])), tip, key)
+
     def setUp(self):
         self.panel = EmanonPanel(self.root)
         self.panel.pack()
@@ -156,6 +166,67 @@ class TestEmanonPanelSmoke(unittest.TestCase):
         self._update(_snapshot(status="nominal"))
         self.assertIsNone(self.panel._flash_after_id)
         self.assertEqual(self.panel._status, "nominal")
+
+    def test_every_line_shows_its_date(self):
+        """The time alone made a line from yesterday look like today's: the
+        owner's "Emanon's time looks wrong" (the owner's pick, 2026-11-21)."""
+        self._update(_snapshot(entries=[_entry(ts="2026-10-02 16:42:13")]))
+        self.assertIn("2026-10-02 16:42:13", self._log_text())
+
+
+class TestTheTailSurvivesATick(unittest.TestCase):
+    """Every 2 s tick rebuilt the tail: a selection was wiped and a reader
+    scrolled up was thrown back to the bottom (measured 2026-11-21), so the
+    select-and-paste the panel offers barely worked. Real geometry needs a
+    mapped root: mapped and invisible."""
+
+    def setUp(self):
+        self.root = tk.Tk()
+        self.root.attributes("-alpha", 0.0)
+        self.root.overrideredirect(True)
+        self.root.geometry("500x300+40+40")
+        theme._init_fonts(self.root)
+        self.addCleanup(self.root.destroy)
+        self.panel = EmanonPanel(self.root)
+        self.panel.pack(fill="both", expand=True)
+        self.root.update()
+        if not self.panel.winfo_viewable():
+            self.skipTest("no mapped window on this display")
+
+    def _lines(self, count):
+        return [_entry(ts=f"2026-11-21 10:{i // 60:02d}:{i % 60:02d}", message=f"line {i}")
+                for i in range(count)]
+
+    def _tick(self, entries):
+        self.panel.update(_snapshot(entries=entries))
+        self.root.update()
+
+    def test_a_tick_with_nothing_new_keeps_the_selection_and_the_scroll(self):
+        lines = self._lines(40)
+        self._tick(lines)
+        log = self.panel._log
+        log.tag_add("sel", "3.0", "5.0")
+        log.yview_moveto(0.0)
+        self.root.update()
+        self._tick(lines)
+        self.assertTrue(log.tag_ranges("sel"), "the selection was wiped")
+        self.assertEqual(log.yview()[0], 0.0, "the reader was thrown to the bottom")
+
+    def test_a_new_line_leaves_a_scrolled_up_reader_where_they_were(self):
+        self._tick(self._lines(40))
+        log = self.panel._log
+        log.yview_moveto(0.0)
+        self.root.update()
+        self._tick(self._lines(41))
+        self.assertLess(log.yview()[1], 1.0, "the reader was thrown to the bottom")
+        self.assertIn("line 40", log.get("1.0", "end"))
+
+    def test_a_reader_at_the_bottom_follows_new_lines(self):
+        self._tick(self._lines(40))
+        log = self.panel._log
+        self.assertEqual(log.yview()[1], 1.0)
+        self._tick(self._lines(41))
+        self.assertEqual(log.yview()[1], 1.0, "the newest line went out of view")
 
 
 if __name__ == "__main__":

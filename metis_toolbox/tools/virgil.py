@@ -31,8 +31,9 @@ Two sources, each stored the honest way:
                it. The title is the key, spaced and title-cased
                ("machine_spirit" -> "Machine Spirit").
              • A TERM tip is the owner's words, from the glossary below: the
-               Gothic UI names (Moderati, Cogitator, …) and the readouts (CPU,
-               RAM, Ollama, …), things that don't drift with the code.
+               Gothic UI names (Moderati, Cogitator, …), the readouts (CPU,
+               RAM, Ollama, …) and the controls (Vox Response, Auto-DJ, …),
+               things that don't drift with the code.
 
 Glossary:    config/virgil_glossary.json — {"_comment", "terms": {key:
              {"label", "text"}}}, hand-written config, committed (§4), the
@@ -58,13 +59,28 @@ Not a brain tool: out of LLM scope in v1 (CONVENTIONS §12, 2026-11-09).
 Source:      Two local reads: Daedalus's index of the source tree, and one
              JSON file. No network, no threads, no file writes.
 
-Upstream:    panels/virgil_tooltip.py (the tooltip), and the _TIPS tables that
+Upstream:    panels/virgil_tooltip.py (the tooltip), and the tip tables that
              build tips with module() and term(): panels/sidebar.py, the three
-             tab hosts and panels/hephaestus_panel.py.
+             tab hosts, panels/hephaestus_panel.py, Home's three
+             (panels/vox_controls.py, hestia_panel.py, home_panel.py), and
+             every other panel with a tip table: _TIPS, _ROW_TIPS, _TAB_TIPS,
+             _SECTION_TIPS or a _HEADER_TIP (tests/test_virgil_surfaces.py
+             lists them all).
 Downstream:  tools/daedalus.py (gloss()), config/virgil_glossary.json.
 
-Requires:    tools/daedalus.py, and json, logging, os, re, threading,
+Requires:    tools/daedalus.py, and json, logging, os, re, sys, threading,
              typing (stdlib).
+
+V0.03:       Walked through 2026-11-18 (the V0.03 walkthrough, CONVENTIONS
+             §3), its first audit (born 2026-11-09, #57; bindtags and spans
+             #65, every panel's tips #66). It reads two local sources and
+             writes nothing, text_for() never raises, a miss warns once per
+             key, and no warning carries an exception's text. glossary() is
+             read only by the tests and the block below; it stays, since
+             test_virgil_surfaces' orphan check needs the whole glossary and
+             it is the seam the parked Pythia tool would read. Found clean
+             apart from Upstream, which names every kind of tip table, and
+             Requires, which gained sys.
 """
 
 from __future__ import annotations

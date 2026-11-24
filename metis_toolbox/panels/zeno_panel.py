@@ -1,6 +1,8 @@
 """
 Zeno panel — calculator for the Felhaven dashboard.
 
+Job:         Evaluate calculator expressions safely, showing the steps and recent results.
+
 ZenoPanel(tk.Frame) — safe expression evaluator (Zeno), with step traces and a
 recent-history strip. A bare Frame tab body inside CogitatorPanel (the ZENO
 tab); the ANS readout that used to sit in the Card header now lives in the body.
@@ -8,15 +10,34 @@ tab); the ANS readout that used to sit in the Card header now lives in the body.
 Request-driven only; no Kairos worker, no root.after(), no threading. The unit
 converter that once shared this card is now panels/eudoxus_panel.py.
 
-V0.02:  Audited 2026-07-23 — stopped rendering Zeno's raw error codes at the
-        user and mapped them to human text; first tests (tests/test_zeno.py,
+Contract:    ZenoPanel(parent), a tab body; no update() (nothing polls it).
+             ANS keeps the last result as Zeno returned it, an int stays an
+             int, so its readout matches the result's digit for digit.
+
+Upstream:    panels/cogitator_panel.py builds it as the ZENO tab.
+Downstream:  tools/zeno.py (handle() and format_number()), theme.py,
+             tools/virgil.py and panels/virgil_tooltip.py (the ANS tip)
+
+Requires:    tkinter (stdlib)
+
+2026-07-23: walkthrough audit — stopped rendering Zeno's raw error codes at
+        the user and mapped them to human text; first tests (tests/test_zeno.py,
         tests/test_zeno_panel_smoke.py).
+
+V0.03:  Walked through 2026-11-23 (the V0.03 walkthrough, S31; born
+        2026-06-10). ANS stored float(result): `2**100` read
+        1267650600228229401496703205376 with ANS = 1.26765e+30, and any
+        integer past ~1e308 (`2**1100`) raised OverflowError out of the Return
+        key, drawing nothing (measured). It keeps the value as it came now.
+        bad_arguments is worded; the entry box drops the theme's own cursor
+        colour (§7). Contract, Upstream, Downstream and Requires added.
 """
 
 import tkinter as tk
 
+from panels import virgil_tooltip
 from theme import C, FONTS
-from tools import zeno
+from tools import virgil, zeno
 
 # Human text per Zeno error slug (CONVENTIONS §2), the panels/echo_panel.py
 # precedent. Zeno's identifiers can carry detail after ": " — "unknown_function:
@@ -29,6 +50,7 @@ _ERROR_TEXT = {
     "unknown_name":          "unknown name",
     "unknown_function":      "unknown function",
     "unsupported_operation": "unsupported",
+    "bad_arguments":         "wrong arguments for",
     "division_by_zero":      "division by zero",
     "result_too_large":      "result too large",
     "math_domain_error":     "outside that function's domain",
@@ -46,12 +68,19 @@ def _error_text(code: str) -> str:
 
 
 class ZenoPanel(tk.Frame):
+    # Hover tooltip (Virgil) for the ANS readout, a glossary entry (CONVENTIONS
+    # §7). It shows only while ANS has a value: the label is blank until the
+    # first good result.
+    _TIPS = {
+        "ans": virgil.term("calc_ans"),
+    }
+
     def __init__(self, parent):
         super().__init__(parent, bg=C["card"])
 
         # ── State ─────────────────────────────────────────────────────────────
         self._history: list[dict] = []      # most-recent first, cap 5
-        self._ans: float | None = None      # last successful result
+        self._ans: int | float | None = None   # last good result, as returned
         self._expanded: set = set()         # expanded history indices
         # Where the strip starts. 1 while the current row IS _history[0]; 0
         # after a failed evaluation, which appends nothing — otherwise the last
@@ -64,11 +93,14 @@ class ZenoPanel(tk.Frame):
             fg=C["text3"], bg=C["card"], anchor="w",
         )
         self._ans_lbl.pack(fill="x")
+        self.tip_targets: dict[str, tk.Misc] = {"ans": self._ans_lbl}
+        virgil_tooltip.attach(self._ans_lbl, self._TIPS["ans"],
+                              when=lambda: bool(self._ans_lbl.cget("text")))
 
         # ── Entry ─────────────────────────────────────────────────────────────
         self._entry = tk.Entry(
             self, font=FONTS["body"], bg=C["bar_bg"], fg=C["text3"],
-            insertbackground=C["text1"], relief="flat",
+            relief="flat",
             highlightbackground=C["border"], highlightthickness=1,
         )
         self._entry.insert(0, "= expression")
@@ -129,7 +161,9 @@ class ZenoPanel(tk.Frame):
         if "error" not in result:
             val = result["result"]
             if isinstance(val, (int, float)) and not isinstance(val, bool):
-                self._ans = float(val)
+                # As Zeno returned it: float() rounded big ints (ANS read
+                # 1.26765e+30 beside 2**100's digits) and raised past ~1e308.
+                self._ans = val
             self._history.insert(0, result)
             if len(self._history) > 5:
                 self._history = self._history[:5]

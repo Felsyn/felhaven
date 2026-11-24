@@ -221,8 +221,9 @@ _WRITES: dict[str, Write] = {
     "themis.py::_write": Write(
         _ATOMIC, frozenset({"app folder"}), frozenset({"constant", "app path"}),
         "trusted", "felhaven_settings.json beside this file; mkstemp in the same "
-        "folder, os.replace. Called by save() and save_pythia(), which validate "
-        "the values; the path is the constant either way."),
+        "folder, os.replace under _FILE_LOCK. Called by save(), save_pythia(), "
+        "save_pythia_model() and save_atmos_place(), which validate the values; "
+        "the path is the constant either way."),
     "voices.py::save_pythia_voice": Write(
         _ATOMIC, frozenset({"app folder"}), frozenset({"constant", "app path"}),
         "trusted", "voice_config.json beside this file; mkstemp in the same folder, "
@@ -240,7 +241,7 @@ _WRITES: dict[str, Write] = {
         (".write_text", "os.replace"), frozenset({"app folder"}),
         frozenset({"constant", "app path"}), "trusted",
         "timer_state.json in the app folder, written to '<name>.tmp' beside it, "
-        "then os.replace."),
+        "then os.replace, under _LOCK."),
     "tools/argus.py::_save_timeline": Write(
         ("open", "os.replace"), frozenset({"app folder"}),
         frozenset({"constant", "app path"}), "trusted",
@@ -264,10 +265,10 @@ _WRITES: dict[str, Write] = {
         ("os.utime",), frozenset({"app folder"}), frozenset({"constant", "app path"}),
         "trusted", "Sets euterpe_ledger.json's modified time; the path is a constant."),
     "tools/euterpe.py::take_base": Write(
-        ("tempfile.mkstemp", "os.fdopen", "os.replace"), frozenset({"app folder"}),
+        _ATOMIC, frozenset({"app folder"}),
         frozenset({"constant", "app path"}), "trusted",
         "'euterpe_ledger.json.base' in the app folder; mkstemp in the same folder, "
-        "os.replace."),
+        "os.replace, and the temp file unlinked on a failure."),
     "tools/dev_build_hypatia_catalog.py::_atomic_write_json": Write(
         ("tempfile.mkstemp", "os.fdopen", "os.replace", "os.remove"),
         frozenset({"app folder"}), frozenset({"constant", "app path"}), "trusted",
@@ -387,12 +388,14 @@ _WRITES: dict[str, Write] = {
         "removed in a finally. The typed name reaches only ffmpeg's output, a "
         "launch, through sanitize_filename()."),
     "tools/echo.py::_encode_opus": Write(
-        ("os.remove",), frozenset({"local_audio/"}), frozenset({"owner", "app path"}),
+        ("os.open", "os.remove"), frozenset({"local_audio/"}),
+        frozenset({"owner", "app path"}),
         "checked",
-        "Removes a half-written .opus after ffmpeg fails. Its name was typed in the "
+        "Claims the .opus with an exclusive create (refused if the name exists) "
+        "and removes that same file after ffmpeg fails. Its name was typed in the "
         "ECHO tab and reduced by sanitize_filename() in the only caller to a bare "
-        "name (no separators, colon or control characters, no device name) under "
-        "local_audio/; the path must be absolute or nothing runs.",
+        "name (no separators, colon or control characters, no name Windows "
+        "reserves) under local_audio/; the path must be absolute or nothing runs.",
         callers=("tools/echo.py::text_to_audio",)),
     "calliope.py::save_wav": Write(
         ("wave.open",), frozenset({"%TEMP%", "videos/"}), frozenset({"app path"}),
@@ -414,7 +417,7 @@ _WRITES: dict[str, Write] = {
         ("os.makedirs", "tempfile.mkstemp", "os.fdopen", "os.replace", "os.unlink"),
         frozenset({"videos/"}), frozenset({"constant", "app path", "owner"}),
         "checked",
-        "videos/build/<episode>/[short-<tag>/]timing.json and face_track.json, "
+        "videos/build/<episode>/[short-<tag>/]timing.json and face_track.part.json, "
         "and a capture's "
         "note, videos/captures/<episode>/<clip>.clio.json; the episode name and a "
         "short's tag are _SLUGs and the clip a bare file name, all checked by "
@@ -433,8 +436,9 @@ _WRITES: dict[str, Write] = {
         ("os.unlink",), frozenset({"videos/"}),
         frozenset({"constant", "app path", "owner"}), "checked",
         "Removes a half-written <clip>.part beside the clip capture() was "
-        "recording; the path is capture()'s own, built as above.",
-        callers=("tools/clio.py::capture",)),
+        "recording, or render_face()'s face.part.mkv and face_track.part.json; "
+        "each path is its caller's own, built as in that caller's line.",
+        callers=("tools/clio.py::capture", "tools/clio.py::render_face")),
     "tools/clio.py::_write_text_atomic": Write(
         ("os.makedirs", "tempfile.mkstemp", "os.fdopen", "os.replace", "os.unlink"),
         frozenset({"videos/"}), frozenset({"constant", "app path", "owner"}),
@@ -447,11 +451,13 @@ _WRITES: dict[str, Write] = {
         "then os.replace.",
         callers=("tools/clio.py::_video_chain", "tools/clio.py::_encode")),
     "tools/clio.py::render_face": Write(
-        ("os.unlink", "os.replace"), frozenset({"videos/"}),
+        ("os.replace", "os.replace"), frozenset({"videos/"}),
         frozenset({"constant", "app path", "owner"}), "checked",
         "build/<episode>/[short-<tag>/]face.part.mkv, which ffmpeg wrote (a "
-        "launch), moved onto face.mkv, or removed when the render failed; the "
-        "episode name and a short's tag are _SLUGs."),
+        "launch), moved onto face.mkv, then face_track.part.json onto "
+        "face_track.json, the cache's key, last (_discard removes both parts when "
+        "the render fails or is interrupted); the episode name and a short's tag "
+        "are _SLUGs."),
     "tools/clio.py::normalize_audio": Write(
         ("os.replace", "os.unlink"), frozenset({"videos/"}),
         frozenset({"constant", "app path", "owner"}), "checked",
@@ -463,9 +469,9 @@ _WRITES: dict[str, Write] = {
         frozenset({"constant", "app path", "owner"}), "checked",
         "Renames a finished video that failed QC to <stem>.failed-qc.mp4 in the "
         "same folder. The videos are _encode's own outputs under videos/out/ "
-        "(episode and tag _SLUGs), handed in by main(); the new name only adds a "
-        "constant suffix to the stem.",
-        callers=("tools/clio.py::main",)),
+        "(episode and tag _SLUGs), handed in by main() as each is made; the new "
+        "name only adds a constant suffix to the stem.",
+        callers=("tools/clio.py::main.finished",)),
     "tools/clio.py::_encode": Write(
         ("os.makedirs", "os.replace", "os.unlink"), frozenset({"videos/"}),
         frozenset({"constant", "app path", "owner"}), "checked",
@@ -496,6 +502,9 @@ _IN_PLACE: dict[str, str] = {
     "tools/morpheus.py::_get_props": "mpv's pipe, not a file.",
     "calliope.py::save_wav":
         "A fresh mkstemp file its caller made; nothing reads it until it is closed.",
+    "tools/echo.py::_encode_opus":
+        "os.open only claims the name, an empty file made with O_EXCL; ffmpeg (a "
+        "launch) writes the audio into it, and a failed encode removes it.",
     "tools/euterpe.py::_backup":
         "The .bak copy; the ledger it copies is untouched, and the next hand edit "
         "takes a new one.",

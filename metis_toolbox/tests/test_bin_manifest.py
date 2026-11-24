@@ -34,6 +34,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tools import aegis
+from tests._machine_root import machine_root as _machine_root, main_app_root as _main_app_root
 
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -64,31 +65,6 @@ def _names_the_code_asks_for():
                                              and getattr(func.value, "id", "") == "aegis")):
                 names.add(node.args[0].value)
     return names
-
-
-def _main_app_root():
-    """The main checkout's app root: this one, unless this is a worktree.
-
-    Worked out from git, never hardcoded: the app root's place inside this
-    checkout, joined onto the main checkout. Raises when git can't answer,
-    because returning nothing here would turn into a skip, and a skip on the
-    machine that runs Felhaven is exactly what must not happen quietly."""
-    try:
-        common = _git("rev-parse", "--path-format=absolute", "--git-common-dir")
-        top = _git("rev-parse", "--show-toplevel")
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise RuntimeError(f"git could not locate the main checkout ({exc}); not "
-                           "skipping, because a skip here could hide a mismatch") from exc
-    rel = os.path.relpath(_APP_ROOT, top)
-    return os.path.normpath(os.path.join(os.path.dirname(common), rel))
-
-
-def _machine_root():
-    """The app root whose bin/ and manifest this machine runs: this
-    checkout's if it has a bin/, else the main checkout's."""
-    if os.path.isdir(os.path.join(_APP_ROOT, "bin")):
-        return _APP_ROOT
-    return _main_app_root()
 
 
 class WhatHoldsEverywhere(unittest.TestCase):

@@ -22,6 +22,10 @@ it. That is
     `run` and `subprocess` commands start programs and `load-script` runs code,
     so only the commands and properties Morpheus uses today are allowed.
 
+A second test class holds every program the code names as a constant to an
+absolute path: Windows looks for a bare name in the working folder before
+System32 (measured 2026-11-17, CONVENTIONS §12).
+
 Every REFERENCE counts, not only calls, so `f = subprocess.run` and
 `partial(os.startfile, p)` are sites too. Every spelling of the import counts:
 `import subprocess as sp`, `from subprocess import run as r`,
@@ -63,7 +67,9 @@ Run from the package root:
 """
 
 import ast
+import ntpath
 import os
+import posixpath
 import subprocess
 import unittest
 from typing import NamedTuple
@@ -224,18 +230,19 @@ _LAUNCHES: dict[str, Launch] = {
         ("subprocess.run",),
         "netsh wlan show interfaces (System32)",
         frozenset({"constant"}), "trusted",
-        "Constants only. A bare name: planting a netsh earlier on the search "
-        "path needs write access to the app folder, which can edit the code."),
+        "Constants only, and netsh by its absolute System32 path (SystemRoot): "
+        "a bare name ran a netsh.exe from the working folder (measured "
+        "2026-11-17), which needn't be the app folder."),
     "tools/argus.py::_firewall": Launch(
         ("subprocess.run",),
         "netsh advfirewall show allprofiles state (System32)",
         frozenset({"constant"}), "trusted",
-        "Constants only; the bare name is the same case as Aether's netsh."),
+        "Constants only; netsh by its absolute System32 path, as Aether's."),
     "tools/argus.py::_dns": Launch(
         ("subprocess.run",),
         "ipconfig /displaydns (System32)",
         frozenset({"constant"}), "trusted",
-        "Constants only; the bare name is the same case as Aether's netsh."),
+        "Constants only; ipconfig by its absolute System32 path, as Aether's netsh."),
     "sphynx_panel.py::SphynxPanel._launch_felhaven": Launch(
         ("subprocess.Popen",),
         "this Python, running felhaven.py",
@@ -244,11 +251,12 @@ _LAUNCHES: dict[str, Launch] = {
         "folder as the working directory."),
     "panels/daedalus_panel.py::DaedalusPanel._open_in_notepad": Launch(
         ("subprocess.Popen",),
-        "notepad.exe (System32)",
-        frozenset({"app path"}), "trusted",
-        "A module path from Daedalus's own map of the source tree, checked again "
-        "to be an existing .py under the app folder. Never os.startfile, which "
-        "would RUN a .py."),
+        "notepad.exe (System32, by absolute path)",
+        frozenset({"constant", "app path"}), "trusted",
+        "Notepad by its absolute System32 path, never a bare name (Aether's "
+        "netsh case). A module path from Daedalus's own map of the source tree, "
+        "checked again to be an existing .py under the app folder. Never "
+        "os.startfile, which would RUN a .py."),
     "panels/cerberus_panel.py::_open_path": Launch(
         ("os.startfile", "subprocess.Popen", "subprocess.Popen"),
         "the default editor for a .json, or the file explorer for the config "
@@ -456,6 +464,62 @@ def launch_sites(source):
         finder.found.append(Site("<module>", False, f"from {node.module} import *",
                                  node.lineno))
     return finder.found
+
+
+# ── A program named by a constant is named by its full path ──────────────────
+# Windows looks for a bare program name ("netsh") in Python's own folder and
+# the working folder BEFORE System32, unless NoDefaultCurrentDirectoryInExePath
+# is set, and the owner's machine doesn't set it. Measured 2026-11-17: with a
+# netsh.exe in the working folder, subprocess.run(["netsh", ...]) ran it, not
+# System32's (CONVENTIONS §12). So a program the code names as a constant must
+# be an absolute path. A computed one (Aegis's bin/ paths, sys.executable) is
+# traced by its _LAUNCHES line instead.
+
+_ARGV_LAUNCHERS = frozenset(f"subprocess.{name}" for name in
+                            ("run", "Popen", "call", "check_call", "check_output"))
+
+# Bare names allowed, each with its reason. Only programs that run off Windows,
+# where exec searches PATH alone and never the working folder.
+_BARE_OK = {
+    "panels/cerberus_panel.py::open": "macOS only; Windows takes os.startfile",
+    "panels/cerberus_panel.py::xdg-open": "Linux only; Windows takes os.startfile",
+}
+
+
+def bare_programs(source):
+    """[(program, line)] for each subprocess launch whose program is a constant
+    that isn't an absolute path: the first item of a list or tuple argv, or a
+    whole command string, written in place or as a module-level string
+    constant (`_NETSH = "netsh"` would otherwise hide one)."""
+    tree = ast.parse(source)
+    modules, names, _ = _aliases(tree)
+    consts = {t.id: node.value for node in tree.body if isinstance(node, ast.Assign)
+              for t in node.targets if isinstance(t, ast.Name)
+              and isinstance(node.value, ast.Constant)}
+    out = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and node.args):
+            continue
+        func = node.func
+        if (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+                and func.value.id in modules):
+            called = f"{modules[func.value.id]}.{func.attr}"
+        elif isinstance(func, ast.Name):
+            called = names.get(func.id)
+        else:
+            continue
+        if called not in _ARGV_LAUNCHERS:
+            continue
+        argv = node.args[0]
+        program = (argv.elts[0] if isinstance(argv, (ast.List, ast.Tuple)) and argv.elts
+                   else argv)
+        if isinstance(program, ast.Name):
+            program = consts.get(program.id, program)
+        if (isinstance(program, ast.Constant) and isinstance(program.value, str)
+                and not (ntpath.isabs(program.value) or posixpath.isabs(program.value))):
+            out.append((program.value.split()[0] if program.value.split() else "",
+                        node.lineno))
+    return out
 
 
 def _tracked_runtime_files():
@@ -717,6 +781,45 @@ class EveryLaunchIsReviewed(unittest.TestCase):
                     _callers(key), set(entry.callers),
                     f"{key} is called from somewhere new. Its arguments are checked "
                     "by its callers; check the new one does the same, then list it.")
+
+
+class EveryProgramIsNamedByItsFullPath(unittest.TestCase):
+    """A bare name runs whatever file of that name sits in the working folder."""
+
+    def _bare(self):
+        return {f"{rel}::{program}": line
+                for rel in _tracked_runtime_files()
+                for program, line in bare_programs(_read(rel))}
+
+    def test_no_launch_names_a_bare_program(self):
+        bad = sorted(f"{key} (line {line})" for key, line in self._bare().items()
+                     if key not in _BARE_OK)
+        self.assertFalse(
+            bad, f"these launches name a program without its folder: {bad}. "
+                 f"Windows would run a file of that name from the working folder "
+                 f"first. Name it by its absolute path, as Brontes does for "
+                 f"nvml.dll: os.path.join(SystemRoot, 'System32', '<name>.exe').")
+
+    def test_no_allowed_bare_name_is_stale(self):
+        stale = sorted(set(_BARE_OK) - set(self._bare()))
+        self.assertFalse(stale, f"_BARE_OK lists launches that are gone: {stale}")
+
+    def test_the_check_sees_every_spelling(self):
+        src = (
+            "import subprocess, subprocess as sp\n"
+            "from subprocess import Popen\n"
+            "sp.run(['netsh', 'wlan'])\n"
+            "Popen(('ipconfig', '/all'))\n"
+            "subprocess.check_output('whoami /all')\n"
+            "subprocess.run(['C:/Windows/System32/netsh.exe', 'wlan'])\n"
+            "subprocess.run([_NETSH, 'wlan'])\n"
+            "subprocess.run(['/usr/bin/open', path])\n"
+            "os.startfile('notepad')\n"
+            "_HIDDEN = 'netsh'\n"
+            "subprocess.run([_HIDDEN, 'wlan'])\n"
+        )
+        self.assertEqual(bare_programs(src),
+                         [("netsh", 3), ("ipconfig", 4), ("whoami", 5), ("netsh", 11)])
 
 
 class TheSemgrepRuleWatchesTheSameLaunchers(unittest.TestCase):

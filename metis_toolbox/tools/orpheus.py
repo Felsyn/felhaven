@@ -16,21 +16,23 @@ Contract:    fetch() -> {"playing": bool, "files": [{"name", "duration"}, ...]}
                  current local_audio/ listing, refreshed on every tick — no
                  separate watcher, no manual refresh button — each row
                  carrying its "duration" in seconds (float, or None if it
-                 couldn't be read). Durations are cached by filename (see
-                 "Duration probing" below) so a Kairos tick doesn't re-probe
-                 every file every 2 s.
-                 Missing ffmpeg degrades to {"playing": False, "files": [],
-                 "error": "ffmpeg_unavailable"} — the same slug play_file()
-                 and Echo use for that condition (§2's one vocabulary).
+                 couldn't be read). Durations are cached by name, size and
+                 modification time (see "Duration probing" below) so a
+                 Kairos tick doesn't re-probe every file every 2 s.
+                 Missing ffmpeg adds "error": "ffmpeg_unavailable" — the same
+                 slug play_file() and Echo use for that condition (§2's one
+                 vocabulary) — and still lists the files, each duration None,
+                 so ORPHEUS never says "no files" over files it can't play.
              play_file(name) -> dict
                  Decode `name` (must already be a file in local_audio/) whole
                  into RAM via ffmpeg and hand it to harmonia.play() at
                  24 kHz mono. Mutation — fires only from deliberate UI action
-                 in OrpheusPanel; never polled, never LLM-facing (no
-                 handle(), no TOOL_DEFINITION — v1 is panel-only, the Echo
-                 precedent). Never raises: a bad name, a missing ffmpeg, or a
-                 decode failure all degrade to a logged no-op and a stable
-                 {"error": ...} dict.
+                 in OrpheusPanel, which calls it on its own decode thread
+                 (a decode takes seconds; see "Limit"); never polled, never
+                 LLM-facing (no handle(), no TOOL_DEFINITION — v1 is
+                 panel-only, the Echo precedent). Never raises: a bad name,
+                 a missing ffmpeg, or a decode failure all degrade to a
+                 logged no-op and a stable {"error": ...} dict.
              stop() -> None
                  harmonia.stop(). Mutation, UI-driven only. Never raises.
              delete_file(name) -> dict
@@ -45,15 +47,19 @@ Contract:    fetch() -> {"playing": bool, "files": [{"name", "duration"}, ...]}
                  two-click confirm is the primary guard; the undo is the
                  backstop for the misfire that gets past it. Costs no new
                  dependency — SHFileOperationW via stdlib ctypes.
-             available() -> {"ffmpeg": path_or_None}
-                 Mirrors morpheus.available() / echo.available(). The panel
+             available() -> {"ffmpeg": path_or_None, "problem": slug_or_None}
+                 Mirrors morpheus.available() / echo.available(); "problem"
+                 is aegis's slug when bin/ffmpeg.exe was refused. The panel
                  reads this once at build time to show a placeholder.
 
 Limit:       Whole-file decode into RAM. ~17 MB for a 3-minute mono 24 kHz
-             float32 briefing — fine for what Echo produces. A multi-hour
-             file would not be; that bound is a stated, deliberate limit, not
-             a bug. Streaming would need chunked reads off ffmpeg's stdout —
-             a different module, not this one.
+             float32 briefing. Echo has made longer: measured 2026-11-21 on
+             the owner's files, a 25-minute one decodes to 142 MB in 3.2 s,
+             a 9-minute one to 50 MB in 1.1 s — which is why OrpheusPanel
+             decodes off the UI thread. A multi-hour file would not fit;
+             that bound is a stated, deliberate limit, not a bug. Streaming
+             would need chunked reads off ffmpeg's stdout — a different
+             module, not this one.
 
              _SAMPLE_RATE/_CHANNELS below are 24000/1, not a generic
              "decode anything" default — they match exactly what Echo's
@@ -78,10 +84,16 @@ probing:     pulling in a second binary for one number is a bad trade.
              ffprobe-free trick, and it never decodes a sample. That call
              always exits nonzero ("at least one output file must be
              specified"), which is expected and ignored; only a missing
-             Duration line is treated as failure (-> None, logged). Results
-             are cached by filename for the life of the process — local_audio/
-             files are write-once (Echo never overwrites in place), so a file
-             is probed exactly once, not on every 2 s Kairos tick.
+             Duration line is treated as failure (-> None, logged, retried
+             next tick). A result is cached by (name, size, mtime_ns), and
+             each tick keeps only the files still listed, so an unchanged
+             file is probed once, not on every 2 s Kairos tick. Keyed by
+             name alone (until 2026-11-21) it went wrong: Echo's ffmpeg
+             writes the file in place, and a probe mid-write succeeds with
+             a partial duration (46 s at 0.8 s into a 16 s encode of a
+             24:37 file, measured), which then stuck until a restart. Now a
+             file that grows is probed again, and so is one replaced
+             outside Felhaven.
 
 ffmpeg       Every path handed to ffmpeg must be absolute, or nothing runs
 paths:       (_probe_duration and _decode refuse it). ffmpeg reads an
@@ -94,8 +106,10 @@ paths:       (_probe_duration and _decode refuse it). ffmpeg reads an
              2026-10-03).
 
 Source:      One external binary, zero new pip packages — ffmpeg, already a
-             prerequisite for Echo. Resolution follows the Morpheus/Echo
-             precedent: <app root>/bin/ffmpeg.exe wins over PATH.
+             prerequisite for Echo. tools/aegis.py resolves it, as for
+             Morpheus and Echo: bin/ffmpeg.exe when it matches its manifest
+             entry, else ffmpeg.exe on PATH; a bin/ copy that doesn't match
+             is refused, never swapped for PATH's.
              Import-safety is load-bearing: this module is a Kairos worker
              (Kairos resolves every WORKERS entry via importlib at startup),
              so nothing at import time may raise or probe for ffmpeg — a
@@ -114,17 +128,40 @@ scope:       decision as Echo. The module *shape* differs, though: Orpheus is
              plain functions" flavor. A future play_briefing brain tool is left
              open by the shape, not built.
 
-Upstream:    kairos.py (calls fetch), panels/orpheus_panel.py (UI mutations)
-Downstream:  ffmpeg (decode) -> harmonia.py (playback ownership)
+Threads:     fetch() runs on the Kairos worker and is the only code that
+             touches _duration_cache (§6). play_file() runs on OrpheusPanel's
+             decode thread and keeps no module state; Harmonia locks its own.
+             stop() and delete_file() run on the Tk thread and touch none.
 
-Requires:    ffmpeg binary (bin/ or PATH). numpy. Stdlib otherwise.
+Upstream:    kairos.py (calls fetch), panels/orpheus_panel.py (play_file on
+             its decode thread, stop and delete_file on a click).
+Downstream:  ffmpeg (probe, decode), vouched for by tools/aegis.py ->
+             harmonia.py (playback ownership); shell32's SHFileOperationW
+             (the Recycle Bin).
 
-V0.02:       Audited 2026-07-25 — never-raise verified across fetch/play_file/
+Requires:    harmonia, tools.aegis; numpy; the ffmpeg binary (bin/ or PATH).
+             Stdlib: ctypes, logging, os, re, subprocess, sys, typing.
+
+2026-07-25:  walkthrough audit — never-raise verified across fetch/play_file/
              stop, error slugs already conformant (never in the output
              allowlist); fetch()'s "no_ffmpeg" renamed to "ffmpeg_unavailable"
              to match play_file()/Echo (§2 one vocabulary); the out-of-scope
              note corrected to the hybrid flavor, not Echo's plain-functions
              shape.
+
+V0.03:       Walked through 2026-11-21 (the V0.03 walkthrough, CONVENTIONS
+             §3/§12). Built 2026-07-17; the Recycle Bin remove came
+             2026-08-06. Checked: the probe and decode against the owner's 14
+             files (probe ~40 ms each); fetch() never raises; the Recycle Bin
+             call's double-NUL list. Changed: the duration cache keys on
+             name, size and mtime and keeps only listed files, because a
+             probe mid-write cached a partial duration for good (measured);
+             delete_file() no longer touches the cache, so only the Kairos
+             worker does (§6); fetch() without ffmpeg still lists the files;
+             play_file() runs on the panel's decode thread (the owner's
+             pick: a 25-minute file froze Felhaven 3.2 s); Limit carries
+             the measured sizes; the Contract names available()'s
+             "problem"; Source names aegis; Requires names every import.
 """
 
 import ctypes
@@ -171,7 +208,8 @@ _DECODE_TIMEOUT = 120.0   # s — generous for a multi-minute briefing
 # Duration probing (see module "Duration probing" section — no ffprobe dep).
 _DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
 _PROBE_TIMEOUT = 10.0     # s — reading metadata only, never a full decode
-_duration_cache: dict[str, float] = {}   # filename -> seconds; write-once files
+# (name, size, mtime_ns) -> seconds. The Kairos worker's alone (module "Threads").
+_duration_cache: dict[tuple[str, int, int], float] = {}
 
 
 # ── Binary resolution (tools/aegis.py: a verified bin/ copy, else PATH) ───────
@@ -307,20 +345,31 @@ def _probe_duration(ffmpeg: str, path: str) -> Optional[float]:
 
 
 def _file_rows() -> list[dict[str, Any]]:
-    """local_audio/ listing, each row {"name", "duration"} — duration is
-    probed once per filename and cached (see module docstring); a probe
-    failure leaves it uncached so a transient issue (e.g. Echo still writing
-    the file) can succeed on a later tick instead of sticking as None
-    forever. No ffmpeg -> every row's duration is None."""
+    """local_audio/ listing, each row {"name", "duration"}. A duration is
+    cached by (name, size, mtime_ns), so a file is probed again whenever it
+    changes, and the cache keeps only the files listed this time (see module
+    "Duration probing"). A probe failure stays uncached and is retried next
+    tick. A file gone between the listing and its stat is left out. No
+    ffmpeg -> nothing is probed; a row shows a duration only if one was
+    cached before."""
     ffmpeg = _resolve("ffmpeg")
     rows: list[dict[str, Any]] = []
+    kept: dict[tuple[str, int, int], float] = {}
     for name in list_files():
-        duration = _duration_cache.get(name)
+        path = os.path.join(_LOCAL_AUDIO_DIR, name)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        key = (name, st.st_size, st.st_mtime_ns)
+        duration = _duration_cache.get(key)
         if duration is None and ffmpeg:
-            duration = _probe_duration(ffmpeg, os.path.join(_LOCAL_AUDIO_DIR, name))
-            if duration is not None:
-                _duration_cache[name] = duration
+            duration = _probe_duration(ffmpeg, path)
+        if duration is not None:
+            kept[key] = duration
         rows.append({"name": name, "duration": duration})
+    _duration_cache.clear()
+    _duration_cache.update(kept)
     return rows
 
 
@@ -358,7 +407,8 @@ def _decode(ffmpeg: str, path: str) -> Optional[np.ndarray]:
 def play_file(name: str) -> dict[str, Any]:
     """Decode `name` (a file already in local_audio/) and hand it to
     harmonia.play() at 24 kHz mono — Echo's native format, not a generic
-    rate (see the module "Limit" section). Never raises.
+    rate (see the module "Limit" section). Blocks for the whole decode, so
+    OrpheusPanel calls it on its own decode thread. Never raises.
     Error codes: bad_name, ffmpeg_unavailable, decode_failed."""
     path = _safe_path(name)
     if path is None:
@@ -393,9 +443,8 @@ def delete_file(name: str) -> dict[str, Any]:
         return {"error": "bad_name"}
     if not _send_to_recycle_bin(path):
         return {"error": "delete_failed"}
-    # The cache is keyed by filename and never evicted, so a later file created
-    # under this same name would otherwise inherit the dead file's duration.
-    _duration_cache.pop(name, None)
+    # The duration cache is left to fetch(): a later file under this name has
+    # its own size and mtime, and the next tick drops this one's entry.
     log.info("Orpheus: recycled %r", name)
     return {"deleted": name}
 
@@ -406,10 +455,15 @@ def fetch() -> dict[str, Any]:
     """Kairos-polled, 2 s. READ-ONLY, NEVER RAISES: idle is a normal state,
     not a fault (the morpheus.fetch() precedent). Also returns the current
     local_audio/ listing (each row carrying its duration) so the panel's file
-    list refreshes itself with no separate watcher."""
-    if not available()["ffmpeg"]:
-        return {"playing": False, "files": [], "error": "ffmpeg_unavailable"}
-    return {"playing": harmonia.is_playing(), "files": _file_rows()}
+    list refreshes itself with no separate watcher. Without ffmpeg the
+    listing still comes, beside "error": "ffmpeg_unavailable": until
+    2026-11-21 it came back empty, and a tab built while ffmpeg was there
+    then said "no files — use Echo to make one" over files it couldn't
+    play."""
+    data: dict[str, Any] = {"playing": harmonia.is_playing(), "files": _file_rows()}
+    if not _resolve("ffmpeg"):
+        data["error"] = "ffmpeg_unavailable"
+    return data
 
 
 # ── Standalone demo ───────────────────────────────────────────────────────────

@@ -35,8 +35,9 @@ Colours:     theme.C only (text1, amber, bg, and burnout for the hottest step
              frame this is packed into (C["bg"]), or the widget renders as a
              darker rectangle with mis-blended glows.
 
-§6:          This is the documented exception for an animation loop — a 24 fps
-             redraw cannot ride Kairos's 500 ms tick. Bounded by visibility
+§6:          This is the documented exception for an animation loop — a 20 fps
+             redraw (the default; only the demo asks for 24) cannot ride
+             Kairos's 500 ms tick. Bounded by visibility
              (<Map> starts it, <Unmap> stops it, so a face on a hidden view
              costs nothing) and cancelled in destroy(). See CONVENTIONS §6.
 
@@ -52,6 +53,16 @@ Requires:    tkinter, math, random (stdlib). No Pillow, no numpy, no images.
 
 Demo:        python -X utf8 -m panels.pythia_face   (run from metis_toolbox/)
              Keys: 1 idle  2 playing  3 thinking  4 speaking  q quit
+
+V0.03:       First audit, 2026-11-19 (the V0.03 walkthrough's S19; born
+             2026-09-01, #19; advance() and rng for Clio since #44). Words
+             only: §6 said a 24 fps redraw, but the face runs at its 20 fps
+             default (the demo asks for 24); set_level()'s example named
+             Calliope, whose output nothing feeds it (Clio's per-frame
+             loudness does); the demo's comment said "the header" mounts it
+             (Hestia does, at 190 x 160). Checked and true: the four states,
+             chassis vs signal colours, <Map>/<Unmap> bounding, the colour
+             cache, set_level's thread safety.
 """
 
 import math
@@ -252,7 +263,8 @@ class PythiaFace(tk.Canvas):
         self._syl = 0.0            # restart the envelope, don't resume it
 
     def set_level(self, value: "float | None") -> None:
-        """Drive amplitude directly (e.g. from Calliope's output buffer).
+        """Drive amplitude directly (Clio feeds it one loudness value per
+        video frame).
 
         Pass None to hand control back to the state machine.
 
@@ -534,8 +546,9 @@ def _demo() -> None:
     root.title("Pythia")
     root.configure(bg=BG)
 
-    # The demo runs at the size the geometry was tuned for; the header mounts
-    # it much smaller (every constant is a fraction of w/h, so it scales).
+    # The demo runs at the size the geometry was tuned for; Hestia mounts it
+    # at half that, 190 x 160 (every constant is a fraction of w/h, so it
+    # scales).
     face = PythiaFace(root, width=380, height=320, fps=24)
     face.pack()
 

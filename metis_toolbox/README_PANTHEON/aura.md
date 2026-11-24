@@ -4,7 +4,9 @@ Report current weather: temperature, sky, wind, and forecast. The toolbox's only
 weather fetch — Hypatia reads its cloud cover. Fetches from wttr.in, falling
 back to Open-Meteo.
 
-- **UI:** Atmospherics view (NOW + FORECAST tabs)
+- **UI:** Atmospherics view (NOW + FORECAST tabs, and the PLACE dropdown:
+  Home or a cached Cartograph area; the ALERTS tab and the NOW warning banner
+  are Iris's)
 - **Brain tool:** `get_weather`
 - **Files:** `tools/aura.py`, `panels/aura_panel.py`
 - **Test:** `python -X utf8 -m unittest discover -s tests -p "test_aura*.py"`

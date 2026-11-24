@@ -32,31 +32,24 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import tempfile
-from pathlib import Path
-
 import requests
 
 import pythia
 import themis
+from tests._pythia_sandbox import PythiaSandbox
 
-_saved_settings_path = None
-_settings_dir = None
+_sandbox = PythiaSandbox()
 
 
 def setUpModule():
-    """Pythia reads the owner's thinking and temperature from themis at every
-    request. Point themis at an empty temp folder, so these tests see the
-    defaults on every machine, never the checkout's own settings file."""
-    global _saved_settings_path, _settings_dir
-    _settings_dir = tempfile.TemporaryDirectory()
-    _saved_settings_path = themis._DATA_PATH
-    themis._DATA_PATH = Path(_settings_dir.name) / "felhaven_settings.json"
+    """Pythia reads the owner's settings, prompt and model at every request.
+    The sandbox points all three away from this checkout, so these tests see
+    the defaults on every machine and never reach a real Ollama."""
+    _sandbox.start()
 
 
 def tearDownModule():
-    themis._DATA_PATH = _saved_settings_path
-    _settings_dir.cleanup()
+    _sandbox.stop()
 
 
 def _stream(*objs: dict) -> mock.Mock:
@@ -116,6 +109,21 @@ class TestPythiaRegistry(unittest.TestCase):
         self.assertTrue(out["error"].startswith("tool_failed:"), out["error"])
         self.assertIn("RuntimeError", out["error"])       # class name is useful
         self.assertNotIn("SUPERSECRET123", out["error"])  # message is not leaked
+
+    def test_a_raising_tool_is_logged_with_its_credential_values_scrubbed(self):
+        # The log keeps the message for diagnosis, minus any credential VALUE:
+        # an unexpected exception from a key-holding tool lands here (the
+        # Midas shape one level up; CONVENTIONS §12, 2026-11-19).
+        def _boom(**_):
+            raise RuntimeError("GET https://x.example/q?symbol=A&token=SUPERSECRET123")
+
+        with mock.patch.dict(pythia._DISPATCH, {"boom": _boom}), \
+             self.assertLogs("METIS.pythia", level="ERROR") as logs:
+            pythia._dispatch("boom", {})
+        line = "\n".join(logs.output)
+        self.assertIn("RuntimeError", line)
+        self.assertIn("symbol=A&token=[REDACTED]", line)
+        self.assertNotIn("SUPERSECRET123", line)
 
 
 class TestPythiaAsk(unittest.TestCase):
@@ -483,9 +491,10 @@ class TestPythiaPrewarm(unittest.TestCase):
     def test_warm_prefills_the_real_prompt_prefix(self):
         """The warm must send the same prefix a real turn opens with — system
         prompt + tools. `messages: []` would load the weights only and leave the
-        ~2,700-token prefill to the first question."""
+        system+tools prefill (about 5,160 tokens) to the first question."""
         with mock.patch("pythia.machine_spirit.effective_prompt",
-                        return_value="SPIRIT"),              mock.patch("pythia.requests.post",
+                        return_value="SPIRIT"), \
+             mock.patch("pythia.requests.post",
                         return_value=_warm_response()) as post:
             pythia._warm()
         payload = post.call_args.kwargs["json"]
@@ -506,7 +515,8 @@ class TestPythiaPrewarm(unittest.TestCase):
         Compares the two captured payloads against each other. Deliberately does
         NOT hardcode 8192: a hardcoded number passes while the two halves drift."""
         with mock.patch("pythia.machine_spirit.effective_prompt",
-                        return_value="SPIRIT"),              mock.patch("pythia.requests.post",
+                        return_value="SPIRIT"), \
+             mock.patch("pythia.requests.post",
                         return_value=_warm_response()) as post:
             pythia._warm()
         warm_options = post.call_args.kwargs["json"]["options"]
@@ -525,7 +535,8 @@ class TestPythiaPrewarm(unittest.TestCase):
         """num_predict may differ (it is a sampling knob, not a runtime one) —
         that is what keeps the warm from generating a whole answer."""
         with mock.patch("pythia.machine_spirit.effective_prompt",
-                        return_value="SPIRIT"),              mock.patch("pythia.requests.post",
+                        return_value="SPIRIT"), \
+             mock.patch("pythia.requests.post",
                         return_value=_warm_response()) as post:
             pythia._warm()
         options = post.call_args.kwargs["json"]["options"]
@@ -575,7 +586,8 @@ class TestPythiaPrewarm(unittest.TestCase):
     def test_is_warming_clears_after_a_successful_warm(self):
         pythia._WARMING.set()
         with mock.patch("pythia.machine_spirit.effective_prompt",
-                        return_value="SPIRIT"),              mock.patch("pythia.requests.post", return_value=_warm_response()):
+                        return_value="SPIRIT"), \
+             mock.patch("pythia.requests.post", return_value=_warm_response()):
             pythia._warm()
         self.assertFalse(pythia.is_warming())
 
@@ -682,6 +694,141 @@ class TestPythiaGenerationSettings(unittest.TestCase):
         self.assertIs(self._payload()["think"], False)     # the next question does
 
 
+class TestPythiaModel(unittest.TestCase):
+    """The model is the owner's pick (themis), else PYTHIA_MODEL's default;
+    thinking is only asked of a model that can; a switch unloads only the
+    model Felhaven was using, then warms the new one."""
+
+    def tearDown(self):
+        try:
+            os.remove(themis._DATA_PATH)
+        except FileNotFoundError:
+            pass
+
+    def _payload(self, **ask_kwargs):
+        with mock.patch("pythia.requests.post",
+                        return_value=_stream(_final("hi"))) as post:
+            pythia.ask("hi", **ask_kwargs)
+        return post.call_args.kwargs["json"]
+
+    def test_with_no_pick_it_is_the_default(self):
+        self.assertEqual(pythia.current_model(), pythia._DEFAULT_MODEL)
+        self.assertEqual(self._payload()["model"], pythia._DEFAULT_MODEL)
+
+    def test_the_pick_reaches_the_request(self):
+        themis.save_pythia_model("qwen3:4b")
+        self.assertEqual(pythia.current_model(), "qwen3:4b")
+        self.assertEqual(self._payload()["model"], "qwen3:4b")
+
+    def test_both_rounds_of_a_question_use_the_model_read_at_its_start(self):
+        themis.save_pythia_model("qwen3:4b")
+        tool_round = _stream({"message": {"role": "assistant", "content": "",
+                                          "tool_calls": [{"function": {
+                                              "name": "get_weather", "arguments": {}}}]},
+                              "done": True})
+
+        def weather(**_):
+            themis.save_pythia_model("gemma4:e2b")   # a pick mid-answer
+            return {"temp_f": 70}
+
+        with mock.patch("pythia.requests.post",
+                        side_effect=[tool_round, _stream(_final("70."))]) as post, \
+                mock.patch.dict(pythia._DISPATCH, {"get_weather": weather}):
+            pythia.ask("weather?")
+        self.assertEqual([c.kwargs["json"]["model"] for c in post.call_args_list],
+                         ["qwen3:4b", "qwen3:4b"])
+
+    def test_a_model_that_cannot_think_is_never_asked_to(self):
+        """Ollama refuses the whole request when a non-thinker is asked."""
+        themis.save_pythia(thinking=True, temperature=None)
+        with mock.patch.object(pythia.talos, "capabilities",
+                               return_value=["completion", "tools"]):
+            payload = self._payload()
+        self.assertIs(payload["think"], False)
+        self.assertEqual(payload["options"]["num_predict"], pythia._NUM_PREDICT)
+
+    def test_an_unknown_model_keeps_the_setting(self):
+        themis.save_pythia(thinking=True, temperature=None)
+        with mock.patch.object(pythia.talos, "capabilities", return_value=None):
+            self.assertIs(self._payload()["think"], True)
+
+    def test_thinking_off_never_asks_what_the_model_can_do(self):
+        with mock.patch.object(pythia.talos, "capabilities") as caps:
+            self._payload()
+        caps.assert_not_called()
+
+    def test_the_warm_uses_the_pick(self):
+        themis.save_pythia_model("qwen3:4b")
+        with mock.patch("pythia.machine_spirit.effective_prompt", return_value="S"), \
+                mock.patch("pythia.requests.post", return_value=_warm_response()) as post:
+            pythia._warm()
+        self.assertEqual(post.call_args.kwargs["json"]["model"], "qwen3:4b")
+
+
+class TestPythiaSwitchModel(unittest.TestCase):
+
+    def tearDown(self):
+        try:
+            os.remove(themis._DATA_PATH)
+        except FileNotFoundError:
+            pass
+        pythia._WARMING.clear()
+
+    def _switch(self, previous, *, post_side_effect=None):
+        posts = []
+
+        def post(url, **kw):
+            posts.append((url, kw.get("json")))
+            if post_side_effect is not None and url.endswith("/api/generate"):
+                raise post_side_effect
+            return _warm_response()
+
+        with mock.patch("pythia.machine_spirit.effective_prompt", return_value="S"), \
+                mock.patch("pythia.requests.post", side_effect=post):
+            pythia.switch_model(previous).join(timeout=5)
+        return posts
+
+    def test_the_previous_model_is_unloaded_then_the_new_one_warmed(self):
+        themis.save_pythia_model("qwen3:4b")
+        posts = self._switch("gemma4:e2b")
+        self.assertEqual(posts[0], (pythia._BASE_URL + "/api/generate",
+                                    {"model": "gemma4:e2b", "keep_alive": 0}))
+        self.assertEqual(posts[1][0], pythia._CHAT_URL)
+        self.assertEqual(posts[1][1]["model"], "qwen3:4b")
+        self.assertFalse(pythia.is_warming())
+
+    def test_picking_the_same_model_unloads_nothing(self):
+        themis.save_pythia_model("gemma4:e2b")
+        posts = self._switch("gemma4:e2b")
+        self.assertEqual([url for url, _ in posts], [pythia._CHAT_URL])
+
+    def test_with_no_previous_model_nothing_is_unloaded(self):
+        posts = self._switch(None)
+        self.assertEqual([url for url, _ in posts], [pythia._CHAT_URL])
+
+    def test_a_failed_unload_still_warms_the_new_model(self):
+        themis.save_pythia_model("qwen3:4b")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            posts = self._switch("gemma4:e2b",
+                                 post_side_effect=requests.ConnectionError())
+        self.assertEqual(posts[-1][1]["model"], "qwen3:4b")
+
+    def test_is_warming_is_true_from_the_call(self):
+        gate = threading.Event()
+
+        def slow_post(url, **kw):
+            gate.wait(timeout=5)
+            return _warm_response()
+
+        with mock.patch("pythia.machine_spirit.effective_prompt", return_value="S"), \
+                mock.patch("pythia.requests.post", side_effect=slow_post):
+            t = pythia.switch_model(None)
+            self.assertTrue(pythia.is_warming())
+            gate.set()
+            t.join(timeout=5)
+        self.assertFalse(pythia.is_warming())
+
+
 class TestPythiaRiteRecords(unittest.TestCase):
     """tool_records — one diagnostic record per tool invocation (§3 of the Rite
     Log brief). The derived counts are asserted alongside, because the whole
@@ -727,10 +874,10 @@ class TestPythiaRiteRecords(unittest.TestCase):
         # that explains it.
         ev = self._ask(
             [_tool_round(("play_music", {"query": ""})), _stream(_final("No."))],
-            {"play_music": lambda **_: {"error": "no_query",
+            {"play_music": lambda **_: {"error": "bad_arguments",
                                         "detail": "No song was specified."}})
         self.assertEqual(ev["tool_records"][0]["error"],
-                         "no_query: No song was specified.")
+                         "bad_arguments: No song was specified.")
 
     def test_seq_is_continuous_across_rounds_and_round_is_tracked(self):
         ev = self._ask(
@@ -907,6 +1054,43 @@ class TestPythiaTruncation(unittest.TestCase):
         self.assertIsInstance(rec["arguments"], str)
         self.assertEqual(len(rec["arguments"]), pythia._PREVIEW_CAP)
         self.assertTrue(rec["arguments_truncated"])
+
+
+class TestToolTextKeepsItsCharacters(unittest.TestCase):
+    """A tool result reaches the model, and the Rite Log, as the characters it
+    holds (CONVENTIONS §12, 2026-11-19). The escaped form cost the model 24%
+    more prompt on six headlines, and it misquoted them."""
+
+    _TITLE = "Senate’s “stopgap” bill — final vote, café owners say"
+    _ESCAPE = chr(92) + "u"                 # a backslash-u, built so no tool decodes it
+
+    def _turn(self):
+        events: list = []
+        streams = [_tool_round(("news", {})), _stream(_final("Here."))]
+        with mock.patch("pythia.requests.post", side_effect=streams) as post, \
+             mock.patch.dict(pythia._DISPATCH,
+                             {"news": lambda **_: {"stories": [{"title": self._TITLE}]}}):
+            pythia.ask("news?", [], on_event=events.append)
+        return post, events[0]
+
+    def test_the_model_reads_the_characters_not_their_escapes(self):
+        post, _ = self._turn()
+        messages = post.call_args_list[1].kwargs["json"]["messages"]
+        (tool,) = [m for m in messages if m["role"] == "tool"]
+        self.assertIn(self._TITLE, tool["content"])
+        self.assertNotIn(self._ESCAPE, tool["content"])
+        self.assertEqual(json.loads(tool["content"])["stories"][0]["title"], self._TITLE)
+
+    def test_the_rite_preview_shows_them_too(self):
+        _, stats = self._turn()
+        (rec,) = stats["tool_records"]
+        self.assertIn(self._TITLE, rec["result_preview"])
+
+    def test_a_cut_argument_string_keeps_them(self):
+        field, cut = pythia._argument_field({"q": "é" * 2000})
+        self.assertTrue(cut)
+        self.assertTrue(field.startswith('{"q": "éé'), field[:20])
+        self.assertEqual(len(field), pythia._PREVIEW_CAP)
 
 
 if __name__ == "__main__":

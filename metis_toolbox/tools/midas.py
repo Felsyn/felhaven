@@ -5,18 +5,27 @@ Metis Toolbox | Anti-Legion: ONE JOB
 
 Job:         Fetch current price and daily % change for a watchlist.
 
-Contract:    Polled + brain tool. Exposes TOOL_DEFINITION, handle(), and
-             fetch(); query_all() is the shared fetch both wrap.
-             Returns price and % change. Nothing more.
+Contract:    Polled + brain tool. Exposes TOOL_DEFINITION, TOOL_META,
+             handle(), and fetch(); query_all() is the shared fetch both wrap,
+             and load_watchlist() the watchlist the panel builds its rows and
+             the LEDGER dropdown from.
+             Returns price and % change, dated: {"tickers": [...], "as_of"},
+             where as_of is when this set was fetched (naive local ISO, Aura's
+             convention), and a ticker served from the last good fetch after
+             its refresh failed carries `stale: True` and its own `as_of`.
              handle() never raises. fetch() raises when EVERY ticker failed
              (per §2, so Kairos delivers None) — with ONE exception: an
              all-'vault_locked' result is the normal pre-unlock state, not a
              fault, so fetch() returns it quietly (§12). A partial failure is
              embedded per-ticker instead.
+             A set is reused for CACHE_TTL unless it holds a local refusal
+             (vault_locked, no_key): that costs no network to check again,
+             and the vault may have opened since.
 
 Source:      Finnhub REST /quote (US equities, free tier), read through
              tools/hermes.py — no SDK. Watchlist lives in config/midas_watchlist.json under the
-             app root (also the source for Plutus's ticker dropdown).
+             app root (also the source for Plutus's ticker dropdown); only
+             its non-empty strings count, each once.
 
 Key:         The Finnhub key lives ONLY in the Cerberus Vault (the sole
              secrets authority) under the entry name 'finnhub_api_key' —
@@ -31,28 +40,55 @@ Key:         The Finnhub key lives ONLY in the Cerberus Vault (the sole
              that's unlocked but simply has no key stored, ERR_NO_KEY) —
              the panel shows a placeholder either way, never crashes.
 
-Upstream:    kairos.py (calls fetch), pythia.py (registration + dispatch)
+Threads:     Kairos's worker calls fetch() and Pythia's calls handle(), so
+             the cache is shared by those two; _lock guards reading and
+             replacing it (not the network call: two misses at once fetch
+             twice, and the later set wins).
+
+Upstream:    kairos.py (calls fetch every 60 s), pythia.py (registration +
+             dispatch)
 Downstream:  cerberus.py (vault_get for the key), panels/midas_panel.py
-             (display surface)
+             (display surface; also reads load_watchlist())
 
 Requires:    tools/hermes.py (the bounded network read)
-             os, sys, json, time, concurrent.futures (stdlib)
+             json, logging, math, os, sys, threading, time, collections,
+             concurrent.futures, datetime, typing (stdlib)
              Plus cerberus (app-root sibling) for the key.
 
-V0.02:       Audited 2026-07-24 — stopped logging raw exceptions (the Finnhub
+2026-07-24:  walkthrough audit — stopped logging raw exceptions (the Finnhub
              key was leaking into logs/*.log via the request URL), made a
              locked vault a quiet non-fault instead of an ERROR every 60 s,
              dropped the unused stale_cache code, contract verified,
              fetch()/handle()/query_all() tests added.
+
+2026-11-16:  Pythia tool audit (CONVENTIONS §12). The description no longer
+             promises portfolio performance (the audit's M5) and follows §3's
+             grammar. TOOL_META says markets / cached / changes nothing. Left
+             to come: `as_of` (T7). A failed or empty fetch is the shared
+             unavailable (T9, 2026-11-16).
+
+V0.03:       Walked through 2026-11-22 (the V0.03 walkthrough, CONVENTIONS
+             §3). Every answer carries `as_of`, and a stale ticker its own
+             (T7, BACKLOG; routing probe run). A cached vault_locked was
+             served for up to 60 s after the vault opened, with no network
+             call (measured); a local refusal is now never reused. A price
+             that isn't a finite number is no data (NaN read "$nan"). The
+             watchlist keeps only its non-empty strings, once each: a dict
+             in it raised from handle(), and a bare string fetched one
+             letter at a time. load_watchlist() went public (the panel used
+             the private one).
 """
 
 import json
 import logging
+import math
 import os
 import sys
+import threading
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from typing import Any
 
 # Midas is a tool module that reaches UP to an app-root sibling (cerberus.py),
@@ -79,8 +115,8 @@ log = logging.getLogger("METIS.midas")
 # (A cache hit older than CACHE_TTL is not an error — it rides back as a good
 #  result carrying a `stale` flag, see query_all(); the panel dims it.)
 
-ERR_NO_DATA      = "no_data"
-ERR_FETCH_FAILED = "fetch_failed"
+ERR_NO_DATA      = "unavailable: no usable data"
+ERR_FETCH_FAILED = "unavailable"
 ERR_NO_KEY       = "no_key"
 ERR_VAULT_LOCKED = "vault_locked"
 
@@ -109,18 +145,30 @@ def _finnhub_key() -> str:
 _WATCHLIST_PATH = os.path.join(_APP_ROOT, "config", "midas_watchlist.json")
 
 
-def _load_watchlist() -> list[str]:
+def load_watchlist() -> list[str]:
     """
-    Read the ticker list from midas_watchlist.json.
-    Returns [] on any failure (panel shows nothing; Emanon surfaces the log).
+    Read the ticker list from midas_watchlist.json: its non-empty strings, in
+    order, each once. Returns [] on any failure (panel shows nothing; Emanon
+    surfaces the log). Anything else in the list is left out and logged: a
+    dict raised from query_all() (it can't be a cache key), and a bare string
+    in place of the list was fetched one letter at a time.
     """
     try:
         with open(_WATCHLIST_PATH, "r", encoding="utf-8") as f:
-            tickers: list[str] = json.load(f).get("tickers", [])
-            return tickers
+            raw = json.load(f)
     except Exception as e:
-        log.error(f"Midas: failed to load watchlist: {e}")
+        log.error("Midas: failed to load watchlist: %s", e)
         return []
+    tickers = raw.get("tickers") if isinstance(raw, dict) else None
+    if not isinstance(tickers, list):
+        log.error("Midas: the watchlist's 'tickers' is not a list")
+        return []
+    kept = list(dict.fromkeys(t.strip() for t in tickers
+                              if isinstance(t, str) and t.strip()))
+    if len(kept) != len(tickers):
+        log.warning("Midas: %d watchlist entries left out (not a ticker, or repeated)",
+                    len(tickers) - len(kept))
+    return kept
 
 
 # ── Internals ─────────────────────────────────────────────────────────────────
@@ -158,7 +206,8 @@ def _fetch_one(symbol: str) -> dict[str, Any]:
 
         # Finnhub returns all-zero fields for invalid/empty symbols rather than
         # null or an error status. Zero previous-close also guards div-by-zero.
-        if not price or not prev:
+        # json reads NaN and Infinity, which would show as "$nan".
+        if not (_usable_number(price) and _usable_number(prev)):
             return {"symbol": symbol, "error": ERR_NO_DATA}
 
         pct = (price - prev) / prev * 100
@@ -183,8 +232,14 @@ def _fetch_one(symbol: str) -> dict[str, Any]:
         # code — never the message.
         status = getattr(e, "status", None)
         detail = type(e).__name__ + (f" {status}" if status else "")
-        log.warning(f"Midas: failed to fetch {symbol}: {detail}")
+        log.warning("Midas: failed to fetch %s: %s", symbol, detail)
         return {"symbol": symbol, "error": ERR_FETCH_FAILED}
+
+
+def _usable_number(value: Any) -> bool:
+    """A real, finite, non-zero number (a bool is not one)."""
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value != 0)
 
 
 # ── Cache ──────────────────────────────────────────────────────────────────────
@@ -196,9 +251,59 @@ _MAX_WORKERS = 5                    # concurrent fetch threads
 
 _cache: dict[str, dict[str, Any]] = {}                   # symbol -> result dict
 _cache_ts: float = 0.0              # monotonic timestamp of last full fetch
+_cache_as_of: str = ""              # when that fetch ran, as the answer says it
+_lock = threading.Lock()            # guards the three above (Threads, above)
+
+# Refusals decided here, with no network: worth checking again every time.
+_LOCAL_ERRORS = (ERR_VAULT_LOCKED, ERR_NO_KEY)
+
+
+def _now() -> datetime:
+    """Injectable clock seam for `as_of`. Naive LOCAL time, Aura's convention."""
+    return datetime.now()
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
+def _query(force: bool = False) -> tuple[list[dict[str, Any]], str]:
+    """query_all()'s tickers and the as_of they were fetched at."""
+    global _cache, _cache_ts, _cache_as_of
+
+    watchlist = load_watchlist()
+    now = time.monotonic()
+    with _lock:
+        cache, cache_ts, cache_as_of = _cache, _cache_ts, _cache_as_of
+    refusal = any(r.get("error") in _LOCAL_ERRORS for r in cache.values())
+    if not force and cache and not refusal and (now - cache_ts) < CACHE_TTL:
+        log.debug("Midas: serving from cache (%.1fs old)", now - cache_ts)
+        return [cache[sym] for sym in watchlist if sym in cache], cache_as_of
+
+    # ── Concurrent fetch ──────────────────────────────────────────────────
+    as_of = _now().isoformat(timespec="seconds")
+    results: dict[str, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+        futures = {pool.submit(_fetch_one, sym): sym for sym in watchlist}
+        for future in as_completed(futures):
+            sym = futures[future]
+            result = future.result()          # _fetch_one never raises
+
+            # On failure, fall back to stale cache if available. It keeps the
+            # as_of it was fetched at, since that is when the price is from.
+            if "error" in result and sym in cache and "error" not in cache[sym]:
+                stale = dict(cache[sym])
+                stale["stale"] = True
+                stale.setdefault("as_of", cache_as_of)
+                results[sym] = stale
+                log.debug("Midas: %s fetch failed, serving stale cache", sym)
+            else:
+                results[sym] = result
+
+    with _lock:
+        _cache, _cache_ts, _cache_as_of = results, now, as_of
+
+    # Return in watchlist order (futures finish in arbitrary order)
+    return [results[sym] for sym in watchlist if sym in results], as_of
+
 
 def query_all(force: bool = False) -> list[dict[str, Any]]:
     """
@@ -207,41 +312,13 @@ def query_all(force: bool = False) -> list[dict[str, Any]]:
     Returns a list of result dicts — one per ticker.
     Failures are included as error dicts so the panel can show a placeholder.
 
-    Results are cached for CACHE_TTL seconds.  Pass force=True to bypass.
+    Results are cached for CACHE_TTL seconds.  Pass force=True to bypass. A
+    cached vault_locked or no_key is never reused (Contract).
     If the cache is stale but a fresh fetch fails for a symbol, the stale
-    value is returned with a 'stale' flag so the panel can dim it rather
-    than blank it out.
+    value is returned with a 'stale' flag and its own `as_of`, so the panel
+    can dim it rather than blank it out.
     """
-    global _cache, _cache_ts
-
-    watchlist = _load_watchlist()
-    now = time.monotonic()
-    if not force and _cache and (now - _cache_ts) < CACHE_TTL:
-        log.debug("Midas: serving from cache (%.1fs old)", now - _cache_ts)
-        return [_cache[sym] for sym in watchlist if sym in _cache]
-
-    # ── Concurrent fetch ──────────────────────────────────────────────────
-    results: dict[str, dict[str, Any]] = {}
-    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-        futures = {pool.submit(_fetch_one, sym): sym for sym in watchlist}
-        for future in as_completed(futures):
-            sym = futures[future]
-            result = future.result()          # _fetch_one never raises
-
-            # On failure, fall back to stale cache if available
-            if "error" in result and sym in _cache and "error" not in _cache[sym]:
-                stale = dict(_cache[sym])
-                stale["stale"] = True
-                results[sym] = stale
-                log.debug("Midas: %s fetch failed, serving stale cache", sym)
-            else:
-                results[sym] = result
-
-    _cache = results
-    _cache_ts = now
-
-    # Return in watchlist order (futures finish in arbitrary order)
-    return [results[sym] for sym in watchlist if sym in results]
+    return _query(force)[0]
 
 
 # ── Metis contract ────────────────────────────────────────────────────────────
@@ -252,7 +329,7 @@ TOOL_DEFINITION = {
         "name": "get_market_prices",
         "description": (
             "Returns current price and daily percentage change for the Felhaven watchlist. "
-            "Call this when the user asks about stocks, market prices, "
+            "Call when the user asks about stocks, market prices, "
             "or any ticker by name. It lists watched symbols only: it does not "
             "know what the user owns, so it cannot answer questions about "
             "their holdings or portfolio."
@@ -265,10 +342,20 @@ TOOL_DEFINITION = {
     },
 }
 
+# What the code reads about each tool here; the model never sees it
+# (CONVENTIONS §8, "TOOL_META"). network: none = local only, cached = a poll
+# or TTL cache, live = may reach the network on every call. mutates = it
+# changes state outside the turn.
+TOOL_META: dict[str, dict[str, Any]] = {
+    "get_market_prices": {"domain": "markets", "network": "cached", "mutates": False},
+}
+
 
 def handle() -> dict[str, Any]:
-    """Called by the toolbox dispatcher when the LLM invokes get_market_prices."""
-    return {"tickers": query_all()}
+    """Called by Pythia's dispatcher when the model invokes get_market_prices.
+    The tickers, dated with `as_of` (Contract). Never raises."""
+    tickers, as_of = _query()
+    return {"tickers": tickers, "as_of": as_of}
 
 
 def fetch() -> dict[str, Any]:
@@ -281,16 +368,16 @@ def fetch() -> dict[str, Any]:
     normal pre-unlock state — the panel starts sealed and Kairos polls it
     regardless — not a fault a human should be paged about. Raising it logged
     an ERROR every 60 s and made Emanon read Midas as failed. Genuine failures
-    (no_key, fetch_failed, no_data) still raise, naming the dominant cause so
+    (no_key, unavailable) still raise, naming the dominant cause so
     the log line says *why* instead of a bare "all tickers failed"."""
-    results = query_all()
+    results, as_of = _query()
     if results and all("error" in r for r in results):
         errors = [r["error"] for r in results]
         if all(e == ERR_VAULT_LOCKED for e in errors):
-            return {"tickers": results}          # expected sealed state, not a fault
+            return {"tickers": results, "as_of": as_of}   # expected sealed state
         dominant = Counter(errors).most_common(1)[0][0]
         raise RuntimeError(f"all tickers failed: {dominant}")
-    return {"tickers": results}
+    return {"tickers": results, "as_of": as_of}
 
 
 # ── Standalone test ───────────────────────────────────────────────────────────

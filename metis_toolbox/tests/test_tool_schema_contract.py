@@ -13,7 +13,7 @@ Everything here is derived from `pythia.TOOLS` and `pythia._DISPATCH` by
 reflection — never a hardcoded list or count — so a tool added tomorrow is
 covered the moment it registers (the lockstep-guard pattern, S8).
 
-Two checks earn their place beyond shape:
+Three checks earn their place beyond shape:
   * no parameter may admit exactly one value (a fixed min==max, or a
     single-entry enum). Such a parameter cannot carry information; it only asks
     the model to reason about a constant. ammit's `slot` was the live case.
@@ -21,6 +21,10 @@ Two checks earn their place beyond shape:
     handler, and every handler argument without a default is declared required.
     The second half is a latent TypeError: the model omits an argument the
     schema never told it was mandatory, and dispatch raises.
+  * one grammar for every description (S3, 2026-11-16): it opens with what the
+    tool returns or does, a third-person verb, and says when to call it in ONE
+    "Call when…" sentence. In 2026-11, nine opened in the imperative and
+    get_time_context had two overlapping when-clauses.
 
 Run from the package root:
     python -X utf8 -m unittest tests.test_tool_schema_contract
@@ -36,12 +40,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pythia
 
-# "What it does + WHEN the model should call it" (S3). Deliberately broad — the
-# phrasing is the author's, the presence of call guidance is the contract.
-_WHEN_TO_CALL = re.compile(
-    r"\b(call (this|when|it)|use (this|when)|ask(s|ed)? (about|for|what))",
-    re.I,
-)
+# "What it does + WHEN the model should call it" (S3), in one grammar since
+# 2026-11-16 (S3, "Description grammar"): the when-clause is ONE sentence that
+# opens "Call when", "Call whenever" or "Call only". A second, overlapping
+# clause ("Use when ... Call this when ...") left the model two rules to
+# reconcile; one phrasing everywhere is one pattern to learn.
+_WHEN_TO_CALL = re.compile(r"\bCall (when|whenever|only)\b")
+# The old openings of a when-clause. Capitalised on purpose: a not-for
+# sentence may say "do not call it to…" (manage_timer), which is sentence three.
+_OTHER_WHEN = re.compile(r"\b(Call (this|it)|Use (this|when|it))\b")
+# Sentence one says what the tool returns or does, opening with a verb in the
+# third person ("Returns…", "Shows…", "Starts…"). A plain heuristic: a
+# capitalised word ending in -s that isn't one of the few that aren't verbs.
+_OPENS_WITH_VERB = re.compile(r"^(?!(This|Its|Is|Us)\b)[A-Z][a-z]+s\b")
 _SNAKE_CASE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 # A description short enough to be useless, or long enough to be a manual.
@@ -215,6 +226,35 @@ class TestDescriptionsSayWhenToCall(unittest.TestCase):
             stale,
             f"listed as exempt but now conform: {sorted(stale)} — delete them "
             f"from _EXPECTED_MISSING_WHEN")
+
+
+class TestDescriptionGrammar(unittest.TestCase):
+    """CONVENTIONS S3, "Description grammar" (2026-11-16): what it returns or
+    does, then when to call it, then what it is not for. Every description is
+    routing text the small model reads on every request; one grammar across
+    seventeen tools is one pattern to learn instead of seventeen."""
+
+    def test_every_description_opens_with_what_it_does(self):
+        for name, fn in _functions():
+            with self.subTest(tool=name):
+                desc = fn.get("description", "")
+                self.assertRegex(
+                    desc, _OPENS_WITH_VERB,
+                    "open with what the tool returns or does, a verb in the third "
+                    "person: 'Returns…', 'Shows…', 'Starts…' (CONVENTIONS S3)")
+
+    def test_every_description_says_when_once(self):
+        for name, fn in _functions():
+            with self.subTest(tool=name):
+                desc = fn.get("description", "")
+                self.assertEqual(
+                    len(_WHEN_TO_CALL.findall(desc)), 1,
+                    "exactly one when-clause, opening 'Call when', 'Call "
+                    "whenever' or 'Call only' (CONVENTIONS S3)")
+                self.assertIsNone(
+                    _OTHER_WHEN.search(desc),
+                    "a second phrasing of when to call ('Use when…', 'Call "
+                    "this…') — fold it into the one 'Call when' sentence")
 
 
 if __name__ == "__main__":

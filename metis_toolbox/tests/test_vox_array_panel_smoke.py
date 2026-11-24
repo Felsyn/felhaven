@@ -19,6 +19,7 @@ before the panel is constructed, because the panel reads on construction.
     python -X utf8 -m unittest tests.test_vox_array_panel_smoke
 """
 
+import ast
 import json
 import os
 import sys
@@ -345,6 +346,31 @@ class TestEchoPanelSmoke(unittest.TestCase):
             time.sleep(0.02)
 
 
+class TestEchoErrorWords(unittest.TestCase):
+    """The ECHO tab has words for exactly the codes text_to_audio() can
+    return, read from tools/echo.py itself (text_to_audio and _encode_opus,
+    whose answer it returns), so a new code like file_exists can't reach the
+    status line as a bare slug."""
+
+    def test_every_code_has_words_and_every_word_a_code(self):
+        from panels.echo_panel import _ERROR_TEXT
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "tools", "echo.py")
+        with open(path, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        codes = set()
+        for fn in ast.walk(tree):
+            if isinstance(fn, ast.FunctionDef) and fn.name in ("text_to_audio",
+                                                               "_encode_opus"):
+                for node in ast.walk(fn):
+                    if isinstance(node, ast.Dict):
+                        codes |= {v.value for k, v in zip(node.keys, node.values)
+                                  if isinstance(k, ast.Constant) and k.value == "error"
+                                  and isinstance(v, ast.Constant)}
+        self.assertIn("file_exists", codes)   # not vacuous
+        self.assertEqual(set(_ERROR_TEXT), codes)
+
+
 class TestEuterpePanelSmoke(_LedgerRedirect, unittest.TestCase):
     """The TUNES tab body: what it shows, what it saves, and what it refuses.
 
@@ -374,6 +400,17 @@ class TestEuterpePanelSmoke(_LedgerRedirect, unittest.TestCase):
         self.panel = EuterpePanel(self.root)
         self.panel.pack()
         self.root.update_idletasks()
+
+    def test_the_base_copy_row_carries_its_tips(self):
+        from panels import virgil_tooltip
+        shared = virgil_tooltip._shared(self.root)
+        panel = self.panel
+        self.assertEqual(panel.tip_targets["base_copy"].cget("text"), "BASE COPY")
+        self.assertEqual(panel.tip_targets["restore"].cget("text"), "RESTORE")
+        self.assertEqual(panel.tip_targets["take"].cget("text"), "TAKE FROM SAVED")
+        self.assertEqual(sorted(type(panel)._TIPS), sorted(panel.tip_targets))
+        for key, tip in type(panel)._TIPS.items():
+            self.assertEqual(shared._tips.get(str(panel.tip_targets[key])), tip, key)
 
     def tearDown(self):
         self.panel.destroy()
@@ -483,6 +520,15 @@ class TestEuterpePanelSmoke(_LedgerRedirect, unittest.TestCase):
         self.assertIn("the same song", status)
         self.assertIn("plays 1 and 3", status)
         self.assertIn("artist - song", status)
+
+    def test_a_ledger_that_cannot_be_read_says_so_when_taking_a_base(self):
+        """read_failed has words of its own: nothing was written, so "could not
+        be written" would send the operator after the wrong problem."""
+        with mock.patch.object(euterpe, "take_base", return_value="read_failed"):
+            self.panel._on_take_base()
+        status = self.panel._status.cget("text")
+        self.assertIn("could not be read", status)
+        self.assertNotIn("read_failed", status)
 
     def test_an_unknown_slug_is_shown_rather_than_swallowed(self):
         """A save that did not happen must never report as silence."""

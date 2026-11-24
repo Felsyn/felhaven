@@ -1,5 +1,6 @@
 """
-test_aura_forecast.py — unit tests for aura._build() forecast shaping.
+test_aura_forecast.py — unit tests for aura._build(): the forecast shaping,
+and where the reading's place name comes from.
 
 Runs against the captured real wttr.in payload (string-typed values) so the
 int() casts are genuinely exercised. Aggregation correctness is asserted by
@@ -12,6 +13,7 @@ way the test can't drift from the fixture's actual numbers.
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -29,7 +31,7 @@ _FORECAST_KEYS = {
 _EXISTING_KEYS = (
     "location", "country", "description", "temp_f", "temp_c", "feels_like_f",
     "feels_like_c", "high_f", "low_f", "high_c", "low_c", "humidity_pct",
-    "wind_mph", "wind_label", "precip_mm", "uv_index", "astronomy",
+    "wind_mph", "wind_label", "precip_mm", "uv_index",
 )
 
 
@@ -119,6 +121,24 @@ class TestForecastDegradation(unittest.TestCase):
         raw["weather"][0]["hourly"] = raw["weather"][0]["hourly"][:3]
         out = aura._build(raw)
         self.assertEqual(out["forecast"][0]["weather_code"], block0)
+
+
+class TestThePlaceName(unittest.TestCase):
+    """The reply's own name for the place wins. Home's location is read only
+    when the reply names none: as a .get() default it was read every time."""
+
+    def test_a_named_reply_never_reads_home(self):
+        with mock.patch("tools.aura._location") as home:
+            out = aura._build(load_real_j1())
+        home.assert_not_called()
+        self.assertTrue(out["location"])
+
+    def test_an_unnamed_reply_takes_the_query_then_home(self):
+        raw = load_real_j1()
+        raw["nearest_area"] = [{}]
+        self.assertEqual(aura._build(raw, "Ely")["location"], "Ely")
+        with mock.patch("tools.aura._location", return_value="Pittsburgh"):
+            self.assertEqual(aura._build(raw)["location"], "Pittsburgh")
 
 
 if __name__ == "__main__":

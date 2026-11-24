@@ -11,8 +11,10 @@ the module's own docstring, where it cannot drift from the code.
 | [Ammit](ammit.md) | Manage a single countdown timer. |
 | [Argus](argus.md) | Report what this computer is communicating with on the network. |
 | [Artemis](artemis.md) | Own the local-chart cache: its projection, area manifest and shared vector format. |
+| [Asclepius](asclepius.md) | Answer Pythia's questions about this computer: vitals, connection and network. |
 | [Aura](aura.md) | Report current weather: temperature, sky, wind, and forecast. |
 | [Awen](awen.md) | When a song ends with Auto-DJ on, choose and play the next one and introduce it. |
+| [Brontes](brontes.md) | Read the NVIDIA GPU's name, temperature, memory and load through NVML. |
 | [Cadmus](cadmus.md) | Decode ESRI shapefile bytes (.shp/.dbf) into geometry and attribute records. |
 | [Callimachus](callimachus.md) | Ask the web a question and return trimmed text. |
 | [Calliope](calliope.md) | Turn a string of text into speech and play it. |
@@ -21,18 +23,20 @@ the module's own docstring, where it cannot drift from the code.
 | [Demeter](demeter.md) | Fetch, resample and cache local elevation, and render the terrain raster. |
 | [Echo](echo.md) | Turn text into an audio file on disk. |
 | [Emanon](emanon.md) | Watch the stack's logs and report what broke — read-only, never act. |
+| [Eos](eos.md) | Report space weather: NOAA's storm scales, the Kp index, and the aurora's reach. |
 | [Eratosthenes](eratosthenes.md) | Resolve a typed location query to a latitude and longitude. |
 | [Eudoxus](eudoxus.md) | Convert between units of length, volume, weight, temperature, and time. |
-| [Euterpe](euterpe.md) | Remember what music has played, and what the listener seems to like. |
+| [Euterpe](euterpe.md) | Remember the songs the listener chose, and what they seem to like. |
 | [Harmonia](harmonia.md) | Own the one audio output device. |
 | [Hecate](hecate.md) | Fetch and cache TIGER/Line roads for an area as tiered Features. |
 | [Helios](helios.md) | Report sunrise, sunset, golden-hour windows, and day length. |
 | [Hermes](hermes.md) | Read from the network, bounded: a byte cap and a deadline for the whole request. |
-| [Hephaestus](hephaestus.md) | Report CPU, RAM, and disk health. |
+| [Hephaestus](hephaestus.md) | Report the machine's vitals: CPU, RAM, disks, uptime and the GPU. |
 | [Herodotus](herodotus.md) | Manage a local archive of Markdown documents. |
 | [Horai](horai.md) | Give the current date, time, season, and time-of-day. |
 | [Hypatia](hypatia.md) | Map where every catalog star and planet sits in the sky right now. |
 | [Hypnos](hypnos.md) | Tell whether the person has stepped away: locked, asleep or idle. |
+| [Iris](iris.md) | Report the National Weather Service's active alerts for Felhaven's place. |
 | [Kairos](kairos.md) | Own the clock. Fire workers. Dispatch results to panels. |
 | [Kepler](kepler.md) | Compute the positions of the five classical planets. |
 | [Machine Spirit](machine_spirit.md) | Own Pythia's system prompt — the default text plus an optional per-install override. |
@@ -42,10 +46,12 @@ the module's own docstring, where it cannot drift from the code.
 | [Pheme](pheme.md) | Aggregate headlines from the configured RSS/Atom news feeds. |
 | [Plutus](plutus.md) | Track stock buys and sells; derive shares held and cost invested. |
 | [Poseidon](poseidon.md) | Fetch and cache TIGER/Line water for an area as tiered Features. |
+| [Ptolemy](ptolemy.md) | Answer Pythia's questions about the sky: the sun, the moon and what is up now. |
 | [Pythia](pythia.md) | Answer a question by talking to the local LLM, using toolbox tools for live data. |
 | [Scribe](scribe.md) | Store the to-do list and notes. |
 | [Selene](selene.md) | Report the moon's phase, illumination, moonrise, and moonset. |
 | [Sphynx](sphynx.md) | Verify a PIN against the stored hash, and track how many attempts remain. |
+| [Talos](talos.md) | Report which models Ollama has installed and which it has loaded. |
 | [Themis](themis.md) | Own the per-install user preferences: location, units, clock, and how Pythia answers. |
 | [Virgil](virgil.md) | Give a tooltip its words: a module's own gloss, or a glossary entry. |
 | [Voices](voices.md) | Resolve the voice Felhaven should speak in. |

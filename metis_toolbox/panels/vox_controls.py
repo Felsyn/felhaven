@@ -22,9 +22,9 @@ Layout:      ┌──────────────────┐
 Colours:     This row INVERTS the §7 active/inactive convention, deliberately.
              Elsewhere active = C["text1"] and hover = C["amber"]; here
              active = C["amber"] and inactive = C["text3"], because "amber
-             means this is doing something right now" is the rule the whole
-             Sonus indicator (and the wireframe face beside it) already reads
-             by. Amber therefore cannot also mean hover — an unhovered active
+             means this is doing something right now" is the rule the
+             wireframe face beside it and the status line under PYTHIA
+             already read by. Amber therefore cannot also mean hover — an unhovered active
              control and a hovered inactive one would be the same colour — so
              hover BRIGHTENS WITHIN the current state: dim → text1 when off,
              amber → amber_bright when on. See CONVENTIONS §7.
@@ -39,7 +39,8 @@ Colours:     This row INVERTS the §7 active/inactive convention, deliberately.
 
 State:       Vox Response mirrors calliope's auto-speak flag and Auto-DJ mirrors
              awen's, and BOTH of those modules stay the single source of truth —
-             this row is each flag's only runtime mutator, and it re-reads the
+             this row is the only control that flips either (Awen's breaker
+             can also turn Auto-DJ off by itself), and it re-reads the
              real flag after flipping rather than keeping a guessed copy. Vox
              End's lit/dim comes from HestiaBar via set_armed(); Reset Session
              is momentary and only flashes.
@@ -56,17 +57,30 @@ Contract:    VoxControls(parent, on_end, on_reset, on_notice)
                  flash_reset()            — one amber beat on Reset Session
                  refresh()                — re-read both real flags
 
+Tooltips:    Each control carries a Virgil tip saying what a click does (a
+             glossary entry, CONVENTIONS §7), attached from _TIPS.
+
 Upstream:    panels/hestia_panel.py (constructs + drives this)
 Downstream:  calliope.py (auto-speak flag), awen.py (the Auto-DJ flag),
+             panels/virgil_tooltip.py + tools/virgil.py (the tips),
              theme.py (colors/fonts)
 
-Requires:    tkinter (stdlib); calliope, awen.
+Requires:    tkinter, typing (stdlib); calliope, awen.
 
 Precedent:   Replaces the retired panels/narrator_panel.py speaker lamp. The
              lamp's discipline is carried over verbatim — read the flag, never
              cache it — only the rendering changed from a drawn icon to a word.
              The dot and the bordered box are SidebarRow's chrome
              (panels/sidebar.py), reused rather than reinvented.
+
+V0.03:       First audit, 2026-11-19 (the V0.03 walkthrough's S19; born
+             2026-09-01, #19; Auto-DJ since #21). Words only: the colour note
+             cited a "Sonus indicator" that never existed in the code (now
+             the face and the status line, which do read amber as "doing
+             something"), and "the only runtime mutator" of Auto-DJ's flag
+             forgot the breaker its own refresh() note describes. Checked and
+             true: the inverted colours, the always-clickable Vox End, the
+             flash's after() kept and cancelled, the read-never-cache flags.
 """
 
 from typing import Callable, Optional
@@ -75,7 +89,9 @@ import tkinter as tk
 
 import awen
 import calliope
+from panels import virgil_tooltip
 from theme import C, FONTS
+from tools import virgil
 
 _FLASH_MS = 150         # one amber beat for a momentary control
 _DOT = 8                # the sidebar's dot, to the pixel
@@ -180,6 +196,16 @@ class VoxControls(tk.Frame):
     was a real fix once; it must not be re-broken by the redesign.)
     """
 
+    # Each control's hover tooltip (Virgil): a control says what a click does,
+    # so each is a glossary entry. Keys name the widgets in self._tip_targets;
+    # test_vox_controls_smoke holds the two in lockstep.
+    _TIPS = {
+        "response": virgil.term("vox_response"),
+        "end":      virgil.term("vox_end"),
+        "dj":       virgil.term("auto_dj"),
+        "reset":    virgil.term("reset_session"),
+    }
+
     def __init__(self, parent: tk.Widget, *,
                  on_end: Callable[[], None],
                  on_reset: Callable[[], None],
@@ -203,6 +229,14 @@ class VoxControls(tk.Frame):
 
         self._reset = VoxToggle(inner, "Reset Session", on_reset)
         self._reset.pack(fill="x", pady=(4, 0))
+
+        self._tip_targets: dict[str, tk.Misc] = {
+            "response": self._response, "end": self._end,
+            "dj": self._dj, "reset": self._reset,
+        }
+        for key, tip in self._TIPS.items():
+            if key in self._tip_targets:
+                virgil_tooltip.attach(self._tip_targets[key], tip)
 
         self._on_notice = on_notice
         self.refresh()

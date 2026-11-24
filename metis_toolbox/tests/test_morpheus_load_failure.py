@@ -27,6 +27,7 @@ morpheus.py's "Load failures" docstring section).
     python -X utf8 -m unittest tests.test_morpheus_load_failure
 """
 
+import logging
 import os
 import sys
 import tempfile
@@ -36,6 +37,12 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tools import morpheus
+
+# Several cases here reach a branch that logs a WARNING or an ERROR on purpose.
+# No test entry point calls setup_logging (§5), so logging's last-resort
+# handler would print each one to stderr; a NullHandler stops that (the
+# tests/test_zeno.py precedent). assertLogs still sees every record.
+logging.getLogger("METIS.morpheus").addHandler(logging.NullHandler())
 
 
 # ── Measured property snapshots (mpv 0.41, 2026-08-20) ───────────────────────

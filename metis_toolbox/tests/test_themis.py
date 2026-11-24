@@ -183,6 +183,40 @@ class TestPythiaSettings(ThemisBase):
             themis.save_pythia(thinking=False, temperature=value)
             self.assertEqual(themis.pythia_temperature(), value)
 
+    def test_the_model_defaults_to_none(self):
+        self.assertIsNone(themis.pythia_model())     # pythia's PYTHIA_MODEL default
+
+    def test_save_pythia_model_round_trips_and_resets(self):
+        themis.save_pythia_model("  qwen3:4b ")
+        self.assertEqual(themis.pythia_model(), "qwen3:4b")
+        themis.save_pythia_model("hf.co/org/model:Q4_K_M")
+        self.assertEqual(themis.pythia_model(), "hf.co/org/model:Q4_K_M")
+        themis.save_pythia_model(None)
+        self.assertIsNone(themis.pythia_model())
+
+    def test_a_bad_model_name_is_refused_and_writes_nothing(self):
+        for bad in ("", "   ", "two words", "gemma4:e2b; rm -rf", "x" * 201,
+                    True, 7, "a\nb"):
+            with self.subTest(name=bad):
+                with self.assertRaises(themis.SettingsError):
+                    themis.save_pythia_model(bad)
+                self.assertFalse(os.path.exists(themis._DATA_PATH))
+
+    def test_every_save_keeps_the_model(self):
+        themis.save_pythia_model("qwen3:4b")
+        themis.save(latitude=1.0, longitude=2.0)
+        themis.save_pythia(thinking=True, temperature=0.5)
+        self.assertEqual(themis.pythia_model(), "qwen3:4b")
+        themis.save_pythia_model("gemma4:e2b")
+        s = themis.load()
+        self.assertEqual((s["latitude"], s["pythia_thinking"], s["pythia_temperature"]),
+                         (1.0, True, 0.5))
+
+    def test_a_bad_hand_edited_model_degrades_to_the_default(self):
+        self._write({"pythia_model": "not a model"})
+        with self.assertLogs("METIS.themis", "WARNING"):
+            self.assertIsNone(themis.load()["pythia_model"])
+
     def test_a_bad_hand_edit_degrades_to_the_default(self):
         """A string "false" must not switch the slow mode ON (bool("false") is
         True), and a temperature out of range or not a number falls back to
@@ -196,6 +230,230 @@ class TestPythiaSettings(ThemisBase):
                     s = themis.load()
                 self.assertIs(s["pythia_thinking"], False)
                 self.assertIsNone(s["pythia_temperature"])
+
+
+class TestAlertsSettings(ThemisBase):
+    """Settings › ALERTS: the switch, what pops up, and the voice."""
+
+    def test_defaults_are_on_warnings_only_read_aloud(self):
+        self.assertIs(themis.alerts_enabled(), True)
+        self.assertEqual(themis.alerts_popup(), "warnings")
+        self.assertIs(themis.alerts_read_aloud(), True)
+
+    def test_save_round_trips_them(self):
+        themis.save(latitude=1.0, longitude=2.0, alerts_enabled=False,
+                    alerts_popup="warnings_watches", alerts_read_aloud=False)
+        self.assertIs(themis.alerts_enabled(), False)
+        self.assertEqual(themis.alerts_popup(), "warnings_watches")
+        self.assertIs(themis.alerts_read_aloud(), False)
+
+    def test_a_save_that_leaves_them_out_keeps_them(self):
+        themis.save(latitude=1.0, longitude=2.0, alerts_enabled=False,
+                    alerts_popup="warnings_watches", alerts_read_aloud=False)
+        themis.save(latitude=3.0, longitude=4.0)
+        themis.save_pythia(thinking=True, temperature=0.5)
+        themis.save_pythia_model("gemma4:e2b")
+        s = themis.load()
+        self.assertEqual((s["latitude"], s["alerts_enabled"], s["alerts_popup"],
+                          s["alerts_read_aloud"]), (3.0, False, "warnings_watches", False))
+
+    def test_save_refuses_a_bad_value_and_writes_nothing(self):
+        for kw in ({"alerts_enabled": "no"}, {"alerts_popup": "everything"},
+                   {"alerts_read_aloud": 0}):
+            with self.subTest(kw=kw):
+                with self.assertRaises(themis.SettingsError):
+                    themis.save(latitude=1.0, longitude=2.0, **kw)
+                self.assertFalse(os.path.exists(themis._DATA_PATH))
+
+    def test_the_aurora_notice_is_off_until_saved_on_and_kept_after(self):
+        self.assertIs(themis.space_aurora_notice(), False)
+        themis.save(latitude=1.0, longitude=2.0, space_aurora_notice=True)
+        themis.save(latitude=3.0, longitude=4.0)
+        themis.save_pythia(thinking=False, temperature=None)
+        self.assertIs(themis.space_aurora_notice(), True)
+        with self.assertRaises(themis.SettingsError):
+            themis.save(latitude=1.0, longitude=2.0, space_aurora_notice="yes")
+        self._write({"space_aurora_notice": 1})
+        with self.assertLogs("METIS.themis", "WARNING"):
+            self.assertIs(themis.load()["space_aurora_notice"], False)
+
+    def test_a_bad_hand_edit_degrades_to_the_default(self):
+        for raw in ({"alerts_enabled": "false"}, {"alerts_popup": "all"},
+                    {"alerts_read_aloud": 1}):
+            with self.subTest(raw=raw):
+                self._write(raw)
+                with self.assertLogs("METIS.themis", "WARNING"):
+                    s = themis.load()
+                self.assertEqual((s["alerts_enabled"], s["alerts_popup"],
+                                  s["alerts_read_aloud"]), (True, "warnings", True))
+
+
+class TestAtmosPlace(ThemisBase):
+    """Atmospherics' PLACE: "" for Home, else a cached area's id. The value
+    becomes a folder name under artemis_cache/, so anything that isn't an
+    area id's exact shape is refused on save and dropped on load."""
+
+    AREA = "n39p100_w094p579"      # a generic point, not anybody's place
+
+    def test_home_until_a_place_is_picked(self):
+        self.assertEqual(themis.atmos_place(), "")
+
+    def test_a_pick_round_trips_and_home_resets_it(self):
+        themis.save_atmos_place(self.AREA)
+        self.assertEqual(themis.atmos_place(), self.AREA)
+        themis.save_atmos_place("")
+        self.assertEqual(themis.atmos_place(), "")
+
+    def test_a_pick_keeps_every_other_setting(self):
+        themis.save(latitude=1.0, longitude=2.0, alerts_popup="warnings_watches")
+        themis.save_pythia_model("gemma4:e2b")
+        themis.save_atmos_place(self.AREA)
+        s = themis.load()
+        self.assertEqual((s["latitude"], s["alerts_popup"], s["pythia_model"]),
+                         (1.0, "warnings_watches", "gemma4:e2b"))
+
+    def test_every_other_save_keeps_the_pick(self):
+        """Settings' form is built at startup: its Save must not put back the
+        place it was built with after a dropdown picked another."""
+        themis.save_atmos_place(self.AREA)
+        themis.save(latitude=3.0, longitude=4.0)
+        themis.save_pythia(thinking=True, temperature=0.5)
+        themis.save_pythia_model("gemma4:e2b")
+        self.assertEqual(themis.atmos_place(), self.AREA)
+
+    def test_anything_but_an_area_id_is_refused_and_writes_nothing(self):
+        for bad in ("..", "..\\x", "../x", "C:\\Windows", "/etc", "n39p100",
+                    self.AREA + "\n", self.AREA + "/..", " " + self.AREA,
+                    "n39p100_w094p579_x", "N39P100_W094P579",
+                    "n\u0663\u0669p100_w094p579",      # Arabic-Indic digits
+                    None, 39, ["n39p100_w094p579"]):
+            with self.subTest(bad=bad):
+                with self.assertRaises(themis.SettingsError):
+                    themis.save_atmos_place(bad)
+                self.assertFalse(os.path.exists(themis._DATA_PATH))
+
+    def test_a_bad_hand_edit_loads_as_home(self):
+        for raw in ("..\\..\\x", self.AREA + "\n", 7):
+            with self.subTest(raw=raw):
+                self._write({"atmos_place": raw})
+                with self.assertLogs("METIS.themis", "WARNING"):
+                    self.assertEqual(themis.load()["atmos_place"], "")
+
+
+class TestHandEdits(ThemisBase):
+    """load() never raises and degrades only the bad field (§4); each case
+    here got through before 2026-11-21 (measured)."""
+
+    def _load(self):
+        try:
+            return themis.load()
+        except Exception as exc:
+            self.fail(f"load() raised {type(exc).__name__}")
+
+    def test_clock_24h_needs_a_real_true(self):
+        # bool("false") is True: the trap pythia_thinking's coercer names.
+        for raw, expected in (("false", False), ("true", False), (1, False),
+                              (True, True), (False, False)):
+            with self.subTest(raw=raw):
+                self._write({"clock_24h": raw})
+                self.assertIs(self._load()["clock_24h"], expected)
+
+    def test_save_refuses_a_clock_that_isnt_true_or_false(self):
+        with self.assertRaises(themis.SettingsError):
+            themis.save(latitude=1.0, longitude=2.0, clock_24h="false")
+        self.assertFalse(os.path.exists(themis._DATA_PATH))
+
+    def test_numbers_too_big_for_a_float_fall_back(self):
+        huge = "9" * 400
+        self._write('{"latitude": %s, "pythia_temperature": %s}' % (huge, huge))
+        data = self._load()
+        self.assertEqual(data["latitude"], themis.DEFAULTS["latitude"])
+        self.assertIsNone(data["pythia_temperature"])
+
+    def test_a_file_nested_too_deep_falls_back(self):
+        self._write("[" * 100000 + "]" * 100000)
+        self.assertEqual(self._load(), themis.DEFAULTS)
+
+    def test_a_true_or_false_coordinate_is_refused(self):
+        self._write({"latitude": True, "longitude": False})
+        data = self._load()
+        self.assertEqual((data["latitude"], data["longitude"]),
+                         (themis.DEFAULTS["latitude"], themis.DEFAULTS["longitude"]))
+        with self.assertRaises(themis.SettingsError):
+            themis.save(latitude=True, longitude=2.0)
+
+    def test_a_weather_location_that_isnt_text_falls_back(self):
+        self._write({"weather_location": ["a", 1], "latitude": 1.5, "longitude": 2.5})
+        self.assertEqual(themis.weather_query(), "1.5,2.5")
+        # A ZIP typed without quotes is still a place.
+        self._write({"weather_location": 26301})
+        self.assertEqual(themis.weather_query(), "26301")
+
+    def test_a_refused_weather_location_is_not_logged(self):
+        self._write({"weather_location": {"street": "12 Elm"}})
+        with self.assertLogs("METIS.themis", "WARNING") as logs:
+            self.assertEqual(self._load()["weather_location"], "")
+        self.assertNotIn("Elm", "\n".join(logs.output))
+
+
+class TestSaveLog(ThemisBase):
+    """A save names the fields it changed, never their values: the place is
+    the owner's location, and EMANON shows INFO lines on screen (the owner's
+    pick, 2026-11-21)."""
+
+    AREA = "n12p346_w065p432"
+
+    def test_a_save_logs_field_names_never_values(self):
+        with self.assertLogs("METIS.themis", "INFO") as logs:
+            themis.save(latitude=12.3456, longitude=-65.4321,
+                        weather_location="12 Elm St")
+            themis.save_atmos_place(self.AREA)
+        text = "\n".join(logs.output)
+        for name in ("latitude", "longitude", "weather_location", "atmos_place"):
+            self.assertIn(name, text)
+        for value in ("12.3456", "65.4321", "Elm", self.AREA):
+            self.assertNotIn(value, text)
+
+    def test_a_save_that_changes_nothing_says_so(self):
+        themis.save(latitude=1.0, longitude=2.0)
+        with self.assertLogs("METIS.themis", "INFO") as logs:
+            themis.save(latitude=1.0, longitude=2.0)
+        self.assertIn("changed: nothing", logs.output[-1])
+
+
+class TestReadersAndSavesRace(ThemisBase):
+    """Windows refuses a rename over a file another thread has open, and an
+    open while the rename runs. Kairos workers and Pythia read the settings
+    while the Tk thread saves: unlocked, a tight reader made 215 of 300 saves
+    fail and 78 reads fall back to Greenwich (measured 2026-11-21)."""
+
+    def test_a_save_never_fails_and_a_reader_never_falls_back(self):
+        import threading
+        themis.save(latitude=10.0, longitude=20.0)
+        stop, reading = threading.Event(), threading.Event()
+        wrong = []
+
+        def reader():
+            while not stop.is_set():
+                if themis.latitude() != 10.0:
+                    wrong.append(1)
+                reading.set()
+
+        thread = threading.Thread(target=reader, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(stop.set)
+        self.assertTrue(reading.wait(5), "the reader never ran")
+        failed = 0
+        for _ in range(150):
+            try:
+                themis.save(latitude=10.0, longitude=20.0)
+            except OSError:
+                failed += 1
+        stop.set()
+        thread.join(5)
+        self.assertEqual((failed, len(wrong)), (0, 0),
+                         "(failed saves, reads that fell back)")
 
 
 if __name__ == "__main__":

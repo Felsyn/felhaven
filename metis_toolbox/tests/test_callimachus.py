@@ -19,6 +19,9 @@ Covers the handoff's three phases:
      checked, with env proxies ignored. These run BELOW the _OPENER.open seam:
      DNS, the TCP dial and the TLS wrap are faked; http.client and urllib are
      real.
+  5. The V0.03 walkthrough (S33) — ::/96 is not public, fetch_page refuses a
+     page that isn't text, a title is capped, and search_web's catch-all logs
+     a class only.
 """
 
 import io
@@ -115,7 +118,7 @@ class TestSearchWeb(unittest.TestCase):
         big = _FakeResp(b"{" + b" " * callimachus._SEARCH_MAX_BYTES + b"}")
         with _patch_open(big):
             out = callimachus.search_web("anything")
-        self.assertTrue(out["error"].startswith("search_failed: "))
+        self.assertTrue(out["error"].startswith("unavailable: "))
         self.assertIn("size cap", out["error"])
 
     def test_the_search_runs_inside_a_deadline_and_asks_for_identity(self):
@@ -153,20 +156,36 @@ class TestSearchWeb(unittest.TestCase):
         with _patch_open(socket.timeout()):
             self.assertEqual(callimachus.search_web("q"), {"error": "timeout"})
 
-    def test_malformed_json_is_search_failed(self):
+    def test_malformed_json_is_unavailable(self):
         with _patch_open(_FakeResp(b"<html>not json</html>")):
             out = callimachus.search_web("q")
-        self.assertTrue(out["error"].startswith("search_failed:"))
+        self.assertTrue(out["error"].startswith("unavailable:"))
 
-    def test_vault_locked_is_search_failed(self):
-        # Override the setUp key patch with a locked-vault raise. Only the
-        # exception CLASS reaches the error dict — the VaultError message is
-        # kept out of the LLM context (§2).
-        with mock.patch.object(callimachus, "_brave_key",
-                               side_effect=cerberus.VaultError("vault is locked")):
+    def test_a_sealed_vault_is_vault_locked(self):
+        # Override the setUp key patch with Cerberus's own refusals. The word
+        # comes from its slug (the shared core, §2), Midas's two words.
+        with mock.patch.object(callimachus, "_brave_key", side_effect=
+                               cerberus.VaultError(cerberus.ERR_LOCKED)), \
+                self.assertLogs("METIS.callimachus", "WARNING"):
             out = callimachus.search_web("q")
-        self.assertEqual(out["error"], "search_failed: VaultError")
-        self.assertNotIn("locked", out["error"])   # message gone, class only
+        self.assertEqual(out["error"], "vault_locked")
+
+    def test_an_open_vault_with_no_brave_key_is_no_key(self):
+        with mock.patch.object(callimachus, "_brave_key", side_effect=
+                               cerberus.VaultError(cerberus.ERR_NO_ENTRY, "brave")), \
+                self.assertLogs("METIS.callimachus", "WARNING"):
+            out = callimachus.search_web("q")
+        self.assertEqual(out["error"], "no_key")
+
+    def test_any_other_vault_failure_is_unavailable_class_only(self):
+        # Only the exception CLASS reaches the error dict — the VaultError
+        # message is kept out of the LLM context (§2).
+        with mock.patch.object(callimachus, "_brave_key", side_effect=
+                               cerberus.VaultError(cerberus.ERR_CORRUPT, "secret")), \
+                self.assertLogs("METIS.callimachus", "WARNING"):
+            out = callimachus.search_web("q")
+        self.assertEqual(out["error"], "unavailable: VaultError")
+        self.assertNotIn("secret", out["error"])   # message gone, class only
 
     def test_url_error_reports_reason_class_not_message(self):
         # URLError.reason is a foreign socket/OS error that can carry a hostname
@@ -175,7 +194,7 @@ class TestSearchWeb(unittest.TestCase):
             OSError("[Errno 11001] getaddrinfo failed: secret.internal.host"))
         with _patch_open(leaky):
             out = callimachus.search_web("q")
-        self.assertEqual(out["error"], "search_failed: OSError")
+        self.assertEqual(out["error"], "unavailable: OSError")
         self.assertNotIn("secret.internal.host", out["error"])
 
 
@@ -282,7 +301,7 @@ class TestFetchPage(unittest.TestCase):
             OSError("[Errno 11001] getaddrinfo failed: secret.internal.host"))
         with _patch_open(leaky):
             out = callimachus.fetch_page("https://gone.example")
-        self.assertEqual(out["error"], "fetch_failed: OSError")
+        self.assertEqual(out["error"], "unavailable: OSError")
         self.assertNotIn("secret.internal.host", out["error"])
 
 
@@ -343,7 +362,7 @@ class TestAddressGuard(unittest.TestCase):
 
     def test_private_answer_is_refused_before_any_dial(self):
         with mock.patch("socket.getaddrinfo", return_value=_answers("10.0.0.5")), \
-                mock.patch("socket.create_connection") as dial:
+                mock.patch("socket.create_connection") as dial, self.assertLogs("METIS.callimachus", "WARNING"):
             with self.assertRaises(callimachus._PrivateAddress):
                 callimachus._connect_public(("router.example", 443), 5)
         dial.assert_not_called()
@@ -352,7 +371,7 @@ class TestAddressGuard(unittest.TestCase):
         # A name answering public AND private is built to be tried twice.
         with mock.patch("socket.getaddrinfo",
                         return_value=_answers("8.8.8.8", "192.168.1.1")), \
-                mock.patch("socket.create_connection") as dial:
+                mock.patch("socket.create_connection") as dial, self.assertLogs("METIS.callimachus", "WARNING"):
             with self.assertRaises(callimachus._PrivateAddress):
                 callimachus._connect_public(("mixed.example", 443), 5)
         dial.assert_not_called()
@@ -390,7 +409,7 @@ class TestAddressGuard(unittest.TestCase):
 
     def test_fetch_page_reports_private_address(self):
         with mock.patch("socket.getaddrinfo", return_value=_answers("192.168.1.1")), \
-                mock.patch("socket.create_connection") as dial:
+                mock.patch("socket.create_connection") as dial, self.assertLogs("METIS.callimachus", "WARNING"):
             out = callimachus.fetch_page("https://router.example/admin")
         self.assertEqual(out, {"error": "private_address"})
         dial.assert_not_called()
@@ -408,7 +427,8 @@ class TestAddressGuard(unittest.TestCase):
                         side_effect=lambda host, *a, **k: dns[host]), \
                 mock.patch("socket.create_connection", return_value=wire) as dial, \
                 mock.patch.object(ssl.SSLContext, "wrap_socket",
-                                  lambda self, sock, **kw: sock):
+                                  lambda self, sock, **kw: sock), \
+                self.assertLogs("METIS.callimachus", "WARNING"):
             out = callimachus.fetch_page("https://start.example/")
         self.assertEqual(out, {"error": "private_address"})
         self.assertIn(b"Host: start.example", wire.sent)       # hop 1 went out
@@ -461,6 +481,92 @@ class TestRegistryWiring(unittest.TestCase):
         with mock.patch.dict(pythia._DISPATCH, stub):
             out = pythia._dispatch("search_web", {"query": "hello"})
         self.assertEqual(out, {"echo": {"query": "hello"}})
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  5. The V0.03 walkthrough (S33, 2026-11-23)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestIPv4CompatibleIsNotPublic(unittest.TestCase):
+    """Python counts ::/96, the deprecated IPv4-compatible form, as global, so
+    the guard took ::127.0.0.1 for the public internet (measured; Windows
+    answered "unreachable network", so nothing was reached)."""
+
+    def test_the_ipv4_compatible_range_is_refused(self):
+        for ip in ("::127.0.0.1", "::7f00:1", "::10.0.0.5", "::8.8.8.8"):
+            with self.subTest(ip=ip):
+                self.assertFalse(callimachus._is_public(ip))
+
+    def test_an_ipv4_compatible_answer_is_never_dialled(self):
+        with mock.patch("socket.getaddrinfo", return_value=_answers("::7f00:1")), \
+                mock.patch("socket.create_connection") as dial, \
+                self.assertLogs("METIS.callimachus", "WARNING"):
+            with self.assertRaises(callimachus._PrivateAddress):
+                callimachus._connect_public(("evil.example", 443), 5)
+        dial.assert_not_called()
+
+    def test_ordinary_public_ipv6_still_passes(self):
+        for ip in ("2606:4700:4700::1111", "2001:4860:4860::8888", "64:ff9b::808:808"):
+            with self.subTest(ip=ip):
+                self.assertTrue(callimachus._is_public(ip))
+
+
+class _TypedResp(_FakeResp):
+    """A _FakeResp that names its Content-Type."""
+
+    def __init__(self, body: bytes, content_type: str) -> None:
+        super().__init__(body)
+        self.headers = {"Content-Type": content_type}
+
+
+class TestFetchPageReadsTextOnly(unittest.TestCase):
+    """A PDF or an image came back as 4,000 characters of its bytes, about
+    1,700 of them replacement characters, all handed to the model (measured
+    live 2026-11-23)."""
+
+    def test_a_pdf_is_refused_before_its_body_is_read(self):
+        resp = _TypedResp(b"%PDF-1.4 " + bytes(range(256)) * 20, "application/pdf")
+        with _patch_open(resp):
+            out = callimachus.fetch_page("https://example.com/manual.pdf")
+        self.assertEqual(out, {"error": "unavailable: not a text page (application/pdf)"})
+        self.assertEqual(resp._pos, 0)
+
+    def test_a_type_not_shaped_like_one_isnt_quoted(self):
+        resp = _TypedResp(b"\x00\x01", "x" * 300)
+        with _patch_open(resp):
+            out = callimachus.fetch_page("https://example.com/odd")
+        self.assertEqual(out, {"error": "unavailable: not a text page"})
+
+    def test_text_xml_json_and_no_type_are_read(self):
+        for ctype in ("text/html; charset=utf-8", "text/plain", "application/xhtml+xml",
+                      "application/json", "application/rss+xml", ""):
+            with self.subTest(ctype=ctype), _patch_open(_TypedResp(b"<p>hello</p>", ctype)):
+                self.assertEqual(callimachus.fetch_page("https://example.com/").get("text"),
+                                 "hello")
+
+
+class TestSearchResultsAreBounded(unittest.TestCase):
+    def test_a_long_title_is_capped_like_a_snippet(self):
+        # Pythia sends a tool result to the model whole.
+        data = {"web": {"results": [{"title": "t" * 5000, "description": "d",
+                                     "url": "https://example.com/"}]}}
+        (row,) = callimachus._shape_results(data)
+        self.assertEqual(len(row["title"]), callimachus._SNIPPET_CHARS)
+
+
+class TestSearchCatchAllLogsAClassOnly(unittest.TestCase):
+    """The request carries the Brave key, and a keyed request's text is never
+    logged unchecked (§12, 2026-11-18; BACKLOG from S10)."""
+
+    def test_the_log_names_the_class_not_the_message(self):
+        with mock.patch.object(callimachus, "_brave_key", return_value="fake-key"), \
+                _patch_open(RuntimeError("detail that must stay out of the log")), \
+                self.assertLogs("METIS.callimachus", "WARNING") as logs:
+            out = callimachus.search_web("anything")
+        self.assertEqual(out, {"error": "unavailable: RuntimeError"})
+        self.assertIn("RuntimeError", logs.output[0])
+        self.assertNotIn("detail that must stay out", logs.output[0])
 
 
 if __name__ == "__main__":

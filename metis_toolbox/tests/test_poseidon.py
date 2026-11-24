@@ -145,7 +145,7 @@ class TestIngestAndLoad(unittest.TestCase):
     @staticmethod
     def _Resp(payload, status=200):
         """What hermes.get returns: a finished Reply."""
-        return hermes.Reply(status, {}, payload, "https://census.example.invalid/x.zip")
+        return hermes.Reply(status, {}, payload)
 
     def _urlopen(self, area_error=None):
         """Serve the right fixture zip for whichever URL is asked for.

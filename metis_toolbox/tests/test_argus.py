@@ -2,19 +2,29 @@
 test_argus.py — unit tests for tools/argus.py (network awareness).
 
 The pure, deterministic seams are the two text parsers (netsh / ipconfig) and
-the timeline diff, so those carry the weight; fetch() gets a structure-only
-smoke against real psutil (no Tk, no panel). Run from the package root:
+the timeline diff, so those carry the weight. fetch() runs with psutil and both
+programs faked (_FakedSeams): it was a live test against the real psutil,
+netsh and ipconfig until 2026-11-21, and the owner chose fakes, so the suite
+launches nothing and CI gets the same answer every run. Run from the package
+root:
 
     python -X utf8 -m unittest tests.test_argus
 
-_save_timeline is monkeypatched wherever a diff could fire, so no test ever
-writes argus_timeline.json; the timeline test also resets the module's baseline
-state so seeding is deterministic.
+No test reads or writes the real argus_timeline.json: the diff tests silence
+_save_timeline, and _FakedSeams points the file at a scratch folder and puts
+the module's state back afterwards.
 """
 
+import collections
+import importlib.util
+import json
 import os
+import socket
 import sys
+import tempfile
+import threading
 import unittest
+from collections import deque
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -157,36 +167,246 @@ class TestTimelineDiff(unittest.TestCase):
         self.assertEqual(len(argus._timeline), 0)
 
 
-# ── fetch() shape (integration against real psutil) ───────────────────────────
+# ── the shell-outs name System32's programs ─────────────────────────────────────
 
-class TestFetchShape(unittest.TestCase):
+class TestShellOutsUseSystem32(unittest.TestCase):
+    """netsh and ipconfig by absolute path: a bare name runs a file of that
+    name from the working folder before System32's (measured 2026-11-17)."""
 
     def setUp(self):
-        self._orig_save = argus._save_timeline
-        argus._save_timeline = lambda: None
+        saved = (argus._fw_block, argus._fw_ts, argus._dns_block, argus._dns_ts)
+        self.addCleanup(self._restore, saved)
+        argus._fw_block = argus._dns_block = None     # no throttled answer
 
-    def tearDown(self):
-        argus._save_timeline = self._orig_save
+    @staticmethod
+    def _restore(saved):
+        argus._fw_block, argus._fw_ts, argus._dns_block, argus._dns_ts = saved
+
+    def _program(self, read):
+        with mock.patch.object(argus.subprocess, "run",
+                               return_value=mock.Mock(returncode=1, stdout="")) as run:
+            read()
+        return run.call_args.args[0][0]
+
+    def _assert_system32(self, program, exe):
+        self.assertTrue(os.path.isabs(program), program)
+        self.assertTrue(os.path.normcase(program).endswith(
+            os.path.normcase(os.path.join("System32", exe))), program)
+
+    def test_the_firewall_read_runs_system32_netsh(self):
+        self._assert_system32(self._program(argus._firewall), "netsh.exe")
+
+    def test_the_dns_read_runs_system32_ipconfig(self):
+        self._assert_system32(self._program(argus._dns), "ipconfig.exe")
+
+
+# ── fetch() with its seams faked ──────────────────────────────────────────────
+
+_Addr = collections.namedtuple("_Addr", "ip port")
+_Conn = collections.namedtuple("_Conn", "fd family type laddr raddr status pid")
+
+# The module state fetch() keeps between calls; _FakedSeams saves and restores
+# all of it. _MISSING marks a name an older argus.py doesn't have, so a red
+# check against it fails on the behaviour, not on setUp.
+_STATE = ("_TIMELINE_PATH", "_timeline", "_timeline_loaded", "_known",
+          "_seeded", "_proc_cache", "_prev_io", "_prev_io_ts", "_dns_block",
+          "_dns_ts", "_fw_block", "_fw_ts")
+_MISSING = object()
+
+# ipconfig's refusal as Windows 11 printed it, measured 2026-11-21 (build
+# 26200, a normal user): exit code 1 and this one line.
+_REFUSED = "The requested operation requires elevation.\r\n"
+
+
+class _FakedSeams(unittest.TestCase):
+    """fetch() against fake psutil and fake netsh/ipconfig answers, with the
+    timeline file in a scratch folder. Nothing outside the test runs."""
+
+    def setUp(self):
+        saved = {name: getattr(argus, name, _MISSING) for name in _STATE}
+        self.addCleanup(self._restore, saved)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        argus._TIMELINE_PATH = os.path.join(tmp.name, "argus_timeline.json")
+        argus._timeline = deque(maxlen=argus._TIMELINE_MAX)
+        argus._timeline_loaded = False
+        argus._known, argus._seeded, argus._proc_cache = {}, False, {}
+        argus._prev_io, argus._prev_io_ts = None, 0.0
+        argus._dns_block = argus._fw_block = None
+
+        self.conns = [
+            _Conn(-1, socket.AF_INET, socket.SOCK_STREAM, _Addr("10.0.0.2", 50000),
+                  _Addr("93.184.215.14", 443), "ESTABLISHED", 101),
+            _Conn(-1, socket.AF_INET, socket.SOCK_STREAM, _Addr("10.0.0.2", 50001),
+                  _Addr("93.184.215.14", 443), "TIME_WAIT", 0),
+            _Conn(-1, socket.AF_INET, socket.SOCK_STREAM, _Addr("0.0.0.0", 445),
+                  (), "LISTEN", 4),
+        ]
+        self.answers = {
+            "netsh.exe": mock.Mock(returncode=0, stdout=TestParseFirewall.SAMPLE),
+            "ipconfig.exe": mock.Mock(returncode=0, stdout=TestParseDns.SAMPLE),
+        }
+        self.run = self._patch(argus.subprocess, "run", side_effect=self._answer)
+        self._patch(argus.psutil, "net_connections",
+                    side_effect=lambda kind: list(self.conns))
+        self._patch(argus.psutil, "net_io_counters", return_value={
+            "Wi-Fi": mock.Mock(bytes_sent=1000, bytes_recv=5000)})
+        self._patch(argus.psutil, "Process", side_effect=self._process)
+
+    def _patch(self, target, name, **kw):
+        patcher = mock.patch.object(target, name, **kw)
+        self.addCleanup(patcher.stop)
+        return patcher.start()
+
+    def _answer(self, argv, **_kw):
+        return self.answers[os.path.basename(argv[0]).lower()]
+
+    @staticmethod
+    def _process(pid):
+        proc = mock.Mock()
+        proc.as_dict.return_value = {"name": f"p{pid}.exe"}
+        return proc
+
+    @staticmethod
+    def _restore(saved):
+        for name, value in saved.items():
+            if value is _MISSING:
+                if hasattr(argus, name):
+                    delattr(argus, name)
+            else:
+                setattr(argus, name, value)
+
+
+class TestFetchShape(_FakedSeams):
 
     def test_dict_has_contract_keys(self):
         snap = argus.fetch()
-        for key in ("as_of", "privilege", "summary", "connections",
-                    "listening", "traffic", "dns", "firewall", "timeline"):
-            self.assertIn(key, snap)
-
+        self.assertEqual(set(snap), {"as_of", "privilege", "summary",
+                                     "connections", "listening", "traffic",
+                                     "dns", "firewall", "timeline"})
         self.assertIn(snap["privilege"], ("user", "admin"))
+        self.assertEqual(snap["summary"], {"established": 1, "listening": 1,
+                                           "other": 1, "unresolved_pids": 0})
+        self.assertEqual(snap["connections"][1]["proc"], argus._PID0_LABEL)
+        self.assertEqual(snap["listening"][0]["proc"], "p4.exe")
+        self.assertEqual(set(snap["traffic"]),
+                         {"window_s", "up_bps", "down_bps", "per_nic"})
+        self.assertEqual(snap["dns"]["state"], "ok")
+        self.assertEqual(len(snap["dns"]["entries"]), 2)
+        self.assertEqual(snap["firewall"]["state"], "ok")
+        self.assertEqual(snap["timeline"], [])        # first tick seeds silently
+        self.assertEqual(self.run.call_count, 2)      # the two fakes, nothing else
 
-        for key in ("established", "listening", "other", "unresolved_pids"):
-            self.assertIn(key, snap["summary"])
-            self.assertIsInstance(snap["summary"][key], int)
+    def test_a_refused_dns_read_is_needs_admin(self):
+        # Windows 11 refuses a normal user the cache: a permission, not a
+        # failure, so it gets its own state (the owner's pick, 2026-11-21).
+        self.answers["ipconfig.exe"] = mock.Mock(returncode=1, stdout=_REFUSED)
+        dns = argus.fetch()["dns"]
+        self.assertEqual(dns["state"], "needs_admin")
+        self.assertEqual(dns["entries"], [])
 
-        for key in ("window_s", "up_bps", "down_bps", "per_nic"):
-            self.assertIn(key, snap["traffic"])
+    def test_any_other_dns_failure_stays_unavailable(self):
+        self.answers["ipconfig.exe"] = mock.Mock(
+            returncode=1, stdout="Could not display the DNS Resolver Cache.\r\n")
+        self.assertEqual(argus.fetch()["dns"]["state"], "unavailable")
 
-        self.assertIn(snap["dns"]["state"], ("ok", "empty", "unavailable"))
-        self.assertIn(snap["firewall"]["state"], ("ok", "unavailable"))
-        self.assertIsInstance(snap["connections"], list)
-        self.assertIsInstance(snap["listening"], list)
+    def test_a_failed_firewall_read_is_unavailable(self):
+        self.answers["netsh.exe"] = mock.Mock(returncode=1, stdout="")
+        fw = argus.fetch()["firewall"]
+        self.assertEqual(fw["state"], "unavailable")
+        self.assertEqual(fw["domain"], "—")
+
+
+# ── state shared by Kairos's worker and Pythia's (§6) ─────────────────────────
+
+class TestSharedState(_FakedSeams):
+
+    def test_a_second_fetch_waits_for_the_first(self):
+        # Kairos's tick and a get_machine_status call can overlap. Unlocked,
+        # two fetches raised 7 times in 3,000 calls (measured 2026-11-21).
+        entered, release, calls = threading.Event(), threading.Event(), []
+
+        def slow(kind):
+            calls.append(threading.current_thread().name)
+            if len(calls) == 1:
+                entered.set()
+                release.wait(5)
+            return list(self.conns)
+
+        argus.psutil.net_connections.side_effect = slow
+        first = threading.Thread(target=argus.fetch, name="kairos", daemon=True)
+        second = threading.Thread(target=argus.fetch, name="pythia", daemon=True)
+        try:
+            first.start()
+            self.assertTrue(entered.wait(5))
+            second.start()
+            second.join(0.3)          # long enough to reach the table if unlocked
+            self.assertEqual(calls, ["kairos"])
+        finally:
+            release.set()
+            first.join(5)
+            second.join(5)
+        self.assertEqual(calls, ["kairos", "pythia"])
+
+    def test_what_fetch_hands_out_is_a_copy(self):
+        # The panel gets the snapshot through Kairos's queue while Argus keeps
+        # its cached blocks and timeline; changing one must not reach the other.
+        argus.fetch()                                       # seed
+        self.conns.append(_Conn(-1, socket.AF_INET, socket.SOCK_STREAM,
+                                _Addr("10.0.0.2", 50002),
+                                _Addr("198.51.100.7", 443), "ESTABLISHED", 102))
+        snap = argus.fetch()
+        snap["dns"]["entries"].clear()
+        snap["firewall"]["state"] = "changed"
+        snap["timeline"][0]["proc"] = "changed"
+        again = argus.fetch()                               # blocks still cached
+        self.assertEqual(len(again["dns"]["entries"]), 2)
+        self.assertEqual(again["firewall"]["state"], "ok")
+        self.assertEqual(again["timeline"][0]["proc"], "p102.exe")
+
+
+# ── the timeline file ─────────────────────────────────────────────────────────
+
+class TestTimelineFile(_FakedSeams):
+
+    _EVENT = {"t": 1700000000.0, "event": "open", "proc": "a.exe",
+              "raddr": "198.51.100.7:443"}
+
+    def _write(self, data):
+        with open(argus._TIMELINE_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+    def test_importing_argus_opens_no_file(self):
+        # Importing Pythia imports every tool, so a read at import ran before
+        # any test could point the file elsewhere (BACKLOG, 2026-11-19).
+        spec = importlib.util.spec_from_file_location("argus_fresh", argus.__file__)
+        fresh = importlib.util.module_from_spec(spec)
+        with mock.patch("builtins.open", wraps=open) as opened:
+            spec.loader.exec_module(fresh)
+        self.assertEqual(opened.call_args_list, [])
+
+    def test_the_first_fetch_reads_the_file_where_it_points(self):
+        self._write([self._EVENT])
+        self.assertEqual(argus.fetch()["timeline"], [self._EVENT])
+
+    def test_entries_the_panel_could_not_draw_are_dropped(self):
+        # The panel draws these on the main thread, where a raise would stop
+        # Kairos's tick for every panel (measured 2026-11-21; BACKLOG).
+        junk = ["x", 5, {"t": "soon", "event": "open", "proc": "a", "raddr": "b"},
+                {"t": float("inf"), "event": "open", "proc": "a", "raddr": "b"},
+                {"t": 1.0, "event": "opened", "proc": "a", "raddr": "b"},
+                {"t": 1.0, "event": "close", "proc": None, "raddr": "b"}]
+        self._write(junk + [self._EVENT])
+        argus._load_timeline()
+        self.assertEqual(list(argus._timeline), [self._EVENT])
+
+    def test_a_file_holding_no_list_loads_nothing(self):
+        for data in ("abc", {"t": 1.0}):
+            with self.subTest(data=data):
+                argus._timeline.clear()
+                self._write(data)
+                argus._load_timeline()
+                self.assertEqual(list(argus._timeline), [])
 
 
 # ── handle() / fetch() §2 contract (the LLM surface + the one raise) ───────────
@@ -263,15 +483,34 @@ class TestHandleContract(unittest.TestCase):
         with mock.patch.object(argus, "fetch",
                                side_effect=OSError("net table gone")):
             out = argus.handle()
-        self.assertEqual(out, {"error": "network_unavailable"})
+        self.assertEqual(out, {"error": "unavailable: network snapshot raised OSError"})
+
+    def test_a_cache_argus_could_not_read_has_no_count(self):
+        # A refused or failed read has no entries; reporting 0 names would be
+        # false, so the key is left out (the owner's pick, 2026-11-21).
+        for state in ("needs_admin", "unavailable"):
+            with self.subTest(state=state):
+                snap = dict(self._SNAP, dns={"as_of": 1.0, "state": state,
+                                             "entries": []})
+                with mock.patch.object(argus, "fetch", return_value=snap):
+                    out = argus.handle()
+                self.assertNotIn("dns_cached_names", out)
+                self.assertIn("top_connections", out)
+        with mock.patch.object(argus, "fetch", return_value=self._SNAP):
+            keys = list(argus.handle())
+        self.assertEqual(keys[-2:], ["dns_cached_names", "top_connections"])
+
+
+class TestFetchRaises(_FakedSeams):
+    """fetch()'s one raise, on the faked seams: the first fetch() reads the
+    timeline file, so a real fetch() would read the checkout's own."""
 
     def test_fetch_raises_on_wholesale_net_connections_failure(self):
         # The documented single raise: if the connection table itself can't be
         # read, fetch() lets it through so Kairos delivers None (panel stays stale).
-        with mock.patch.object(argus.psutil, "net_connections",
-                               side_effect=OSError("boom")):
-            with self.assertRaises(OSError):
-                argus.fetch()
+        argus.psutil.net_connections.side_effect = OSError("boom")
+        with self.assertRaises(OSError):
+            argus.fetch()
 
 
 if __name__ == "__main__":

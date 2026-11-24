@@ -5,8 +5,8 @@ data. The sole tool registry.
 
 - **UI:** Felhaven home view — the chat
 - **Brain tool:** none — Pythia is the caller, not a tool
-- **Files:** `pythia.py`, `panels/home_panel.py`, `panels/hestia_panel.py`, `panels/rite_panel.py`
-- **Test:** `python -X utf8 -m unittest tests.test_pythia tests.test_pythia_guard tests.test_tool_handles tests.test_rite_panel_smoke`
+- **Files:** `pythia.py`, `panels/home_panel.py`, `panels/hestia_panel.py`, `panels/pythia_face.py`, `panels/rite_panel.py`
+- **Test:** `python -X utf8 -m unittest tests.test_pythia tests.test_pythia_guard tests.test_tool_handles tests.test_rite_panel_smoke tests.test_pythia_gate tests.test_pythia_seam tests.test_pythia_verbatim tests.test_pythia_face_smoke`
 
 The stats payload carries `tool_records`: one diagnostic record per tool
 invocation (arguments, status, timing, error slug, capped result preview).

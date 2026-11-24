@@ -396,5 +396,77 @@ class TestRetryLadder(KairosBehaviorTestCase):
         self.assertEqual(set(k._intervals), set(k._fetch_fns))
 
 
+# ── Group E — A panel that raises ───────────────────────────────────────────
+
+class RaisingPanel:
+    """A panel with a bug: update() raises until `fail` is cleared."""
+
+    def __init__(self):
+        self.fail = True
+        self.calls = 0
+
+    def update(self, data):
+        self.calls += 1
+        if self.fail:
+            raise AttributeError("synthetic panel bug")
+
+
+class TestAPanelThatRaises(KairosBehaviorTestCase):
+    """One panel's update() raising ended the tick chain: _tick re-armed its
+    after() only once the drain returned, so every panel froze until a restart
+    (measured 2026-11-21: no delivery in the next 2 s)."""
+
+    def _drain(self):
+        try:
+            self.kairos._drain_queue()
+        except Exception as exc:
+            self.fail(f"one panel's {type(exc).__name__} escaped the drain")
+
+    def test_the_other_panels_and_workers_still_get_their_results(self):
+        good, other = RecorderPanel(), RecorderPanel()
+        self.kairos.register_panel("alpha", RaisingPanel())
+        self.kairos.register_panel("alpha", good)
+        self.kairos.register_panel("beta", other)
+        self.kairos.result_queue.put(("alpha", {"n": 1}))
+        self.kairos.result_queue.put(("beta", {"n": 2}))
+        with self.assertLogs("METIS.kairos", "ERROR"):
+            self._drain()
+        self.assertEqual(good.updates, [{"n": 1}])
+        self.assertEqual(other.updates, [{"n": 2}])
+        self.assertTrue(self.kairos.result_queue.empty())
+
+    def test_the_retry_ladder_still_hears_the_result(self):
+        self.kairos.register_panel("alpha", RaisingPanel())
+        self.kairos.result_queue.put(("alpha", None))
+        with mock.patch.object(kairos, "time", FakeClock(1000.0)):
+            with self.assertLogs("METIS.kairos", "ERROR"):
+                self._drain()
+        self.assertEqual(self.kairos._fail_counts.get("alpha"), 1)
+
+    def test_a_failing_panel_is_logged_once_and_again_when_it_works(self):
+        bad = RaisingPanel()
+        self.kairos.register_panel("alpha", bad)
+        with self.assertLogs("METIS.kairos", "INFO") as logs:
+            for _ in range(5):
+                self.kairos.result_queue.put(("alpha", {}))
+                self._drain()
+            bad.fail = False
+            self.kairos.result_queue.put(("alpha", {}))
+            self._drain()
+        errors = [r for r in logs.records if r.levelno == logging.ERROR]
+        self.assertEqual(len(errors), 1, "a 1 s worker would log every tick")
+        self.assertIsNotNone(errors[0].exc_info, "the traceback is what diagnoses it")
+        self.assertTrue(any("works again" in r.getMessage() for r in logs.records))
+        self.assertEqual(bad.calls, 6)
+
+    def test_the_tick_rearms_even_if_a_step_raises(self):
+        with mock.patch.object(self.kairos, "_schedule_workers",
+                               side_effect=RuntimeError("can't start new thread")):
+            with self.assertRaises(RuntimeError):
+                self.kairos._tick()
+        self.assertTrue(self.root.scheduled, "the tick chain ended")
+        self.assertEqual(self.root.scheduled[-1][2], self.kairos._tick)
+
+
 if __name__ == "__main__":
     unittest.main()

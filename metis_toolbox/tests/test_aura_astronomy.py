@@ -1,12 +1,16 @@
 """
-test_aura_astronomy.py — integration test: astronomy survives aura._build().
+test_aura_astronomy.py — integration test: astronomy does NOT leave aura._build().
 
-Feeds aura._build() a *complete* captured wttr.in j1 payload (the real code
-path, not a stripped one). The Midas set_summary() lesson: a fixture that skips
-the fields under test proves nothing — so this payload carries everything
-_build() reads (current_condition, nearest_area, weather + astronomy), and we
-assert both that the new astronomy block is surfaced intact AND that the rest
-of _build()'s output still works.
+wttr.in still sends a sun-and-moon block with every reading. Until 2026-11-14
+Aura passed it on as `astronomy`, and since M3 only the model read it, through
+get_weather: a second sunrise beside Helios's, and empty moon fields whenever
+Open-Meteo answered. The sun and moon now reach the model through
+get_sky_report alone (CONVENTIONS §12), so this pins the block's absence.
+
+The payload is a *complete* wttr.in j1 shape with the astronomy block in it
+(the Midas set_summary() lesson: a fixture without the field under test proves
+nothing), and the rest of _build()'s output is checked too, so the real path
+ran.
 
 No network: _build() takes the parsed dict directly.
     python -m unittest tests.test_aura_astronomy
@@ -19,6 +23,19 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tools import aura
+from tests._fixtures import ScratchSettings, load_real_open_meteo
+
+# The fallback names no place, so its reading takes Home's location: from a
+# scratch settings file, never this checkout's own.
+_settings = ScratchSettings()
+
+
+def setUpModule():
+    _settings.start()
+
+
+def tearDownModule():
+    _settings.stop()
 
 
 # A full j1-shaped payload — every key _build() actually touches.
@@ -60,20 +77,23 @@ class TestAuraAstronomy(unittest.TestCase):
     def setUp(self):
         self.out = aura._build(J1_PAYLOAD)
 
-    def test_astronomy_key_present(self):
-        self.assertIn("astronomy", self.out)
+    def test_astronomy_is_not_passed_on(self):
+        self.assertNotIn("astronomy", self.out)
 
-    def test_all_six_astronomy_fields_survive(self):
-        a = self.out["astronomy"]
-        self.assertEqual(a["sunrise"], "05:52 AM")
-        self.assertEqual(a["sunset"], "08:45 PM")
-        self.assertEqual(a["moonrise"], "02:31 AM")
-        self.assertEqual(a["moonset"], "03:18 PM")
-        self.assertEqual(a["moon_phase"], "Waning Crescent")
-        self.assertEqual(a["moon_illumination"], "32")
+    def test_no_sun_or_moon_value_leaks_anywhere(self):
+        # Not under another key either: none of wttr.in's six values appears.
+        text = repr(self.out)
+        for value in ("05:52 AM", "08:45 PM", "02:31 AM", "03:18 PM",
+                      "Waning Crescent"):
+            self.assertNotIn(value, text)
+
+    def test_the_fallback_carries_none_either(self):
+        out = aura._from_open_meteo(load_real_open_meteo())
+        self.assertNotIn("astronomy", out)
+        self.assertNotIn("sunrise", repr(out))
 
     def test_rest_of_build_still_works(self):
-        # Proves we exercised the real path, not just the astronomy branch.
+        # Proves we exercised the real path, not an early return.
         self.assertEqual(self.out["temp_f"], 68)
         self.assertEqual(self.out["high_f"], 75)
         self.assertEqual(self.out["low_f"], 54)
@@ -84,12 +104,6 @@ class TestAuraAstronomy(unittest.TestCase):
         self.assertEqual(self.out["low_c"], 12)
         self.assertEqual(self.out["location"], "Greenwich, England")
         self.assertEqual(self.out["description"], "Partly cloudy")
-
-    def test_astronomy_values_are_raw_strings(self):
-        # Aura fetches; it does not interpret. Parsing belongs downstream.
-        a = self.out["astronomy"]
-        for v in a.values():
-            self.assertIsInstance(v, str)
 
 
 if __name__ == "__main__":

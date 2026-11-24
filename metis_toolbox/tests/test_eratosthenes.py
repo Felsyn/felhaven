@@ -150,7 +150,7 @@ class TestWaypoints(unittest.TestCase):
 
 def _Resp(payload, status=200):
     """What hermes.get returns: a finished Reply."""
-    return hermes.Reply(status, {}, payload, "https://geocoding.example.invalid/")
+    return hermes.Reply(status, {}, payload)
 
 
 def _match_payload():
@@ -186,6 +186,44 @@ class TestResolveOrder(unittest.TestCase):
                         side_effect=AssertionError("waypoint hit the network")):
             result = eratosthenes.resolve("the elk site")
         self.assertEqual(result["source"], "waypoint")
+
+    def test_a_mistyped_coordinate_never_reaches_the_geocoder(self):
+        # Numbers and hemisphere letters that don't parse are a location
+        # typed wrong, not an address, and the geocoder only guesses at them:
+        # it echoed "138.8977 -77.0365" back as a place at 77°S (2026-11-18).
+        # A MagicMock, not an AssertionError side effect: _geocode catches
+        # every exception, so a raising mock would read as geocode_failed.
+        for text in ("38.8977N -77.0365",          # one hemisphere letter
+                     "38.8977",                    # a lone number
+                     "38.8977, -77.0365, 30",      # three numbers
+                     "38 90.0 N 077 02.2 W",       # minutes out of range
+                     "38 53.86 N 77 2.19 N",       # two letters on one axis
+                     "138.8977 -77.0365"):         # a latitude past the pole
+            with self.subTest(text=text):
+                with mock.patch("tools.eratosthenes.hermes.get") as get:
+                    result = eratosthenes.resolve(text)
+                get.assert_not_called()
+                self.assertEqual(result, {"error": "bad_coordinates"})
+
+    def test_a_waypoint_named_in_digits_still_resolves(self):
+        # The refusal sits after the waypoints, so a stand numbered 42 is
+        # still found.
+        with open(eratosthenes._WAYPOINTS_PATH, "w", encoding="utf-8") as fh:
+            json.dump([{"name": "42", "lat": 39.4, "lon": -80.3}], fh)
+        with mock.patch("tools.eratosthenes.hermes.get") as get:
+            result = eratosthenes.resolve("42")
+        get.assert_not_called()
+        self.assertEqual(result, {"lat": 39.4, "lon": -80.3, "label": "42",
+                                  "source": "waypoint"})
+
+    def test_a_word_anywhere_still_reaches_the_geocoder(self):
+        # A grid address with its city: numbers, hemisphere letters, and one
+        # word, which is what makes it an address.
+        with mock.patch("tools.eratosthenes.hermes.get",
+                        return_value=_Resp(_match_payload())) as get:
+            result = eratosthenes.resolve("100 N 200 E Provo 84601")
+        get.assert_called_once()
+        self.assertEqual(result["source"], "address")
 
     def test_address_falls_through_to_the_geocoder(self):
         with mock.patch("tools.eratosthenes.hermes.get",

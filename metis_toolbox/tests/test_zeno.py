@@ -18,11 +18,13 @@ Run from the package root:
 """
 
 import logging
+import math
 import os
 import re
 import sys
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -161,9 +163,13 @@ class TestArithmeticFailures(unittest.TestCase):
             with self.subTest(expr=expr):
                 self.assertEqual(zeno.handle(expr).get("error"), "math_domain_error")
 
-    def test_a_bad_argument_count_is_reported_as_the_exception_class(self):
-        out = zeno.handle("min()")
-        self.assertEqual(out.get("error"), "evaluation_failed: TypeError")
+    def test_an_unforeseen_failure_reports_the_class_and_logs_it(self):
+        # The never-raises net. A wrong argument count used to reach it, and is
+        # bad_arguments now (S31), so an invariant break stands in for it.
+        with mock.patch.object(zeno, "_compute", side_effect=RuntimeError("broken")), \
+                self.assertLogs("METIS.zeno", "ERROR"):
+            out = zeno.handle("1 + 2")
+        self.assertEqual(out.get("error"), "evaluation_failed: RuntimeError")
 
     def test_non_finite_results_display_rather_than_error(self):
         self.assertEqual(zeno.handle("inf + inf")["display"], "inf")
@@ -367,6 +373,86 @@ class TestErrorVocabulary(unittest.TestCase):
                 code = zeno.handle(expr)["error"]
                 self.assertRegex(code, _SLUG)
                 self.assertNotIn(" ", code.split(": ")[0])
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  The V0.03 walkthrough (S31, 2026-11-23)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestRoundsHiddenPowerIsBounded(unittest.TestCase):
+    """int.__round__(n) for n < 0 computes 10 ** -n, out of _guard_pow's
+    sight: round(5, -100000000) ran past 20 s (measured 2026-11-23)."""
+
+    def test_a_far_negative_ndigits_answers_zero_at_once(self):
+        # 10 ** 10,000,000 took the old code 7 s; the answer is 0 either way.
+        started = time.monotonic()
+        out = zeno.handle("round(5, -10000000)")
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(out.get("display"), "0")
+
+    def test_the_shortcut_never_changes_an_answer(self):
+        rounder = zeno._FUNCTIONS["round"]
+        numbers = [0, 1, 4, 5, 6, 9, 10, 14, 15, 49, 50, 51, 60, 95, 99, 100, 149,
+                   150, 250, 499, 500, 501, 999, 5000, 5001, 49999, 50000, 99999,
+                   10 ** 20, 5 * 10 ** 20, 10 ** 300 - 1, 6 * 10 ** 300]
+        for number in numbers + [-n for n in numbers]:
+            for ndigits in range(-1, -len(str(abs(number))) - 6, -1):
+                with self.subTest(number=number, ndigits=ndigits):
+                    self.assertEqual(rounder(number, ndigits), round(number, ndigits))
+
+
+class TestNoComplexResult(unittest.TestCase):
+    """A negative base to a fractional power is complex in Python. It reached
+    format_number as "evaluation_failed: TypeError", logged as an ERROR."""
+
+    def test_a_power_with_no_real_result_is_outside_the_domain(self):
+        for expr in ("(-8) ** (1/3)", "(-1) ** 0.5", "abs((-1) ** 0.5)"):
+            with self.subTest(expr=expr), self.assertNoLogs("METIS.zeno", "ERROR"):
+                self.assertEqual(zeno.handle(expr).get("error"), "math_domain_error")
+
+    def test_a_negative_base_to_a_whole_power_still_works(self):
+        self.assertEqual(zeno.handle("(-2) ** 3").get("display"), "-8")
+        self.assertEqual(zeno.handle("-8 ** (1/3)").get("display"), "-2")
+
+
+class TestWrongArgumentsNameTheFunction(unittest.TestCase):
+    """A whitelisted function given the wrong count or kind of arguments was
+    "evaluation_failed: TypeError", logged as an ERROR (measured 2026-11-23)."""
+
+    def test_each_names_its_function_and_logs_no_error(self):
+        for expr, name in (("sqrt()", "sqrt"), ("atan2(1)", "atan2"),
+                           ("min()", "min"), ("factorial(2.5)", "factorial"),
+                           ("gcd(1.5, 2)", "gcd"), ("round(1.5, 2.5)", "round")):
+            with self.subTest(expr=expr), self.assertNoLogs("METIS.zeno", "ERROR"):
+                self.assertEqual(zeno.handle(expr).get("error"), f"bad_arguments: {name}")
+
+
+class TestTheStepsHaveABudget(unittest.TestCase):
+    """Each step restates the whole expression, so a wide call grew
+    quadratically: max() of 100 factorials, 1,703 characters, returned 19.3 MB
+    in 1.2 s, all of it bound for the model (measured 2026-11-23)."""
+
+    _WIDE = "max(" + ", ".join(["factorial(1400)"] * 30) + ")"
+
+    def _budget(self):
+        return getattr(zeno, "_MAX_STEPS_CHARS", 4000)
+
+    def test_a_wide_call_stays_within_the_budget_and_keeps_its_answer(self):
+        out = zeno.handle(self._WIDE)
+        self.assertLessEqual(sum(map(len, out["steps"])), self._budget() + 1)
+        self.assertEqual(out["steps"][-1], "…")
+        self.assertEqual(out["result"], math.factorial(1400))
+
+    def test_past_the_cut_no_snapshot_is_built(self):
+        with mock.patch.object(zeno, "_snapshot", wraps=zeno._snapshot) as snap:
+            zeno.handle(self._WIDE)
+        self.assertLessEqual(snap.call_count, 3)
+
+    def test_an_ordinary_trace_is_whole(self):
+        self.assertEqual(zeno.handle("(2 + 3) * sin(pi / 2)")["steps"],
+                         ["(2 + 3) * sin(pi / 2)", "5 * sin(pi / 2)",
+                          "5 * sin(3.14159 / 2)", "5 * sin(1.5708)", "5 * 1", "5"])
 
 
 if __name__ == "__main__":

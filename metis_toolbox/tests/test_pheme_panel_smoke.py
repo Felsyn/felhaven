@@ -42,7 +42,7 @@ def _per_feed_error_slugs():
 
     Scoped to the _fetch_feed function on purpose: fetch() forwards its dicts
     to this panel verbatim, while handle()'s own errors (config_unreadable,
-    unknown_feed, ...) are Pythia-facing and deliberately unmapped here.
+    not_found, ...) are Pythia-facing and deliberately unmapped here.
     """
     with open(os.path.join(_APP_ROOT, "tools", "pheme.py"),
               encoding="utf-8") as fh:
@@ -80,11 +80,11 @@ class TestErrorTextCoversEveryCode(unittest.TestCase):
             "Pheme cannot emit")
 
     def test_detail_is_kept_and_the_slug_is_translated(self):
-        self.assertEqual(pheme_panel._error_text("http_error: 404"),
-                         "feed returned HTTP: 404")
+        self.assertEqual(pheme_panel._error_text("unavailable: HTTP 404"),
+                         "feed fetch failed: HTTP 404")
 
     def test_bare_slug_needs_no_detail(self):
-        self.assertEqual(pheme_panel._error_text("feed_timeout"),
+        self.assertEqual(pheme_panel._error_text("timeout"),
                          "feed timed out")
 
     def test_an_unmapped_code_is_surfaced_raw_not_swallowed(self):
@@ -134,10 +134,13 @@ class _PanelTestCase(unittest.TestCase):
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.sections_path = os.path.join(self.dir, "pheme_sections.json")
+        # _read_loaded: Pheme reads its file on first use; the seen-set below
+        # is emptied by hand instead, so no test reads one.
         for module, attr, value in (
                 (pheme_panel, "_SECTIONS_PATH", self.sections_path),
-                (pheme, "_READ_PATH", os.path.join(self.dir, "pheme_read.json"))):
-            p = mock.patch.object(module, attr, value)
+                (pheme, "_READ_PATH", os.path.join(self.dir, "pheme_read.json")),
+                (pheme, "_read_loaded", True)):
+            p = mock.patch.object(module, attr, value, create=True)
             p.start()
             self.addCleanup(p.stop)
         pheme._read_order.clear()
@@ -164,7 +167,7 @@ class _PanelTestCase(unittest.TestCase):
 
     def _sections(self):
         """One frame per feed section, in config order."""
-        return self.panel._fonts.inner.winfo_children()
+        return self.panel._fonts.body.winfo_children()
 
     def _section_header_texts(self, index):
         header = self._sections()[index].winfo_children()[0]
@@ -303,7 +306,7 @@ class TestPartialFailure(_PanelTestCase):
         payload = {fid: {"stories": [_story(title=fid,
                                             url=f"https://example.com/{fid}")]}
                    for fid in self.ids}
-        payload[self.ids[3]] = {"error": "feed_timeout"}
+        payload[self.ids[3]] = {"error": "timeout"}
         return {"feeds": payload}
 
     def test_one_dead_feed_leaves_the_rest_rendering(self):
@@ -324,16 +327,16 @@ class TestPartialFailure(_PanelTestCase):
         texts = self._section_header_texts(3)
         self.assertIn("⚠ feed timed out", texts)
         # The slug is mapped to human text, never rendered raw.
-        self.assertNotIn("feed_timeout", texts)
+        self.assertNotIn("timeout", texts)
 
     def test_every_feed_dead_renders_an_empty_river_with_the_full_count(self):
-        self.panel.update({"feeds": {fid: {"error": "network_error"}
+        self.panel.update({"feeds": {fid: {"error": "offline"}
                                      for fid in self.ids}})
         self.root.update_idletasks()
         self.assertEqual(self._river_titles(), [])
         self.assertEqual(self.panel._fail_lbl.cget("text"),
                          f" · ⚠ {len(self.ids)} failed")
-        (placeholder,) = self.panel._river.inner.winfo_children()
+        (placeholder,) = self.panel._river.body.winfo_children()
         self.assertEqual(placeholder.cget("text"), "no stories available")
 
     def test_a_feed_absent_from_the_payload_counts_as_failed(self):
@@ -515,6 +518,151 @@ class TestCopyAll(_PanelTestCase):
         self.root.update_idletasks()
         self.assertEqual(self.panel._visible_lines(), [])
         self.panel._copy_all()          # must not raise
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Virgil tooltips
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestTooltips(_PanelTestCase):
+
+    def _arrows(self, parent):
+        found, stack = [], [parent]
+        while stack:
+            w = stack.pop()
+            if isinstance(w, tk.Label) and w.cget("text") == "↗":
+                found.append(w)
+            stack.extend(w.winfo_children())
+        return found
+
+    def test_every_headline_arrow_carries_the_open_tip_on_both_surfaces(self):
+        from panels import virgil_tooltip
+        a, b = self.ids[0], self.ids[1]
+        self.panel.update(self._feeds_payload(**{
+            a: {"stories": [_story(title="one", url="https://example.com/1")]},
+            b: {"stories": [_story(title="no link", url="")]},
+        }))
+        self.root.update_idletasks()
+        shared = virgil_tooltip._shared(self.root)
+        tip = PhemePanel._ROW_TIPS["open"]
+        for surface in (self.panel._river, self.panel._fonts):
+            arrows = self._arrows(surface.body)
+            self.assertEqual(len(arrows), 2)
+            for arrow in arrows:
+                self.assertEqual(shared._tips.get(str(arrow)), tip)
+
+    def test_each_tab_carries_its_tip(self):
+        from panels import virgil_tooltip
+        self.assertEqual(sorted(PhemePanel._TAB_TIPS), sorted(self.panel._tabs))
+        shared = virgil_tooltip._shared(self.root)
+        for key, tip in PhemePanel._TAB_TIPS.items():
+            self.assertEqual(shared._tips.get(str(self.panel._tabs[key])), tip, key)
+
+    def test_a_redraw_forgets_the_rows_it_destroyed(self):
+        """Every tick rebuilds the rows. Each destroyed arrow must drop its
+        entry, or the tip table grows for the life of the app."""
+        from panels import virgil_tooltip
+        shared = virgil_tooltip._shared(self.root)
+        payload = self._feeds_payload(**{
+            self.ids[0]: {"stories": [_story(title="one", url="https://example.com/1")]}})
+        self.panel.update(payload)
+        self.root.update_idletasks()
+        held = len(shared._tips)
+        for _ in range(3):
+            # A changed payload, so the panel really does rebuild.
+            payload["feeds"][self.ids[0]]["stories"][0]["title"] += "!"
+            self.panel.update(payload)
+            self.root.update_idletasks()
+        self.assertEqual(len(shared._tips), held)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  The V0.03 walkthrough (S30, 2026-11-23)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestTheWheelOverTheStories(_PanelTestCase):
+    """The hand-rolled canvas dropped the wheel on <Leave>, which Tk sends as
+    the pointer moves onto a row, so the wheel scrolled only below the last
+    story. Pointer events need a mapped window, so the panel goes in a
+    Toplevel made invisible (the sidebar smoke test's way)."""
+
+    def _build(self):
+        self.top = tk.Toplevel(self.root)
+        self.top.attributes("-alpha", 0.0)
+        self.top.overrideredirect(True)
+        self.top.geometry("500x300+0+0")
+        self.addCleanup(self.top.destroy)
+        panel = PhemePanel(self.top)
+        panel.pack(fill="both", expand=True)
+        self.addCleanup(panel.destroy)
+        return panel
+
+    def test_the_wheel_stays_bound_while_the_pointer_is_over_a_story(self):
+        stories = [_story(title=f"story {n}", url=f"https://example.com/{n}",
+                          ts=f"2026-11-23T10:{n:02d}:00Z") for n in range(30)]
+        self.panel.update(self._feeds_payload(**{self.ids[0]: {"stories": stories}}))
+        self.top.update()
+        river = self.panel._river
+        self.addCleanup(river.unbind_all, "<MouseWheel>")
+        for widget in (river, river._canvas):       # the pointer enters the river
+            widget.event_generate("<Enter>")
+        self.top.update()
+        self.assertTrue(river.bind_all("<MouseWheel>"), "the wheel never bound")
+        rows = getattr(river, "body", None) or river.inner
+        first = rows.winfo_children()[0]
+        over = (first.winfo_rootx() + 5, first.winfo_rooty() + 5)
+        with mock.patch.object(river, "winfo_pointerxy", return_value=over):
+            river._canvas.event_generate("<Leave>", detail="NotifyInferior")
+            self.top.update()
+        self.assertTrue(river.bind_all("<MouseWheel>"), "the wheel dropped over a story")
+
+
+class TestAConfigRowItCantUse(_PanelTestCase):
+    """A row with no id stopped PhemePanel, and so Felhaven, from opening; a
+    row with no label raised at the first update (measured 2026-11-23)."""
+
+    def setUp(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        config = os.path.join(d, "pheme_rumormill.json")
+        with open(config, "w", encoding="utf-8") as f:
+            json.dump({"feeds": [
+                {"label": "NO ID", "url": "https://x.example/rss"},
+                {"id": "nolabel", "url": "https://n.example/rss"},
+                {"id": "good", "label": "GOOD", "url": "https://g.example/rss"},
+            ]}, f)
+        # Both modules: the panel read its own copy of the config before S30.
+        for module in (pheme, pheme_panel):
+            p = mock.patch.object(module, "_CONFIG_PATH", config, create=True)
+            p.start()
+            self.addCleanup(p.stop)
+        super().setUp()
+
+    def _build(self):
+        with self.assertLogs("METIS.pheme", "WARNING"):
+            try:
+                panel = PhemePanel(self.root)
+            except Exception as e:
+                self.fail(f"PhemePanel() raised {type(e).__name__}: {e}")
+        panel.pack()
+        self.addCleanup(panel.destroy)
+        return panel
+
+    def test_the_usable_rows_open_and_a_missing_label_reads_as_the_id(self):
+        self.panel.update(self._feeds_payload(nolabel={"stories": []},
+                                              good={"stories": []}))
+        names = [self._section_header_texts(i)[1] for i in range(len(self._sections()))]
+        self.assertEqual(names, ["nolabel", "GOOD"])
+
+
+class TestAFailedCollapseSaveIsLogged(_PanelTestCase):
+    def test_a_save_that_fails_is_logged_not_swallowed(self):
+        missing = os.path.join(self.dir, "no_such_folder", "pheme_sections.json")
+        with mock.patch.object(pheme_panel, "_SECTIONS_PATH", missing), \
+                self.assertLogs("METIS.pheme_panel", "WARNING") as logs:
+            self.panel._toggle(self.ids[0])
+        self.assertIn("open sections", logs.output[0])
+        self.assertFalse(os.path.exists(missing))
 
 
 if __name__ == "__main__":

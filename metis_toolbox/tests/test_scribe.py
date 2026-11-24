@@ -69,6 +69,54 @@ class TestLoadDefaults(ScribeBase):
             self.assertEqual(scribe.load_data(), {"tasks": [], "notes": ""})
 
 
+class TestLoadShape(ScribeBase):
+    """load_data hands back only what the panel can draw: before 2026-11-21 a
+    hand-edited file like these made ScribePanel raise while Felhaven built
+    it (tests.test_scribe_panel_smoke builds the panel from each)."""
+
+    BAD_FILES = (
+        {"tasks": None},
+        {"tasks": "buy milk"},
+        {"tasks": {"text": "a", "done": False}},
+        {"tasks": [1, "two", None]},
+        {"tasks": [{"done": False}]},
+        {"tasks": [{"text": 5, "done": False}]},
+        {"notes": None},
+        {"notes": ["a"]},
+    )
+
+    def _assert_drawable(self, data):
+        self.assertIsInstance(data["tasks"], list)
+        for task in data["tasks"]:
+            self.assertIsInstance(task, dict)
+            self.assertIsInstance(task.get("text"), str)
+            self.assertIsInstance(task.get("done"), bool)
+        self.assertIsInstance(data["notes"], str)
+
+    def test_every_bad_shape_loads_drawable(self):
+        for bad in self.BAD_FILES:
+            with self.subTest(file=bad):
+                self._write(bad)
+                with self.assertLogs("METIS.scribe", "WARNING"):
+                    self._assert_drawable(scribe.load_data())
+
+    def test_good_tasks_survive_beside_bad_ones(self):
+        self._write({"tasks": [{"text": "keep", "done": True}, 7,
+                               {"text": "also", "done": False, "due": "fri"}],
+                     "notes": "n", "extra": 1})
+        data = scribe.load_data()
+        self.assertEqual(data["tasks"], [{"text": "keep", "done": True},
+                                         {"text": "also", "done": False, "due": "fri"}])
+        self.assertEqual((data["notes"], data["extra"]), ("n", 1))
+
+    def test_a_done_that_isnt_true_reads_as_not_done(self):
+        # bool("false") is True; a hand-written "false" must not tick a task.
+        self._write({"tasks": [{"text": "a"}, {"text": "b", "done": "false"},
+                               {"text": "c", "done": 1}]})
+        self.assertEqual([t.get("done") for t in scribe.load_data()["tasks"]],
+                         [False, False, False])
+
+
 class TestSaveRoundTrip(ScribeBase):
     def test_save_then_load(self):
         data = {"tasks": [{"text": "milk", "done": False}], "notes": "buy soon"}
@@ -108,6 +156,16 @@ class TestSaveAtomicity(ScribeBase):
                 scribe.save_data({"tasks": [], "notes": "x"})
             except Exception as e:  # pragma: no cover - the assertion is the point
                 self.fail(f"save_data raised {e!r} — it must swallow and log")
+
+    def test_save_says_whether_it_saved(self):
+        """felhaven hands the answer to the SCRIBE tab, so a failed save shows
+        there (the owner's pick, 2026-11-21); it used to be only logged."""
+        self.assertIs(scribe.save_data({"tasks": [], "notes": "x"}), True)
+        for step in ("scribe.tempfile.mkstemp", "scribe.os.replace"):
+            with self.subTest(fails=step), \
+                    mock.patch(step, side_effect=OSError("disk full")), \
+                    self.assertLogs("METIS.scribe", "WARNING"):
+                self.assertIs(scribe.save_data({"tasks": [], "notes": "y"}), False)
 
 
 if __name__ == "__main__":

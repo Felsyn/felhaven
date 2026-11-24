@@ -1,18 +1,26 @@
 """
 Artemis panel — the Cartograph: terrain, water and roads around the fix.
 
+Job:         Draw the offline map of terrain, water and roads around you, and cache new areas.
+
 A full Card view (the Navigation rail group holds full panels, never tabs —
 CONVENTIONS §7). Kairos polls tools.artemis.fetch() every 600 s and feeds
 update(); the panel re-renders only when the fix's area or its cache
 changes, so the tick is cheap and update(None) keeps the last drawn state.
 
 Header status line, all derived locally (cache presence + last ingest
-outcome — no connectivity probe, per the house attempt-and-catch rule):
-    NOT CACHED            no manifest for the current fix's area
+outcome — no connectivity probe, per the house attempt-and-catch rule). It
+describes the area ON SCREEN, so while a search or a row's jump is showing,
+the two cache lines end in "· <place>":
+    NOT CACHED — …        no manifest for the area on screen
     CACHED <date>         manifest present; date from its "fetched" field,
-                          plus a note when terrain was skipped
+                          plus a note when terrain was skipped or kept
     INGESTING — <step>    transient, from the worker queue
-    INGEST FAILED — <..>  transient, slug mapped to calm text, red
+    INGEST FAILED — <..>  transient, slug mapped to calm text; red unless
+                          the ingest was cancelled
+    SEARCH — <..>         transient, a search that found no place; red
+                          unless the box was empty
+    RENAME FAILED, DELETE FAILED   transient, red, from the area list
 
 WORLD vs CHROME. Every canvas item carries one of two family tags, and that
 split is what makes the rest of this panel simple:
@@ -20,20 +28,26 @@ split is what makes the rest of this panel simple:
     world   terrain raster, water, roads, range rings, the fix crosshair —
             anchored to (cx, cy) from _view(), clipped by the porthole,
             and the only things a drag moves.
-    chrome  the mask, the porthole rim, bearing ticks, N/E/S/W, the compass
-            rose, the scale bar — anchored to the canvas and never moved.
+    chrome  the mask, the porthole rim, bearing ticks, N/E/S/W, the scale
+            bar, the terrain key — anchored to the canvas and never moved.
 
 The porthole is a fixed instrument you look THROUGH; the world moves under
 it. That split is also how the palette divides: the INSTRUMENT — range
 rings, ticks, the rim and its range label, the cardinals, the fix crosshair
 — draws in phosphor (C["text1"]), while the WORLD draws in the muted map
 hues. Brightness therefore tells you what kind of thing you are looking at,
-not just how important it is. (The compass rose and scale bar stay muted:
-they sit in their own corners and measure nothing on the chart itself.)
+not just how important it is. (The scale bar and the terrain key stay
+muted: they sit in their own corners and measure nothing on the chart
+itself.) The key, top-right, says what the three greens mean in feet:
+the raster bands by thirds of the area's OWN elevations (demeter's
+band_thresholds), so its numbers change from area to area, and a
+low-relief area, drawn in one shade, says so. There is no compass
+rose: the chart is always north-up and the rim already carries N/E/S/W, so
+a rose only repeated them and took the corner the CACHED AREAS list uses.
 
 Draw order, back to front: terrain → area water → linear water → roads →
-range rings → fix crosshair → mask → rim → ticks → cardinals → compass →
-scale bar. Rings and the crosshair sit UNDER the mask because they are
+range rings → fix crosshair → mask → rim → ticks → cardinals → scale bar →
+terrain key. Rings and the crosshair sit UNDER the mask because they are
 world-anchored — once panned they must be clipped by the glass rather than
 float past it — while the rim and ticks sit over it because they are the
 instrument.
@@ -54,6 +68,8 @@ only magnify: the cached area is a hard edge on how much world exists, and
 at 1x the whole ingest square is already visible. The porthole itself keeps
 the SAME pixel radius at every stop (_porthole_r), so zooming reads as
 looking closer through one instrument rather than the frame growing.
+The stop buttons and the mouse wheel over the chart both zoom; the wheel
+moves one stop per turn (_on_wheel says why).
 
 PANNING. Drag the chart at 2x or 4x and the `world` items move under the
 stationary porthole — one canvas.move() per event, never a raster rebuild,
@@ -90,7 +106,7 @@ arms the label with the download cost, a one-shot after() disarms it in 4 s,
 second click starts the ingest. Never a native messagebox. Never automatic —
 searching or moving the fix must not trigger a multi-megabyte download.
 
-CACHED LOCATIONS is an overlay pinned above the compass rose, listing every
+CACHED AREAS is an overlay pinned to the chart's lower left, listing every
 cached area with its range and bearing FROM THE FIX (which of them you are
 actually near is the useful reading, not which the view happens to show).
 Each row renames (✎), re-ingests (⟳) or recycles (✕) its area, and clicking
@@ -100,28 +116,59 @@ a canvas window is a canvas ITEM and _redraw() opens with delete("all"),
 which would destroy the overlay on every zoom, resize and area load.
 Both ⟳ and ✕ are two-click armed, and every handler captures the area_id
 rather than a row index, so a tick or a finished ingest re-rendering between
-the arming click and the confirming one cannot retarget the row.
+the arming click and the confirming one cannot retarget the row. The overlay
+starts folded at every launch. Open, it is as tall as its rows or as the
+map's room, whichever is less, and past that its rows
+scroll in a ScrollColumn (theme.py) with the standard PhosphorScroll lane.
+
+Upstream:    felhaven.py (builds the panel and registers it with Kairos's
+             "artemis" worker, which hands update() tools.artemis.fetch()'s
+             status every 600 s).
+Downstream:  tools/artemis.py (area status, manifests, the cached-area list,
+             geometry, the hit-test index, rename, delete and ingest),
+             tools/hecate.py, tools/poseidon.py and tools/demeter.py (each
+             layer's load; Demeter also the raster, the key's bands and the
+             elevation reading), tools/eratosthenes.py (GO TO), cerberus.py
+             (whether the vault is open, for CACHE AREA's cost), theme.py
+             (colours, fonts, Card, ScrollColumn), tools/virgil.py and
+             panels/virgil_tooltip.py (the tooltips).
+
+V0.03:       Walked through 2026-11-18 (the V0.03 walkthrough, CONVENTIONS
+             §3), its first audit (born 2026-08-09, Artemis M1). No network
+             on any render path (test_artemis_offline), colours from the
+             palette, every tip in _TIPS, every timer cancelled in destroy(),
+             and the ingest thread's only shared touch is its queue. A
+             mistyped coordinate now reads as one, and a refresh that kept
+             its terrain names every reason in words. Gone: rescale(), which
+             nothing ever called, and a scale-bar branch identical to its
+             twin. Words fixed: CACHED AREAS, the status lines, CACHE AREA's
+             click (bound once), 0.4545, the band-cut timing; the two entry
+             boxes stop repeating the theme's cursor.
 """
 
 import math
 import queue
 import threading
+import time
 import tkinter as tk
 from typing import Any, Optional
 
 import cerberus
-from theme import C, FONTS, Card
+from panels import virgil_tooltip
+from theme import C, FONTS, Card, ScrollColumn
 
 from tools import artemis
 from tools import demeter
 from tools import eratosthenes
 from tools import hecate
 from tools import poseidon
+from tools import virgil
 
 _DRAIN_MS = 150
 _CONFIRM_MS = 4000        # armed CACHE AREA disarms itself after this
 _RESIZE_MS = 120          # <Configure> debounce before a rescale+redraw
 _PAN_MS = 140             # pause during a drag before the raster is re-cropped
+_WHEEL_GAP_S = 0.15       # one zoom stop per wheel turn; notches inside this drop
 
 # How far a press may travel and still count as a click. Deliberately NOT
 # _HOVER_PX: that is how precisely a hand can POINT, this is how far one slips
@@ -137,6 +184,19 @@ _CLICK_PX = 4
 _HOVER_PX = 10
 
 _FEET_PER_M = 3.280839895
+
+# The CACHED AREAS overlay sits this far in from the canvas's left and bottom
+# edges; the corner is its own since the compass rose went. Open, the list
+# may grow up to _AREAS_TOP_GAP below the canvas's top edge; past that it
+# scrolls. Room, not a row count, is the limit.
+_AREAS_MARGIN = 10
+_AREAS_TOP_GAP = 10
+
+# The terrain key, top-right: its box sits _KEY_MARGIN in from the canvas
+# corner, with _KEY_PAD inside, one band per _KEY_ROW.
+_KEY_MARGIN = 10
+_KEY_PAD = 6
+_KEY_ROW = 16
 
 # Slug prefix (before any ": detail") -> calm human text.
 _ERROR_TEXT = {
@@ -157,6 +217,8 @@ _SEARCH_TEXT = {
     "no_results": "no match — try coordinates or a waypoint name",
     "geocode_failed": "address lookup unavailable — coordinates and waypoints "
                       "still work offline",
+    "bad_coordinates": "those numbers don't read as coordinates — try decimal "
+                       "degrees, or give both N/S and E/W",
 }
 
 # Why terrain is absent from an otherwise good area (manifest terrain_skipped).
@@ -171,9 +233,15 @@ _SKIPPED_TEXT = {
 
 # A refresh that could not fetch elevation keeps what the area already had
 # (manifest terrain_kept). The map is complete; only the terrain is older.
+# Any reason that skips terrain can keep it instead, so the keys match
+# _SKIPPED_TEXT's (the smoke test holds them in lockstep).
 _KEPT_TEXT = {
     demeter.ERR_VAULT_LOCKED: "terrain kept — vault was sealed",
     demeter.ERR_NO_KEY: "terrain kept — no OpenTopography key",
+    "download_failed": "terrain kept — elevation download failed",
+    "too_large": "terrain kept — the elevation download was far larger than expected",
+    "bad_grid": "terrain kept — elevation data was malformed",
+    "no_elevation": "terrain kept — no elevation coverage here",
 }
 
 # Road tier -> (theme colour key, stroke width).
@@ -192,11 +260,28 @@ _ROAD_CLASS = {1: "primary road", 2: "secondary road", 3: "local road",
 _WATER_CLASS = {1: "stream", 2: "ditch or drainage"}
 _AREA_CLASS = {1: "lake or pond", 2: "wetland"}
 
-_COMPASS_POINTS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
-
 
 class ArtemisPanel(Card):
     """Local chart around the Themis fix; ingest on explicit request only."""
+
+    # Hover tooltips (Virgil) for the zoom stops, HOME, the cache status line,
+    # CACHE AREA and the CACHED AREAS header, each a glossary entry
+    # (CONVENTIONS §7). Keys name the widgets in self.tip_targets; the zoom
+    # stops share one entry. Each tip rides a bindtag of its own, so a later
+    # rebind of a widget's click can't reach it. _ROW_TIPS names the glyphs
+    # each cached area's row builds; _build_area_row attaches those.
+    _TIPS = {
+        **{f"{stop}×": virgil.term("map_zoom") for stop in artemis.ZOOM_STOPS},
+        "home": virgil.term("map_home"),
+        "status": virgil.term("map_cache_status"),
+        "cache": virgil.term("cache_area"),
+        "areas": virgil.term("cached_areas"),
+    }
+    _ROW_TIPS = {
+        "rename": virgil.term("area_rename"),
+        "refresh": virgil.term("area_refresh"),
+        "delete": virgil.term("area_delete"),
+    }
 
     def __init__(self, parent: tk.Widget) -> None:
         super().__init__(parent, "Artemis — Cartograph", C["amber"])
@@ -213,6 +298,9 @@ class ArtemisPanel(Card):
         self._terrain_ppm: "bytes | None" = None       # cached GRID² source
         self._terrain_info: "dict[str, Any] | None" = None
         self._terrain_cells: Any = None                # array('h'), for hover
+        # The raster's own band cuts (metres), for the terrain key; None for
+        # low relief, where the raster is one mid band.
+        self._terrain_cuts: "tuple[int, int] | None" = None
         self._photo: "tk.PhotoImage | None" = None     # MUST stay referenced
         self._photo_key: "tuple[Any, ...] | None" = None
         self._skipped: "str | None" = None
@@ -228,13 +316,14 @@ class ArtemisPanel(Card):
         self._drag_from: "tuple[int, int, float, float] | None" = None
         self._drag_moved = False
         self._pan_after_id: Optional[str] = None
+        self._wheel_at = float("-inf")     # monotonic time the last wheel step ended
 
         # Several row glyphs can be armed at once, so the overlay needs the
         # SET shape (_after_once) alongside the panel's single-slot ids —
         # CONVENTIONS §6 documents both, and both are now in use here.
         self._pending_after: "set[str]" = set()
         self._areas_key: Any = None
-        self._areas_open = True
+        self._areas_open = False           # folded at every launch, by request
         self._renaming: "str | None" = None
 
         self._q: "queue.Queue[tuple[str, Any, int]]" = queue.Queue()
@@ -288,7 +377,7 @@ class ArtemisPanel(Card):
         self._search_var = tk.StringVar()
         entry = tk.Entry(search, textvariable=self._search_var,
                          font=FONTS["small"], bg=C["bar_bg"], fg=C["text1"],
-                         insertbackground=C["text1"], highlightthickness=1,
+                         highlightthickness=1,
                          highlightbackground=C["border"], bd=0)
         entry.pack(fill="x", expand=True, side="left")
         entry.bind("<Return>", lambda e: self._on_search())
@@ -298,6 +387,7 @@ class ArtemisPanel(Card):
                                  highlightbackground=C["border"])
         self._canvas.pack(fill="both", expand=True)
         self._canvas.bind("<Configure>", self._on_configure)
+        self._canvas.bind("<Configure>", lambda e: self._fit_areas(), add="+")
         # Bound ONCE on the canvas, never per feature. A press that does not
         # travel is still a click and still reads, so the chart works without
         # a pointing device; a press that travels pans instead.
@@ -305,14 +395,21 @@ class ArtemisPanel(Card):
         self._canvas.bind("<Button-1>", self._on_press)
         self._canvas.bind("<B1-Motion>", self._on_drag)
         self._canvas.bind("<ButtonRelease-1>", self._on_release)
+        # The wheel zooms. It reaches the canvas only while the pointer is
+        # over the chart itself: over the CACHED AREAS list it goes to the
+        # list's rows (and the ScrollColumn's own wheel), never here.
+        self._canvas.bind("<MouseWheel>", self._on_wheel)
 
-        # ── Cached Locations overlay ─────────────────────────────────────────
+        # ── Cached Areas overlay ─────────────────────────────────────────────
         # A child of the canvas positioned with place(), NOT canvas
         # .create_window(): a canvas window is a canvas ITEM, and _redraw()
         # opens with canvas.delete("all"), so the overlay would be destroyed on
         # every zoom, resize and area load. place() sits outside the item list
-        # entirely. rely=1.0 with a negative y pins it above the compass rose
-        # and tracks resizes without a <Configure> handler of its own.
+        # entirely. rely=1.0 with a negative y pins it to the lower-left corner
+        # and tracks resizes; only the open list's HEIGHT follows the canvas
+        # (_fit_areas). The rows sit in a ScrollColumn, so they scroll in a
+        # PhosphorScroll lane once they outgrow the room; the column is packed
+        # only while the fold is open.
         self._areas_box = tk.Frame(self._canvas, bg=C["card"],
                                    highlightthickness=1,
                                    highlightbackground=C["border"])
@@ -321,8 +418,9 @@ class ArtemisPanel(Card):
                                       padx=6, cursor="hand2")
         self._areas_header.pack(fill="x")
         self._areas_header.bind("<Button-1>", lambda e: self._toggle_areas())
-        self._areas_body = tk.Frame(self._areas_box, bg=C["card"])
-        self._areas_body.pack(fill="x")
+        self._areas_column = ScrollColumn(self._areas_box)
+        self._areas_body = self._areas_column.body
+        self._areas_body.bind("<Configure>", lambda e: self._fit_areas(), add="+")
 
         # ── Reading strip (sticky) ───────────────────────────────────────────
         self._reading = tk.Label(self.body, text="", font=FONTS["small"],
@@ -335,6 +433,16 @@ class ArtemisPanel(Card):
                       "not survey-grade",
                  font=FONTS["tiny"], fg=C["text3"], bg=C["card"],
                  anchor="w").pack(fill="x", pady=(2, 0))
+
+        self.tip_targets: dict[str, tk.Misc] = {
+            **{f"{stop}×": btn for stop, btn in self._zoom_btns.items()},
+            "home": self._home_btn,
+            "status": self._status_lbl,
+            "cache": self._cache_btn,
+            "areas": self._areas_header,
+        }
+        for key, tip in self._TIPS.items():
+            virgil_tooltip.attach(self.tip_targets[key], tip)
 
         self._refresh_controls()
 
@@ -410,6 +518,7 @@ class ArtemisPanel(Card):
         self._terrain_ppm = None
         self._terrain_info = None
         self._terrain_cells = None
+        self._terrain_cuts = None
         self._photo = None
         self._photo_key = None
         self._skipped = None
@@ -442,6 +551,10 @@ class ArtemisPanel(Card):
             grid = self._try(demeter.load, area)
             if grid is not None:
                 self._terrain_info, self._terrain_cells = grid
+                # The same cuts render_ppm coloured the raster with, so the
+                # key cannot disagree with the shades (0.06–0.08 s on a full
+                # 1024² grid, once per area load, measured 2026-11-18).
+                self._terrain_cuts = demeter.band_thresholds(self._terrain_cells)
         if self._layers:
             self._index = self._try(artemis.ensure_index, area, self._layers)
         if self._layers or self._terrain_ppm:
@@ -533,6 +646,21 @@ class ArtemisPanel(Card):
         self._clamp_pan()          # zooming out to 1x collapses the pan to 0
         self._refresh_zoom_buttons()
         self._redraw()
+
+    def _on_wheel(self, event: "tk.Event[Any]") -> None:
+        """Up zooms in a stop, down zooms out, nothing past either end, by
+        the same path as the stop buttons (_set_zoom keeps the centre and
+        clamps the pan). Each step rebuilds the raster (~0.2 s), so one
+        notch moves one stop, and notches within _WHEEL_GAP_S of a step's
+        END are dropped: stamping after the redraw also drops the notches
+        that queued up while it ran, so a quick spin can't skip 1x → 4x."""
+        if not event.delta or time.monotonic() - self._wheel_at < _WHEEL_GAP_S:
+            return
+        stops = artemis.ZOOM_STOPS
+        i = stops.index(self._zoom) + (1 if event.delta > 0 else -1)
+        if 0 <= i < len(stops):
+            self._set_zoom(stops[i])
+            self._wheel_at = time.monotonic()
 
     # ── Panning ─────────────────────────────────────────────────────────────
 
@@ -663,8 +791,8 @@ class ArtemisPanel(Card):
 
         self._draw_mask(w, h, px, py, r)
         self._draw_rim(px, py, r, scale)
-        self._draw_compass(h)
         self._draw_scale_bar(w, h, scale)
+        self._draw_terrain_key(w)
 
     def _placeholder_text(self) -> str:
         """"Nothing cached here" is a normal condition, not an error, so it
@@ -731,7 +859,7 @@ class ArtemisPanel(Card):
         zoom stop clamps to that same pixel radius, so the round frame never
         changes size — only the world inside it does. Since
         `scale == zoom * span / (2 * HALF_WIDTH_M)`, `scale / zoom` is exactly
-        the 1x scale, which makes this `0.4546 * span` at every stop. The
+        the 1x scale, which makes this `0.4545 * span` at every stop. The
         min() is written out rather than folded away because ZOOM_STOPS only
         magnifies today; a zoom-OUT stop must shrink the porthole to the ring,
         not overflow the canvas.
@@ -744,7 +872,7 @@ class ArtemisPanel(Card):
         corner wedges (see the module docstring for why not a keyhole).
 
         Takes the porthole rather than the scale, and never early-returns —
-        `_porthole_r` is always 0.4546 * span, hence always inside the canvas,
+        `_porthole_r` is always 0.4545 * span, hence always inside the canvas,
         so the old "nothing to hide when zoomed in" branch was unreachable.
         """
         bg = C["bg"]
@@ -829,26 +957,6 @@ class ArtemisPanel(Card):
                                font=FONTS["small_bold"] if deg == 0
                                else FONTS["tiny"], tags=("chrome", "ring"))
 
-    def _draw_compass(self, h: int) -> None:
-        """A small 16-point rose, bottom-left. Fixed size — it is chrome, not
-        part of the projection."""
-        canvas = self._canvas
-        cx, cy, r = 42.0, h - 42.0, 22.0
-        canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
-                           outline=C["map_compass"], tags=("chrome", "compass"))
-        for i in range(16):
-            a = math.radians(i * 22.5)
-            length = r * (0.55 if i % 4 == 0 else (0.75 if i % 2 == 0 else 0.86))
-            canvas.create_line(cx + length * math.sin(a), cy - length * math.cos(a),
-                               cx + r * math.sin(a), cy - r * math.cos(a),
-                               fill=C["map_compass"], tags=("chrome", "compass"))
-        canvas.create_polygon(cx, cy - r * 0.62, cx - 4, cy + 3, cx, cy,
-                              cx + 4, cy + 3, fill=C["map_compass"],
-                              outline="", tags=("chrome", "compass"))
-        canvas.create_text(cx, cy - r - 8, text=_COMPASS_POINTS[0],
-                           fill=C["map_compass"], font=FONTS["tiny"],
-                           tags=("chrome", "compass"))
-
     def _draw_scale_bar(self, w: int, h: int, scale: float) -> None:
         """Bottom-right, miles primary and metres secondary."""
         canvas = self._canvas
@@ -857,18 +965,60 @@ class ArtemisPanel(Card):
         length_px = miles * artemis.M_PER_MILE * scale
         x1, y = w - 18.0, h - 26.0
         x0 = x1 - length_px
-        canvas.create_line(x0, y, x1, y, fill=C["map_compass"], tags=("chrome", "scale"))
+        canvas.create_line(x0, y, x1, y, fill=C["map_legend"], tags=("chrome", "scale"))
         for x in (x0, x1):
-            canvas.create_line(x, y - 4, x, y + 4, fill=C["map_compass"],
+            canvas.create_line(x, y - 4, x, y + 4, fill=C["map_legend"],
                                tags=("chrome", "scale"))
-        label = f"{miles:g} mi" if miles >= 1 else f"{miles:g} mi"
-        canvas.create_text((x0 + x1) / 2.0, y - 10, text=label,
-                           fill=C["map_compass"], font=FONTS["tiny"],
+        canvas.create_text((x0 + x1) / 2.0, y - 10, text=f"{miles:g} mi",
+                           fill=C["map_legend"], font=FONTS["tiny"],
                            tags=("chrome", "scale"))
         canvas.create_text((x0 + x1) / 2.0, y + 11,
                            text=f"{int(round(miles * artemis.M_PER_MILE))} m",
                            fill=C["map_ring"], font=FONTS["tiny"],
                            tags=("chrome", "scale"))
+
+    def _terrain_key_rows(self) -> "list[tuple[str, str]]":
+        """(palette key, label) per band, high to low, in feet like the
+        reading strip. One mid row for low relief; none without a grid."""
+        if self._terrain_cells is None:
+            return []
+        if self._terrain_cuts is None:
+            return [("map_terrain_mid", "low relief")]
+        low, high = (int(round(m * _FEET_PER_M)) for m in self._terrain_cuts)
+        return [("map_terrain_hi", f"{high:,}+ ft"),
+                ("map_terrain_mid", f"{low:,}–{high:,} ft"),
+                ("map_terrain_lo", f"under {low:,} ft")]
+
+    def _draw_terrain_key(self, w: int) -> None:
+        """Top-right, what the three greens mean: render_ppm bands by thirds
+        of the area's own elevations, so the numbers change per area. Muted
+        like the scale bar, on a card box so it reads over the rim's corner."""
+        rows = self._terrain_key_rows()
+        if not rows:
+            return
+        canvas = self._canvas
+        right = w - _KEY_MARGIN - _KEY_PAD
+        y = _KEY_MARGIN + _KEY_PAD + _KEY_ROW // 2
+        texts = []
+        for _palette_key, label in rows:
+            texts.append(canvas.create_text(
+                right, y, text=label, anchor="e", fill=C["map_legend"],
+                font=FONTS["tiny"], tags=("chrome", "key")))
+            y += _KEY_ROW
+        left = min(canvas.bbox(t)[0] for t in texts)
+        for (palette_key, _label), text in zip(rows, texts):
+            cy = (canvas.bbox(text)[1] + canvas.bbox(text)[3]) / 2.0
+            # Edged: the valley shade is "barely above background" by design
+            # (palette.py), and unedged it vanished into the key's card.
+            canvas.create_rectangle(left - 15, cy - 5, left - 5, cy + 5,
+                                    fill=C[palette_key], outline=C["border"],
+                                    tags=("chrome", "key", "swatch"))
+        x0, y0, x1, y1 = canvas.bbox("key")
+        box = canvas.create_rectangle(x0 - _KEY_PAD, y0 - _KEY_PAD,
+                                      x1 + _KEY_PAD, y1 + _KEY_PAD,
+                                      fill=C["card"], outline=C["border"],
+                                      tags=("chrome", "key"))
+        canvas.tag_lower(box, texts[0])
 
     # ── Hit testing and the reading strip ───────────────────────────────────
 
@@ -926,7 +1076,7 @@ class ArtemisPanel(Card):
             name = feat["name"] or "unnamed watercourse"
         return f"{name}  ·  {klass}"
 
-    # ── Cached Locations overlay ────────────────────────────────────────────
+    # ── Cached Areas overlay ────────────────────────────────────────────────
 
     def _after_once(self, ms: int, fn: "Any") -> None:
         """A one-shot timer that removes its own id when it fires, so
@@ -941,10 +1091,28 @@ class ArtemisPanel(Card):
     def _toggle_areas(self) -> None:
         self._areas_open = not self._areas_open
         if self._areas_open:
-            self._areas_body.pack(fill="x")
+            self._areas_column.pack(fill="x")
         else:
-            self._areas_body.pack_forget()
+            self._areas_column.pack_forget()
         self._refresh_areas(force=True)
+
+    def _fit_areas(self) -> None:
+        """The open list is as tall as its rows, or as the map's room between
+        its corner margin and the top gap, whichever is less; past that it
+        scrolls (Themis's _fit, for a box placed on the map). The width is
+        set too: the box takes its size from requests, and a ScrollColumn
+        asks for 1 x 1."""
+        if self._destroyed or not self._areas_open:
+            return
+        want_w = self._areas_body.winfo_reqwidth()
+        want_h = self._areas_body.winfo_reqheight()
+        border = 2 * int(self._areas_box.cget("highlightthickness"))
+        room = (self._canvas_size()[1] - _AREAS_MARGIN - _AREAS_TOP_GAP
+                - self._areas_header.winfo_reqheight() - border)
+        # The 40 px floor is on the ROOM (a cramped map still shows a row or
+        # so), never on the rows: one short row must not get blank space.
+        height = min(want_h, max(40, room)) if room > 1 else want_h
+        self._areas_column.set_size(height=height, width=want_w)
 
     def _refresh_areas(self, force: bool = False) -> None:
         """Rebuild the overlay from the cache.
@@ -960,8 +1128,12 @@ class ArtemisPanel(Card):
             self._areas_box.place_forget()
             return
         rows = artemis.nearest_cached(status["lat"], status["lon"], limit=None)
+        # The area on screen gets the row marker, so a jump or ⌂ HOME must
+        # rebuild the list even though the cache itself did not change.
+        shown = (self._status["area_id"]
+                 if self._status is not None and self._status["cached"] else None)
         key = (round(float(status["lat"]), 3), round(float(status["lon"]), 3),
-               self._areas_open,
+               self._areas_open, shown,
                tuple((r["area_id"], r["label"], r["fetched"]) for r in rows))
         if not force and key == self._areas_key:
             return
@@ -974,12 +1146,17 @@ class ArtemisPanel(Card):
             return
         self._areas_header.config(
             text=f"{'▼' if self._areas_open else '▶'} CACHED AREAS ({len(rows)})")
-        self._areas_box.place(x=10, rely=1.0, y=-76, anchor="sw")
+        self._areas_box.place(x=_AREAS_MARGIN, rely=1.0, y=-_AREAS_MARGIN,
+                              anchor="sw")
         if self._areas_open:
             for row in rows:
-                self._build_area_row(row)
+                self._build_area_row(row, shown=row["area_id"] == shown)
+            # The new rows' requests exist only after geometry runs, and a
+            # rebuild that keeps the row count (a rename) fires no <Configure>.
+            self._areas_box.update_idletasks()
+            self._fit_areas()
 
-    def _build_area_row(self, row: dict[str, Any]) -> None:
+    def _build_area_row(self, row: dict[str, Any], shown: bool = False) -> None:
         area_id = str(row["area_id"])          # the KEY, never a row index: a
         centre = row["center"]                 # re-render between arming and
         label = str(row["label"])              # confirming must not retarget
@@ -989,11 +1166,13 @@ class ArtemisPanel(Card):
         top = tk.Frame(outer, bg=C["card"])
         top.pack(fill="x")
         # Glyphs pack right FIRST or they land in the wrong place.
-        for glyph_text in ("✕", "⟳", "✎"):
+        for glyph_text, tip_key in (("✕", "delete"), ("⟳", "refresh"),
+                                    ("✎", "rename")):
             glyph = tk.Label(top, text=glyph_text, font=FONTS["small"],
                              fg=C["text3"], bg=C["card"], padx=3,
                              cursor="hand2")
             glyph.pack(side="right")
+            virgil_tooltip.attach(glyph, self._ROW_TIPS[tip_key])
             glyph._armed = False                              # type: ignore[attr-defined]
             glyph._rest = glyph_text                          # type: ignore[attr-defined]
             glyph.bind("<Enter>", lambda e, g=glyph: self._glyph_hover(g, C["text1"]))
@@ -1009,21 +1188,55 @@ class ArtemisPanel(Card):
                 glyph.bind("<Button-1>",
                            lambda e, g=glyph, a=area_id: self._on_row_delete(g, a))
 
+        # One line per area: the range sits between the name and the glyphs,
+        # and the cache date moved to the reading strip on hover
+        # (_on_row_hover) — a Virgil tip is fixed glossary text, not a value.
+        tk.Label(top, text=self._range_text(row), font=FONTS["tiny"],
+                 fg=C["text3"], bg=C["card"], padx=6).pack(side="right")
+
+        # The area the chart is showing. A mark of its own, not an amber
+        # name: a name already turns amber under the pointer (§7).
+        if shown:
+            mark = tk.Label(top, text="●", font=FONTS["tiny"], fg=C["amber"],
+                            bg=C["card"])
+            mark.pack(side="left", padx=(0, 4))
+            top._shown_mark = mark                            # type: ignore[attr-defined]
+
         name = tk.Label(top, text=label, font=FONTS["small"], fg=C["text1"],
                         bg=C["card"], anchor="w", cursor="hand2")
         name.pack(side="left", fill="x", expand=True)
         name.bind("<Button-1>",
                   lambda e, c=centre, l=label: self._on_area_click(c, l))
-        name.bind("<Enter>", lambda e: name.config(fg=C["amber"]))
+        name.bind("<Enter>", lambda e, n=name, r=row: self._on_row_hover(n, r))
         name.bind("<Leave>", lambda e: name.config(fg=C["text1"]))
         top._name_label = name                                # type: ignore[attr-defined]
-
-        tk.Label(outer,
-                 text=f"{float(row['distance_mi']):.1f} mi  "
-                      f"{int(row['bearing']):03d}°  ·  {str(row['fetched'])[:10]}",
-                 font=FONTS["tiny"], fg=C["text3"], bg=C["card"],
-                 anchor="w").pack(fill="x")
         tk.Frame(self._areas_body, bg=C["border"], height=1).pack(fill="x")
+
+    @staticmethod
+    def _is_here(row: dict[str, Any]) -> bool:
+        """Under 0.05 mi, exactly when the range would read "0.0 mi", the
+        bearing is rounding noise ("000°"), so the row says where it is."""
+        return float(row["distance_mi"]) < 0.05
+
+    @classmethod
+    def _range_text(cls, row: dict[str, Any]) -> str:
+        """Range and bearing from the fix, as a row shows them."""
+        if cls._is_here(row):
+            return "here"
+        return (f"{float(row['distance_mi']):.1f} mi  "
+                f"{int(row['bearing']):03d}°")
+
+    def _on_row_hover(self, name: tk.Label, row: dict[str, Any]) -> None:
+        """Light the name (§7) and put the row's details in the reading strip,
+        which keeps them, like the chart's own readings (sticky)."""
+        name.config(fg=C["amber"])
+        where = ("here" if self._is_here(row)
+                 else f"{self._range_text(row)} from fix")
+        parts = [str(row["label"]), where]
+        fetched = str(row.get("fetched") or "")[:10]
+        if fetched:
+            parts.append(f"cached {fetched}")
+        self._reading.config(text="  ·  ".join(parts))
 
     def _on_row_delete(self, glyph: tk.Label, area_id: str) -> None:
         self._arm_glyph(glyph, "delete?", lambda: self._delete_area(area_id))
@@ -1076,8 +1289,7 @@ class ArtemisPanel(Card):
         self._renaming = area_id
         var = tk.StringVar(value=current)
         entry = tk.Entry(top, textvariable=var, font=FONTS["small"],
-                         bg=C["bar_bg"], fg=C["text1"],
-                         insertbackground=C["text1"], highlightthickness=1,
+                         bg=C["bar_bg"], fg=C["text1"], highlightthickness=1,
                          highlightbackground=C["border"], bd=0, width=16)
         name.pack_forget()
         entry.pack(side="left", fill="x", expand=True)
@@ -1286,10 +1498,6 @@ class ArtemisPanel(Card):
                                    cursor="hand2")
 
     # ── Housekeeping ────────────────────────────────────────────────────────
-
-    def rescale(self, scale: float) -> None:
-        """No fixed-width columns — fonts rescale globally and the canvas is
-        fully elastic. Kept so felhaven._apply_scale has somewhere to land."""
 
     def destroy(self) -> None:
         """Cancel pending after() callbacks so nothing fires into a dead

@@ -7,7 +7,7 @@ Job:         Evaluate Python arithmetic expressions safely, step by step.
              Named for Zeno of Elea (the paradoxes-of-infinity philosopher),
              not Zeno of Citium the Stoic.
 
-Contract:    Exposes TOOL_DEFINITION, handle(), and format_number().
+Contract:    Exposes TOOL_DEFINITION, TOOL_META, handle(), and format_number().
              handle(expression, ans=None) returns a dict and never raises — a
              brain tool that throws crashes Pythia's dispatcher (§2).
              No fetch() — Zeno is request-driven, not polled.
@@ -25,10 +25,14 @@ Errors:      Failure is {"expression", "error", "steps"} — the steps taken
                unknown_function: X       a call outside _FUNCTIONS
                unsupported_operation: X  a node type or operator off the
                                          whitelist — X is what was rejected
+               bad_arguments: X          whitelisted function X was given the
+                                         wrong count or kind of arguments
+                                         (sqrt(), atan2(1), factorial(2.5))
                division_by_zero
                result_too_large          a magnitude guard, or _too_large()
                math_domain_error         a whitelisted function refused its
-                                         argument (sqrt(-1), log(0))
+                                         argument (sqrt(-1), log(0)), or **
+                                         had no real result ((-8) ** (1/3))
                evaluation_stalled        _MAX_REDUCTIONS exhausted
                evaluation_failed: X      unforeseen; X is the exception CLASS
                                          name, never its message (§2)
@@ -45,16 +49,42 @@ Semantics:   Operands are reduced eagerly, innermost-first, so the step readout
              hanging, and _too_large() rejects any result too big to render as
              a string (CPython caps int->str at ~4300 digits). Both surface a
              clean "result too large" rather than hanging or an opaque error.
+             round() hides a power of its own, bounded in _round().
+
+             The step readout has a budget, _MAX_STEPS_CHARS: past it one "…"
+             ends the steps, and later ones aren't built. Each step restates
+             the whole expression, so a wide call grew quadratically:
+             max() of 100 factorials, 1,703 characters, returned 19.3 MB in
+             1.2 s, all of it bound for the model (measured 2026-11-23).
+             `result` and `display` always carry the answer.
 
 Upstream:    pythia.py (registration + dispatch)
-Downstream:  panels/zeno_panel.py (display surface)
+Downstream:  panels/zeno_panel.py (display surface), tools/eudoxus.py
+             (format_number)
 
 Requires:    stdlib only: ast, sys, math, logging, typing
 
-V0.02:       Audited 2026-07-23 — error identifiers normalized to §2 slugs and
+2026-07-23:  walkthrough audit — error identifiers normalized to §2 slugs and
              routed through private exceptions so each one is a literal at the
              dict site; the AST whitelist put under test for the first time;
              format_number promoted to a public seam.
+
+2026-11-16:  the Pythia tool audit (CONVENTIONS §12). The description opens
+             with what it does and says when in one sentence (§3); what an
+             expression may contain moved onto `expression`. The gate coerces
+             a numeric-string `ans` (T3, the audit's H4). TOOL_META says math
+             / local / changes nothing. Its slugs name arithmetic failures,
+             which T9 leaves module-specific.
+
+V0.03:       Walked through 2026-11-23 (the V0.03 walkthrough, S31; born
+             2026-06-10). The sandbox was read for every way a whitelisted
+             call can run long or return a lot. round(5, -100000000) ran past
+             20 s (int.__round__ computes 10 ** -ndigits), and the steps had
+             no budget (19.3 MB from a 1,703-character expression); both are
+             bounded now. A negative base to a fractional power is
+             math_domain_error and a call with the wrong arguments is
+             bad_arguments; both were evaluation_failed: TypeError, logged as
+             an ERROR. Contract, Errors, Semantics and Downstream caught up.
 """
 
 import ast
@@ -109,6 +139,12 @@ class _Stalled(_ZenoError):
     """The reducer ran out of steps, or stopped making progress."""
 
 
+class _BadArguments(_ZenoError):
+    """A whitelisted function given arguments it can't take: sqrt(),
+    atan2(1), factorial(2.5). Python says so with a TypeError, which
+    reached handle() as "evaluation_failed: TypeError" and an ERROR log."""
+
+
 # ── Whitelists ────────────────────────────────────────────────────────────────
 
 _CONSTANTS = {
@@ -127,6 +163,21 @@ def _sum_args(*args: Any) -> Any:
     return sum(args)
 
 
+def _round(number: Any, ndigits: Any = None) -> Any:
+    """round(), with its hidden power bounded.
+
+    For an int and a negative ndigits, int.__round__ computes 10 ** -ndigits,
+    out of _guard_pow's sight: round(5, -100000000) ran past 20 s (measured
+    2026-11-23). Once 10 ** -ndigits is more than ten times the number, the
+    answer is exactly 0, so it is returned without that power. A number has
+    at most bit_length // 3 + 1 digits, hence the bound.
+    """
+    if (isinstance(number, int) and isinstance(ndigits, int)
+            and ndigits < -(number.bit_length() // 3 + 2)):
+        return 0
+    return round(number, ndigits)
+
+
 # `pow` is intentionally omitted — `**` covers it, and math.pow always returns
 # a float (pow(2, 3) -> 8.0), which would be inconsistent with the `**` operator.
 _FUNCTIONS: dict[str, Callable[..., Any]] = {
@@ -139,7 +190,7 @@ _FUNCTIONS: dict[str, Callable[..., Any]] = {
     "sqrt":    math.sqrt,  "floor":   math.floor, "ceil":    math.ceil,
     "factorial": math.factorial, "gcd": math.gcd,
     "degrees": math.degrees, "radians": math.radians,
-    "abs":     abs, "round": round, "min": min, "max": max, "sum": _sum_args,
+    "abs":     abs, "round": _round, "min": min, "max": max, "sum": _sum_args,
 }
 
 # ── Magnitude limits ──────────────────────────────────────────────────────────
@@ -167,6 +218,12 @@ _MAX_FACTORIAL     = 10000        # reject factorial(n) when n exceeds this
 # large is pathological rather than slow. Reaching it is "evaluation_stalled",
 # never a partial answer presented as a whole one.
 _MAX_REDUCTIONS    = 500
+
+# The step readout's budget in characters, fetch_page's 4,000. An ordinary
+# trace is far under it; one step holding the largest number _too_large()
+# allows (~3,880 digits) still fits. Past it, _STEPS_CUT ends the readout.
+_MAX_STEPS_CHARS   = 4000
+_STEPS_CUT         = "…"
 
 
 def _guard_pow(base: Any, exponent: Any) -> None:
@@ -208,8 +265,8 @@ def _too_large(v: Any) -> bool:
 # ── Number formatting ─────────────────────────────────────────────────────────
 # Public (the one non-underscore name outside the §3 API block): zeno_panel's
 # ANS readout formats a stored result and has to agree with the step readout
-# character for character. Two copies of these rules would drift — eudoxus.py
-# already keeps one, marked "kept in sync with tools/zeno.py".
+# character for character, and eudoxus.py formats its results with it. Two
+# copies of these rules would drift (Eudoxus kept one until 2026-07-23).
 
 def format_number(v: Any) -> str:
     if isinstance(v, bool):
@@ -432,6 +489,19 @@ def _snapshot(tree: ast.Expression) -> str:
     return _unparse(tree.body)
 
 
+def _record(steps: list[str], tree: ast.Expression) -> None:
+    """Add the tree's snapshot to `steps`, within _MAX_STEPS_CHARS. The step
+    that would pass the budget becomes _STEPS_CUT, and once it is there no
+    snapshot is built at all, so a huge trace costs no unparsing either."""
+    if steps and steps[-1] == _STEPS_CUT:
+        return
+    line = _snapshot(tree)
+    if sum(map(len, steps)) + len(line) > _MAX_STEPS_CHARS:
+        steps.append(_STEPS_CUT)
+    else:
+        steps.append(line)
+
+
 def _all_const_binop(node: ast.AST) -> bool:
     """True if BinOp/UnaryOp/Compare/BoolOp has only Constant direct children."""
     if isinstance(node, ast.BinOp):
@@ -472,7 +542,13 @@ def _compute(node: ast.AST) -> Any:
         if isinstance(op, ast.Mod):      return l % r
         if isinstance(op, ast.Pow):
             _guard_pow(l, r)
-            return l ** r
+            power = l ** r
+            if isinstance(power, complex):
+                # A negative base to a fractional power: (-8) ** (1/3) is
+                # complex in Python, a number no step can show. math.pow
+                # refuses the same with ValueError -> "math_domain_error".
+                raise ValueError("no real result")
+            return power
 
     if isinstance(node, ast.UnaryOp):
         v = _const_value(node.operand)
@@ -509,13 +585,19 @@ def _compute(node: ast.AST) -> Any:
             return r
 
     if isinstance(node, ast.Call):
-        fn = _FUNCTIONS[cast(ast.Name, node.func).id]
+        name = cast(ast.Name, node.func).id
+        fn = _FUNCTIONS[name]
         args = [_const_value(a) for a in node.args]
         # factorial grows super-exponentially and won't raise on huge ints —
         # bound it like ** above. OverflowError -> _reduce -> "result too large".
-        if cast(ast.Name, node.func).id == "factorial" and args and args[0] > _MAX_FACTORIAL:
+        if name == "factorial" and args and args[0] > _MAX_FACTORIAL:
             raise OverflowError("factorial argument too large")
-        return fn(*args)
+        try:
+            return fn(*args)
+        except TypeError:
+            # The wrong count or kind of argument; the operands are all
+            # numbers by now, so a TypeError here can only mean that.
+            raise _BadArguments(name) from None
 
     # Unreachable: _all_const_binop vetted this node and _validate vetted its
     # operator. RuntimeError rather than ValueError so an invariant break is
@@ -586,7 +668,8 @@ def _reduce(tree: ast.Expression, ans_val: float | None, steps: list[str]) -> An
     """
     Run the iterative reduction loop and return the final value.
 
-    Appends to steps as it goes; tree is mutated in place via NodeTransformer.
+    Records steps as it goes (_record, within the budget); tree is mutated in
+    place via NodeTransformer.
     Failures propagate as exceptions — ZeroDivisionError / OverflowError /
     ValueError straight from the arithmetic, _ZenoError from Zeno's own checks
     — and handle() turns each into its §2 identifier. Whatever steps were taken
@@ -604,7 +687,7 @@ def _reduce(tree: ast.Expression, ans_val: float | None, steps: list[str]) -> An
             new_node = ast.Constant(value=_lookup(body.id, ans_val))
             ast.copy_location(new_node, body)
             tree.body = new_node
-            steps.append(_snapshot(tree))
+            _record(steps, tree)
             return new_node.value
 
         # Try to find and reduce an all-constant node
@@ -620,7 +703,7 @@ def _reduce(tree: ast.Expression, ans_val: float | None, steps: list[str]) -> An
             new_node = ast.Constant(value=val)
             ast.copy_location(new_node, target)
             tree.body = _Replacer(target, new_node).visit(tree.body)
-            steps.append(_snapshot(tree))
+            _record(steps, tree)
             continue
 
         # Try to substitute a Name
@@ -629,7 +712,7 @@ def _reduce(tree: ast.Expression, ans_val: float | None, steps: list[str]) -> An
             new_node = ast.Constant(value=_lookup(name_node.id, ans_val))
             ast.copy_location(new_node, name_node)
             tree.body = _Replacer(name_node, new_node).visit(tree.body)
-            steps.append(_snapshot(tree))
+            _record(steps, tree)
             continue
 
         raise _Stalled("no reducible node")
@@ -644,20 +727,24 @@ TOOL_DEFINITION = {
     "function": {
         "name": "calculate",
         "description": (
-            "Evaluate an arithmetic expression and return the result plus the "
+            "Evaluates an arithmetic expression and returns the result plus the "
             "reduction steps that produced it. Call whenever the user asks for a "
             "calculation, or when a number has to be worked out from values a "
-            "tool returned — do not do the arithmetic yourself. "
-            "Supports +, -, *, /, //, %, ** and math functions (sin, cos, sqrt, "
-            "log, etc.), the constants pi, e, tau, inf, and 'ans' for the "
-            "previous result."
+            "tool returned — do not do the arithmetic yourself."
         ),
+        # What the expression may contain is the parameter's to say (CONVENTIONS
+        # §3, "Description grammar"): the description above is routing text.
         "parameters": {
             "type": "object",
             "properties": {
                 "expression": {
                     "type": "string",
-                    "description": "The arithmetic expression to evaluate.",
+                    "description": (
+                        "The arithmetic expression to evaluate: +, -, *, /, //, "
+                        "%, ** and math functions (sin, cos, sqrt, log, etc.), "
+                        "the constants pi, e, tau, inf, and 'ans' for the "
+                        "previous result."
+                    ),
                 },
                 "ans": {
                     "type": "number",
@@ -669,15 +756,26 @@ TOOL_DEFINITION = {
     },
 }
 
+# What the code reads about each tool here; the model never sees it
+# (CONVENTIONS §8, "TOOL_META"). network: none = local only, cached = a poll
+# or TTL cache, live = may reach the network on every call. mutates = it
+# changes state outside the turn.
+TOOL_META: dict[str, dict[str, Any]] = {
+    "calculate": {"domain": "math", "network": "none", "mutates": False},
+}
+
 
 def handle(expression: str, ans: float | None = None) -> dict[str, Any]:
     """
     Evaluate expression and return a result dict. Never raises.
 
     Success:
-        {"expression": ..., "result": float, "display": str, "steps": [...]}
+        {"expression": ..., "result": int | float | bool, "display": str,
+         "steps": [...]}
     Failure:
         {"expression": ..., "error": str, "steps": [...]}
+
+    `steps` stays within _MAX_STEPS_CHARS; a trace cut short ends in "…".
 
     Every error identifier in the module is a literal in this function — see
     the "How failure travels" note at the top for why they are assembled here
@@ -700,7 +798,7 @@ def handle(expression: str, ans: float | None = None) -> dict[str, Any]:
 
         try:
             _validate(tree)
-            steps.append(_snapshot(tree))        # initial snapshot
+            _record(steps, tree)                 # initial snapshot
             result_val = _reduce(tree, ans, steps)
         except _UnknownName as exc:
             return {"expression": expression, "error": f"unknown_name: {exc.detail}",
@@ -710,6 +808,9 @@ def handle(expression: str, ans: float | None = None) -> dict[str, Any]:
                     "steps": steps}
         except _Unsupported as exc:
             return {"expression": expression, "error": f"unsupported_operation: {exc.detail}",
+                    "steps": steps}
+        except _BadArguments as exc:
+            return {"expression": expression, "error": f"bad_arguments: {exc.detail}",
                     "steps": steps}
         except _Stalled:
             return {"expression": expression, "error": "evaluation_stalled", "steps": steps}
@@ -722,7 +823,8 @@ def handle(expression: str, ans: float | None = None) -> dict[str, Any]:
             return {"expression": expression, "error": "result_too_large", "steps": steps}
         except ValueError:
             # A whitelisted math function refusing its argument: sqrt(-1),
-            # log(0), factorial(-1). The exception's own message is discarded
+            # log(0), factorial(-1); or ** with no real result. The
+            # exception's own message is discarded
             # rather than forwarded — §2 bans raw exception text outright.
             return {"expression": expression, "error": "math_domain_error", "steps": steps}
 

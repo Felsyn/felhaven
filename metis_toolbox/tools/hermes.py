@@ -15,9 +15,15 @@ Contract:    Plain functions, not a brain tool:
                  did; a non-2xx status is a Reply, not an error, until the
                  caller asks reply.raise_for_status() (the requests shape the
                  readers already used).
-               • within(seconds, timeout), read_bounded(resp, cap),
-                 bounded_dial(dial), TLS_CONTEXT: the same bounds for a
-                 caller with its own opener (Callimachus's address guard).
+               • post(url, *, json, cap, timeout, ...) -> Reply. One POST of
+                 a JSON body, read back under the same cap and deadline. It
+                 never follows a redirect: a POST that moves is a 3xx Reply.
+                 For local APIs that answer a question by POST (Ollama's
+                 /api/show); it writes nothing here.
+               • within(seconds, timeout), deadline_for(cap, timeout),
+                 read_bounded(resp, cap), bounded_dial(dial), TLS_CONTEXT:
+                 the same bounds for a caller with its own opener
+                 (Callimachus's address guard).
              Errors, one vocabulary, and no message ever carries the URL (a
              query can hold a key):
                NetError ─┬─ Offline          no connection, or it dropped
@@ -64,13 +70,24 @@ Logging:     One WARNING (host only) when a cap or a deadline cuts a request
              short. Those are the events worth seeing in Emanon; every other
              failure is the caller's to log, with its own slug.
 
-Upstream:    every runtime network reader: aura, pheme, midas, aether,
-             eratosthenes, demeter, artemis (for hecate and poseidon), and
-             callimachus through its own opener.
+Upstream:    every runtime network reader: aura, pheme, midas, aether, talos,
+             eratosthenes, demeter, artemis (for hecate and poseidon), iris,
+             eos, aegis (`record` only), and callimachus through its own
+             opener.
 Downstream:  none. Stdlib only.
 
-Requires:    stdlib only — contextlib, http.client, json, logging, socket,
-             ssl, threading, time, urllib.
+Requires:    stdlib only — collections.abc, contextlib, dataclasses,
+             http.client, json, logging, socket, ssl, threading, time,
+             urllib.
+
+V0.03:       Walked through 2026-11-17 (the V0.03 walkthrough, CONVENTIONS
+             §3); its first marker. The bounds, the policy and the error
+             tree match the code, and every caller's except-arms match the
+             classes. Upstream gained iris, eos and aegis, and the Contract
+             deadline_for, which Callimachus calls. Reply lost its `url`
+             field: no caller read it, and it could hold a key. First tests
+             for a failed TLS handshake, a malformed status line and an
+             unknown charset.
 """
 
 import contextlib
@@ -89,6 +106,8 @@ from dataclasses import dataclass
 from typing import Any
 
 log = logging.getLogger("METIS.hermes")
+
+_json = json          # post()'s `json=` keyword (the requests spelling) shadows the module
 
 _MAX_REDIRECTS = 5
 _SLOWEST_BYTES_PER_S = 100_000   # the slowest link the default deadline waits for
@@ -145,7 +164,7 @@ class Refused(NetError):
 
 # ── The deadline, per thread ──────────────────────────────────────────────────
 # Each request runs entirely in its caller's thread, so the deadline is kept
-# per thread: Pheme's pool fetches seven feeds at once, each against its own.
+# per thread: Pheme's pool fetches its feeds at once, each against its own.
 
 _local = threading.local()
 
@@ -427,12 +446,13 @@ def read_bounded(resp: Any, cap: int) -> bytes:
 
 @dataclass(frozen=True)
 class Reply:
-    """A finished response: the subset of requests.Response the readers use."""
+    """A finished response: the subset of requests.Response the readers use.
+    No URL: a query can carry a key, and an object that never holds it can't
+    leak it."""
 
     status_code: int
     headers: Any            # http.client.HTTPMessage: case-insensitive .get()
     content: bytes
-    url: str                # the final URL; may carry a key, so never log it
 
     @property
     def text(self) -> str:
@@ -504,15 +524,47 @@ def get(url: str, *, cap: int, timeout: float, deadline: "float | None" = None,
     """One bounded GET. See the module docstring for the bounds and the
     errors. `deadline` defaults to deadline_for(cap, timeout)."""
     full = _requote(_with_params(url, params))
-    parts = urllib.parse.urlsplit(full)
-    scheme = parts.scheme.lower()
-    if scheme != "https" and not (allow_http and scheme == "http"):
-        raise Refused(f"the {scheme or 'missing'} scheme is not allowed here")
-    host = parts.hostname or "?"
+    host = _allowed_host(full, allow_http)
     request = urllib.request.Request(
         full, headers={"User-Agent": _USER_AGENT, **(headers or {}),
                        "Accept-Encoding": "identity"})
     opener = _FOLLOW if follow_redirects else _NO_FOLLOW
+    return _send(opener, request, host, cap, timeout, deadline)
+
+
+def post(url: str, *, json: Any, cap: int, timeout: float,
+         deadline: "float | None" = None,
+         headers: "Mapping[str, str] | None" = None,
+         allow_http: bool = False) -> Reply:
+    """One bounded POST of `json` (serialized here). The reply is read under
+    the same cap and deadline as get(), and a redirect is never followed: a
+    POST that moves comes back as its 3xx Reply. `deadline` defaults to
+    deadline_for(cap, timeout)."""
+    full = _requote(url)
+    host = _allowed_host(full, allow_http)
+    body = _json.dumps(json).encode("utf-8")
+    request = urllib.request.Request(
+        full, data=body, method="POST",
+        headers={"User-Agent": _USER_AGENT, **(headers or {}),
+                 "Content-Type": "application/json",
+                 "Accept-Encoding": "identity"})
+    return _send(_NO_FOLLOW, request, host, cap, timeout, deadline)
+
+
+def _allowed_host(full: str, allow_http: bool) -> str:
+    """The URL's host, once its scheme passes the policy (https, or http with
+    allow_http). Raises Refused before any handler runs."""
+    parts = urllib.parse.urlsplit(full)
+    scheme = parts.scheme.lower()
+    if scheme != "https" and not (allow_http and scheme == "http"):
+        raise Refused(f"the {scheme or 'missing'} scheme is not allowed here")
+    return parts.hostname or "?"
+
+
+def _send(opener: urllib.request.OpenerDirector, request: urllib.request.Request,
+          host: str, cap: int, timeout: float, deadline: "float | None") -> Reply:
+    """Open `request` and read its reply inside the deadline and under the cap;
+    every failure leaves as one of this module's errors."""
     seconds = deadline if deadline is not None else deadline_for(cap, timeout)
     try:
         with within(seconds, timeout):
@@ -523,7 +575,7 @@ def get(url: str, *, cap: int, timeout: float, deadline: "float | None" = None,
             try:
                 body = read_bounded(resp, cap)
                 status = int(getattr(resp, "status", None) or resp.code)
-                return Reply(status, resp.headers, body, str(resp.geturl()))
+                return Reply(status, resp.headers, body)
             finally:
                 resp.close()
     except Exception as exc:

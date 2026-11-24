@@ -9,9 +9,11 @@ order-independent.
     python -X utf8 -m unittest tests.test_ammit
 """
 
+import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -29,6 +31,11 @@ class _TempState(unittest.TestCase):
         self._orig_state = ammit.STATE_FILE
         self._tmp = tempfile.TemporaryDirectory()
         ammit.STATE_FILE = Path(self._tmp.name) / "timer_state.json"
+        # The "can't be used" warning is logged once a run; start each test
+        # with it unsaid, so no test leans on another's order.
+        p = mock.patch.object(ammit, "_unusable_logged", [False], create=True)
+        p.start()
+        self.addCleanup(p.stop)
 
     def tearDown(self):
         ammit.STATE_FILE = self._orig_state
@@ -186,6 +193,19 @@ class TestHandle(_TempState):
                 self.assertTrue(out["error"].startswith("bad_arguments: "), out)
                 self.assertFalse(ammit.query_all()[0]["running"])
 
+    def test_a_duration_too_big_for_a_float_is_a_slug_not_a_raise(self):
+        # Measured 2026-11-21: 1e308 minutes is a finite float whose * 60 is
+        # inf, and round(inf) raised OverflowError; an int of 400 digits
+        # (JSON allows it) raised in float(). handle() never raises (§2).
+        for bad in (1e308, 10 ** 400, "1e400"):
+            with self.subTest(duration_minutes=str(bad)[:12]):
+                try:
+                    out = ammit.handle(action="start", duration_minutes=bad)
+                except OverflowError as e:
+                    self.fail(f"handle() raised {e!r}")
+                self.assertTrue(out["error"].startswith("bad_arguments: "), out)
+                self.assertFalse(ammit.query_all()[0]["running"])
+
     def test_a_numeric_string_duration_still_starts(self):
         out = ammit.handle(action="start", duration_minutes="2")
         self.assertTrue(out["timers"][0]["running"])
@@ -208,9 +228,107 @@ class TestHandle(_TempState):
         # not raise into Pythia's dispatcher (CONVENTIONS S2 — handle() never
         # raises).
         ammit.STATE_FILE.write_text("{ not json", encoding="utf-8")
-        out = ammit.handle(action="query")
+        with self.assertLogs("METIS.ammit", "WARNING"):
+            out = ammit.handle(action="query")
         self.assertIn("timers", out)
         self.assertFalse(out["timers"][0]["running"])
+
+    def test_a_failed_save_is_write_failed_not_the_old_state(self):
+        # handle() used to answer with query_all() whatever happened, so a
+        # start that wasn't saved came back as {"action": "start", ...} with
+        # the old timer in it, for the model to read as done.
+        with mock.patch.object(ammit.os, "replace",
+                               side_effect=PermissionError(13, "Access is denied")), \
+                self.assertLogs("METIS.ammit", "ERROR"):
+            out = ammit.handle(action="start", duration_minutes=5)
+        self.assertTrue(out.get("error", "").startswith("write_failed: "), out)
+        self.assertFalse(ammit.query_all()[0]["running"])
+
+
+class TestStateFileShape(_TempState):
+    """A file that parses but isn't a timer reads as no timer, as a torn one
+    does. Each of these raised from query_all() (measured 2026-11-21): into
+    Pythia's dispatcher from handle(), and into the countdown, the alarm and
+    Home's badge every tick."""
+
+    _NOT_A_TIMER = {
+        "an empty object": {},
+        "no slots": {"timers": []},
+        "a list": [],
+        "a slot missing its fields": {"timers": [{"duration_seconds": 5}]},
+        "a true/false duration": {"timers": [
+            {"duration_seconds": True, "started_at": None, "running": False}]},
+        "a start with no UTC offset": {"timers": [
+            {"duration_seconds": 60, "started_at": "2026-11-21T10:00:00",
+             "running": True}]},
+        "a start that isn't a time": {"timers": [
+            {"duration_seconds": 60, "started_at": "soon", "running": True}]},
+    }
+
+    def _write(self, state):
+        ammit.STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+
+    def test_a_file_that_isnt_a_timer_reads_as_no_timer(self):
+        for name, state in self._NOT_A_TIMER.items():
+            with self.subTest(name):
+                self._write(state)
+                with mock.patch.object(ammit, "_unusable_logged", [False], create=True), \
+                        self.assertLogs("METIS.ammit", "WARNING"):
+                    try:
+                        out = ammit.handle(action="query")
+                    except (KeyError, IndexError, TypeError, ValueError) as e:
+                        self.fail(f"handle() raised {e!r}")
+                self.assertEqual(len(out["timers"]), ammit.MAX_SLOTS)
+                self.assertFalse(out["timers"][0]["running"])
+
+    def test_it_is_logged_once_until_the_file_is_usable_again(self):
+        # The countdown, the alarm and Home's badge read it three times a
+        # second; one line says it.
+        ammit.STATE_FILE.write_text("{ not json", encoding="utf-8")
+        with self.assertLogs("METIS.ammit", "WARNING") as logs:
+            for _ in range(5):
+                ammit.query_all()
+        self.assertEqual(len(logs.records), 1, logs.output)
+        ammit.start_timer(0, 300)          # a usable file again...
+        ammit.query_all()
+        ammit.STATE_FILE.write_text("[", encoding="utf-8")   # ...so the next is said
+        with self.assertLogs("METIS.ammit", "WARNING"):
+            ammit.query_all()
+
+
+class TestOneLock(_TempState):
+    """Pythia's request thread and the Tk thread both use the file, and on
+    Windows a rename fails while another thread has the file open, and an
+    open fails while the rename runs. Measured 2026-11-21 unlocked: a tight
+    reader made 149 of 300 saves fail, and two writers wiped the timer 53
+    times in 300. Every read and every rename now happens under one lock."""
+
+    def _lock_held(self):
+        lock = getattr(ammit, "_LOCK", None)
+        return isinstance(lock, type(threading.Lock())) and lock.locked()
+
+    def test_every_rename_and_every_read_is_under_the_lock(self):
+        seen = []
+        real_replace, real_read = os.replace, Path.read_text
+
+        def replace(*args, **kwargs):
+            seen.append(("replace", self._lock_held()))
+            return real_replace(*args, **kwargs)
+
+        def read_text(path, *args, **kwargs):
+            if path == ammit.STATE_FILE:
+                seen.append(("read", self._lock_held()))
+            return real_read(path, *args, **kwargs)
+
+        with mock.patch.object(ammit.os, "replace", replace), \
+                mock.patch.object(Path, "read_text", read_text):
+            ammit.start_timer(0, 300)
+            ammit.acknowledge_timer(0)
+            ammit.stop_timer(0)
+            ammit.query_all()
+            ammit.reset_timer(0)
+        self.assertEqual({kind for kind, _ in seen}, {"replace", "read"})
+        self.assertEqual([s for s in seen if not s[1]], [])
 
 
 class TestSaveIsAtomic(_TempState):
@@ -226,7 +344,8 @@ class TestSaveIsAtomic(_TempState):
             real_write(path, text[:10], *args, **kwargs)   # half a file, then the crash
             raise OSError("disk pulled mid-write")
 
-        with mock.patch.object(Path, "write_text", torn):
+        with mock.patch.object(Path, "write_text", torn), \
+                self.assertLogs("METIS.ammit", "ERROR"):
             ammit.stop_timer(0)
         self.assertEqual(ammit.STATE_FILE.read_text(encoding="utf-8"), before)
 

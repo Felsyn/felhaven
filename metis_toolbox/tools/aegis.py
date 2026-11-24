@@ -15,11 +15,11 @@ Job:         Vouch for the programs in bin/ before Felhaven runs them.
 
 Contract:    Plain functions, not a brain tool:
                • resolve(name) -> Resolution(path, problem). The one way
-                 Morpheus, Echo and Orpheus find mpv, yt-dlp and ffmpeg:
+                 Morpheus, Echo, Orpheus and Clio find mpv, yt-dlp and ffmpeg:
                    bin/<name>.exe present and matching   -> (path, None)
                    bin/<name>.exe present, NOT matching,
                      or not recorded yet                 -> (None, "binary_unverified: ...")
-                   not in bin/, found on PATH            -> (path, None), unverified
+                   not in bin/, <name>.exe on PATH       -> (path, None), unverified
                    nowhere                               -> (None, None)
                  A bin/ copy that fails is REFUSED and never falls through to
                  PATH: otherwise breaking the bin/ copy would be a way to
@@ -34,6 +34,7 @@ Contract:    Plain functions, not a brain tool:
                                           entry (refuses on a mismatch)
                    record <name> --version V --source URL --expect SHA256
                           [--archive FILE [--extracted EXE]]
+                          [--checksum-source URL]
                                           for mpv and ffmpeg: --expect is the
                                           publisher's checksum, of the exe or
                                           of the archive it came in
@@ -52,16 +53,33 @@ Decisions:   (owner, 2026-10-01; reasons in CONVENTIONS §12)
                • The manifest is per machine, not committed: a committed one
                  held one machine's hashes, so every other machine's newer
                  yt-dlp was refused, and recording it edited a tracked file.
+             (owner, 2026-11-17)
+               • The PATH fallback finds only <name>.exe, and only in PATH
+                 folders written as full paths. shutil.which searched the
+                 working folder first and took a .bat or .cmd, which runs
+                 through cmd.exe and re-reads its arguments; Morpheus hands
+                 yt-dlp text from the model and from YouTube.
+               • `record` stores the hash it CHECKED, never a fresh one, so
+                 a file swapped after its check is refused at its next
+                 resolve rather than recorded as vouched for.
 
-Upstream:    tools/morpheus.py, tools/echo.py, tools/orpheus.py (resolve);
-             the owner, at a terminal (the CLI).
+Upstream:    tools/morpheus.py, tools/echo.py, tools/orpheus.py,
+             tools/clio.py (resolve); the owner, at a terminal (the CLI).
 Downstream:  config/bin_manifest.json (per machine, gitignored; read;
              written only by `record`),
              tools/hermes.py (the published SHA2-256SUMS, `record` only).
 
 Requires:    stdlib only — argparse, datetime, hashlib, json, logging, os,
-             re, shutil, subprocess, tempfile, threading, zipfile; plus
+             re, subprocess, sys, tempfile, threading, zipfile; plus
              tools/hermes.py.
+
+V0.03:       Walked through 2026-11-17 (the V0.03 walkthrough, CONVENTIONS
+             §3); its first marker. resolve() refuses, never raises, and
+             never falls through from a refused bin/ copy; the manifest
+             write is atomic. Two security fixes, the 2026-11-17 decisions
+             above: the PATH fallback no longer searches the working folder
+             or takes a script, and `record` stores the hash it checked.
+             Upstream gained Clio; the CLI's --checksum-source is listed.
 """
 
 import argparse
@@ -71,7 +89,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -191,7 +208,7 @@ def resolve(name: str) -> Resolution:
                               name, problem, name)
         return Resolution(None, problem) if problem else Resolution(local, None)
 
-    found = shutil.which(name)
+    found = _on_path(name)
     if found:
         with _lock:
             if name not in _path_warned:
@@ -199,6 +216,25 @@ def resolve(name: str) -> Resolution:
                 log.warning("Aegis: %s is not in bin/; using %s from PATH, unverified",
                             name, found)
     return Resolution(found, None)
+
+
+def _on_path(name: str) -> Optional[str]:
+    """<name>.exe in the first PATH folder that holds it, else None.
+
+    Not shutil.which, which on Windows searches the working folder first and
+    honours PATHEXT. Only a folder written as a full path counts, so the
+    working folder never does (not as ".", an empty entry, or any relative
+    name). Only an .exe counts: a .bat or .cmd runs through cmd.exe, which
+    re-reads its arguments, and Morpheus hands yt-dlp text from the model and
+    from YouTube."""
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        folder = folder.strip().strip('"')
+        if not folder or not os.path.isabs(folder):
+            continue
+        candidate = os.path.join(folder, f"{name}.exe")
+        if os.path.isfile(candidate):
+            return candidate
+    return None
 
 
 # ── Recording (the CLI) ───────────────────────────────────────────────────────
@@ -247,8 +283,11 @@ class RecordError(Exception):
     """`record` refused; the message says why."""
 
 
-def _entry(name: str, path: str, version: str, source_url: str,
+def _entry(path: str, checked: str, version: str, source_url: str,
            published: str, published_for: str, checksum_source: str) -> dict[str, str]:
+    """The manifest entry, holding `checked`: the hash that was compared with
+    the publisher's. Never a fresh one, which would vouch for bytes nobody
+    checked if the file changed in between (yt-dlp runs in between)."""
     return {
         "file": os.path.basename(path),
         "version": version,
@@ -256,7 +295,7 @@ def _entry(name: str, path: str, version: str, source_url: str,
         "published_sha256": published,
         "published_for": published_for,
         "checksum_source": checksum_source,
-        "sha256": sha256_of(path),
+        "sha256": checked,
         "recorded": datetime.date.today().isoformat(),
     }
 
@@ -292,7 +331,7 @@ def record_ytdlp() -> dict[str, str]:
     if actual != published:
         raise RecordError(f"bin/yt-dlp.exe ({actual[:12]}...) is not the published "
                           f"{version} yt-dlp.exe ({published[:12]}...)")
-    return _store("yt-dlp", _entry("yt-dlp", path, version, base + "yt-dlp.exe",
+    return _store("yt-dlp", _entry(path, actual, version, base + "yt-dlp.exe",
                                    published, "yt-dlp.exe", base + "SHA2-256SUMS"))
 
 
@@ -331,7 +370,7 @@ def record_other(name: str, version: str, source_url: str, expect: str,
             raise RecordError(f"bin/{name}.exe is not the {name}.exe inside "
                               f"{os.path.basename(archive)}")
         published_for = os.path.basename(archive)
-    return _store(name, _entry(name, path, version, source_url, expect,
+    return _store(name, _entry(path, exe_hash, version, source_url, expect,
                                published_for, checksum_source or source_url))
 
 
@@ -377,7 +416,7 @@ def main(argv: "list[str] | None" = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m tools.aegis",
                                      description="Vouch for the programs in bin/.")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("verify", help="check every manifest entry now")
+    sub.add_parser("verify", help="check each program in bin/ now")
     rec = sub.add_parser("record", help="record a deliberate update")
     rec.add_argument("name")
     rec.add_argument("--version")

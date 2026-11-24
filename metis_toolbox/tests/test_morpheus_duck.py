@@ -16,11 +16,13 @@ So these tests are about two properties, not about mpv:
   - ducking never touches the load tracking that makes a real failure visible
     (test_ducking_does_not_disarm_load_detection is the bug, in one assertion).
 
-No mpv process and no pipe: _ipc and _get_props are mocked throughout.
+No mpv process and no pipe: _ipc and _get_props are mocked throughout, and
+play() never sizes the real mpv log.
 
     python -X utf8 -m unittest tests.test_morpheus_duck
 """
 
+import logging
 import os
 import sys
 import unittest
@@ -29,6 +31,12 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tools import morpheus
+
+# Several cases here reach a branch that logs a WARNING or an ERROR on purpose.
+# No test entry point calls setup_logging (§5), so logging's last-resort
+# handler would print each one to stderr; a NullHandler stops that (the
+# tests/test_zeno.py precedent). assertLogs still sees every record.
+logging.getLogger("METIS.morpheus").addHandler(logging.NullHandler())
 
 from tests.test_morpheus_load_failure import _FAILED, _LiveProc
 
@@ -166,7 +174,11 @@ class TestDuckRoundTrip(_DuckCase):
 class TestDuckLeavesLoadTrackingAlone(_DuckCase):
 
     def _arm_load(self, age=0.0):
+        # play() sizes the real logs/mpv/mpv.log first; past its cap it calls
+        # shutdown(), which this fake process can't survive (and would delete
+        # the owner's log). test_morpheus_control patches it the same way.
         with mock.patch("tools.morpheus._ensure_mpv", return_value=True), \
+                mock.patch("tools.morpheus._recycle_if_log_is_huge"), \
                 mock.patch("tools.morpheus._checkpoint"), \
                 mock.patch("tools.morpheus._ipc"):
             morpheus.play("https://youtu.be/abc")

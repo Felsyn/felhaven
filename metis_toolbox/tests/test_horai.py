@@ -19,6 +19,19 @@ import themis
 from tools import horai
 
 
+class TestCycleHours(unittest.TestCase):
+    """The docstring names the cycle's hours (by the clock, not the sun);
+    this holds the code to them."""
+
+    def test_each_cycle_starts_on_its_hour(self):
+        for hour, label in ((4, "Night"), (5, "Dawn"), (7, "Dawn"),
+                            (8, "Morning"), (11, "Morning"), (12, "Afternoon"),
+                            (16, "Afternoon"), (17, "Evening"), (20, "Evening"),
+                            (21, "Night"), (0, "Night")):
+            with self.subTest(hour=hour):
+                self.assertEqual(horai._get_cycle(datetime(2026, 11, 21, hour)), label)
+
+
 class TestSeasonHemisphere(unittest.TestCase):
     # (month, northern, southern)
     _CASES = [

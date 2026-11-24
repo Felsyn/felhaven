@@ -10,7 +10,9 @@ releases the log file before the temp dir is removed.
 Covers the module's promises: the delimited on-disk format Emanon parses,
 one entry per record (a line break in a message or a traceback can't start an
 entry of its own), idempotency (the guard that stops a second caller doubling
-every line), and the never-crash degrade paths.
+every line), the never-crash degrade paths, and the error hooks (a Tk
+callback's, a thread's or the program's exception reaches the log, once per
+failure); setup_logging installs process-wide hooks, so those are restored too.
 
     python -X utf8 -m unittest tests.test_metis_logging
 """
@@ -47,6 +49,25 @@ class MetisLoggingTests(unittest.TestCase):
         self._saved_path = getattr(self.root, "_metis_log_path", None)
         self.root.handlers = []
         self._clear_guard()
+        # setup_logging also installs the process's exception hooks (Errors).
+        import threading
+        saved = (threading.excepthook, sys.excepthook)
+        state = {name: getattr(metis_logging, name, None)
+                 for name in ("_program", "_previous_excepthook", "_seen_failures")}
+        snapshot = {name: (list(v) if isinstance(v, list) else set(v))
+                    for name, v in state.items() if v is not None}
+
+        def restore():
+            threading.excepthook, sys.excepthook = saved
+            for name, value in snapshot.items():
+                target = state[name]
+                target.clear()
+                if isinstance(target, list):
+                    target.extend(value)
+                else:
+                    target.update(value)
+
+        self.addCleanup(restore)
 
     def tearDown(self):
         # Close the handlers this test added so the temp log file is released.
@@ -191,6 +212,109 @@ class MetisLoggingTests(unittest.TestCase):
         self.assertTrue(self.root.handlers)
         self.assertFalse(any(isinstance(h, logging.handlers.RotatingFileHandler)
                              for h in self.root.handlers))
+
+    # ── Errors nothing caught (pythonw has no stderr) ───────────────────────
+
+    def _need(self, name):
+        thing = getattr(metis_logging, name, None)
+        self.assertIsNotNone(thing, f"metis_logging has no {name}")
+        return thing
+
+    def test_no_console_handler_without_a_stderr(self):
+        """Under pythonw sys.stderr is None, and a StreamHandler on it failed
+        inside every record (swallowed by logging's own handleError)."""
+        with mock.patch.object(sys, "stderr", None):
+            metis_logging.setup_logging("prog")
+        streams = [h for h in self.root.handlers
+                   if type(h) is logging.StreamHandler]
+        self.assertEqual(streams, [], "a console handler with nowhere to write")
+        self.assertTrue(any(isinstance(h, logging.handlers.RotatingFileHandler)
+                            for h in self.root.handlers))
+
+    def test_setup_installs_the_thread_and_program_hooks(self):
+        import threading
+        metis_logging.setup_logging("prog")
+        self.assertIs(threading.excepthook, self._need("_log_thread_exception"))
+        self.assertIs(sys.excepthook, self._need("_log_program_exception"))
+
+    def test_a_second_setup_never_chains_the_program_hook_to_itself(self):
+        metis_logging.setup_logging("prog")
+        self._clear_guard()
+        for h in self.root.handlers[:]:
+            h.close()
+        self.root.handlers = []
+        metis_logging.setup_logging("prog")
+        self.assertIsNot(self._need("_previous_excepthook")[0],
+                         self._need("_log_program_exception"))
+
+    def test_a_tk_callback_exception_reaches_the_log(self):
+        import tkinter as tk
+        log_tk_errors = self._need("log_tk_errors")
+        metis_logging.setup_logging("prog")
+        root = tk.Tk()
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        log_tk_errors(root)
+
+        def boom():
+            raise RuntimeError("a click handler's bug")
+
+        root.after(0, boom)
+        with self.assertLogs("METIS.prog", "ERROR") as logs:
+            root.update()
+        self.assertIn("a Tk callback raised RuntimeError", logs.output[0])
+        self.assertIsNotNone(logs.records[0].exc_info)
+
+    def test_a_thread_that_ends_on_an_exception_reaches_the_log(self):
+        import threading
+        metis_logging.setup_logging("prog")
+
+        def boom():
+            raise ValueError("a worker's bug")
+
+        with self.assertLogs("METIS.prog", "ERROR") as logs:
+            thread = threading.Thread(target=boom, name="probe")
+            thread.start()
+            thread.join(5)
+        self.assertIn("thread probe raised ValueError", logs.output[0])
+
+    def test_an_exception_that_ends_the_program_is_logged_and_passed_on(self):
+        metis_logging.setup_logging("prog")
+        previous = mock.Mock()
+        self._need("_previous_excepthook")[0] = previous
+        try:
+            raise KeyError("start")
+        except KeyError:
+            info = sys.exc_info()
+        with self.assertLogs("METIS.prog", "CRITICAL"):
+            sys.excepthook(*info)
+        previous.assert_called_once_with(*info)
+
+    def test_each_failure_is_logged_once_a_run(self):
+        """A <Motion> handler that raises must not fill the log, and an entry
+        point that logged its own start failure isn't logged twice when the
+        program hook sees it raised again."""
+        log_uncaught = self._need("log_uncaught")
+        metis_logging.setup_logging("prog")
+        self._need("_previous_excepthook")[0] = mock.Mock()
+
+        def fail_here():
+            raise KeyError("x")
+
+        def fail_there():
+            raise KeyError("y")
+
+        with self.assertLogs("METIS.prog", "ERROR") as logs:
+            for func in (fail_here, fail_here, fail_there):
+                try:
+                    func()
+                except KeyError:
+                    log_uncaught("a Tk callback", *sys.exc_info())
+            try:
+                fail_there()
+            except KeyError:
+                sys.excepthook(*sys.exc_info())     # the same failure, re-raised
+        self.assertEqual(len(logs.records), 2, "one per distinct failure")
 
 
 if __name__ == "__main__":

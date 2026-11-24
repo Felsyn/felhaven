@@ -1,6 +1,8 @@
 """
 Orpheus panel — play back a recorded briefing from local_audio/.
 
+Job:         Play back a recorded briefing from local_audio/.
+
 OrpheusPanel is a bare tk.Frame tab body inside VoxArrayPanel (the ORPHEUS
 tab), the same shape as MorpheusPanel and EchoPanel. Unlike Echo, Orpheus IS
 Kairos-registered (the "orpheus" worker, 2 s) — update(data) drives both the
@@ -21,41 +23,74 @@ Top to bottom inside self:
 If ffmpeg isn't found, the tab shows a placeholder and stays inert — the
 dashboard never crashes over a missing binary (Morpheus/Echo precedent).
 
-orpheus.play_file() runs a local ffmpeg decode (not a network call, not a TTS
-synthesis) — fast enough for what Echo produces to call directly from the
-click handler, unlike Echo's whole-document conversion or Morpheus's yt-dlp
-search. No thread, no queue.
+─────────────────────────────────────────────────────────────────────────────
+DECODE THREADING + DRAIN — the EchoPanel shape (CONVENTIONS §6 names both).
+
+  orpheus.play_file() decodes the whole file before anything plays, and that
+  takes seconds for Echo's longer output (measured 2026-11-21: 3.2 s for a
+  25-minute file, 1.1 s for a 9-minute one, 0.3 s for 2 minutes). Called from
+  the click handler, as it was until then, it froze all of Felhaven for that
+  long. So a click starts one daemon thread whose ONLY shared touch is
+  self._play_q.put(...), and a bounded after() chain drains the queue and
+  stops itself once the result lands. The status line says "decoding …"
+  meanwhile; a second click while one decodes is a no-op (single-flight), and
+  ⏹ stays dim until something plays, so a decode can't be cancelled. The
+  chain is winfo_exists()-guarded and cancelled in destroy().
+─────────────────────────────────────────────────────────────────────────────
 
 Because Harmonia has no channels (see harmonia.py), "playing" here reflects
 ANY sound coming out of the speaker, not only a briefing Orpheus started —
 if Calliope is mid-answer, this tab will show "playing" too, and its ⏹ will
 stop that. That cross-talk is a deliberate consequence of the one-stream
-design, not a bug in this panel (flagged, not fixed, per the handoff).
+design, not a bug in this panel.
 
-V0.02: Audited 2026-07-25 — verified §6-clean (the ffmpeg decode runs
-synchronously from the click handler by design — "No thread, no queue" above —
-so no after()/thread exception applies); _ERROR_TEXT stays in lockstep with
-play_file()'s three codes. No code change.
+Upstream:    panels/vox_array_panel.py (builds it as the ORPHEUS tab),
+             felhaven.py (registers it with Kairos's `orpheus` worker,
+             tools.orpheus.fetch every 2 s).
+Downstream:  tools/orpheus.py (fetch's data; play_file, stop, delete_file,
+             available), theme.py, tools/virgil.py and
+             panels/virgil_tooltip.py (the tips).
 
-NOTE (2026-08-06, post-audit): the two-click remove added on this date makes one
-line of that audit stale rather than wrong — _ERROR_TEXT is now in lockstep with
-delete_file()'s codes too. Still §6-clean: the confirm window and the
-status-flash auto-clear are single one-shot after() timers for transient
-feedback, which §6 permits by name ("a status line that self-clears, a glyph
-that resets after a beat") since the 2026-07-26 narrowing. No polling loop, no
-thread, no self-re-arming chain.
+2026-07-25:  walkthrough audit — verified §6-clean (the ffmpeg decode ran
+             synchronously from the click handler by design, so no
+             after()/thread exception applied); _ERROR_TEXT stays in
+             lockstep with play_file()'s three codes. No code change.
 
-2026-08-10: both timers now go through _after_once() and are cancelled in a
-destroy() override. §6 still permits them; this is only teardown hygiene — an
-uncancelled timer outlives the Tcl command it names and makes Tcl print
-`invalid command name` on stderr.
+2026-08-06:  the two-click remove makes one line of that audit stale rather
+             than wrong — _ERROR_TEXT is now in lockstep with delete_file()'s
+             codes too. Still §6-clean: the confirm window and the
+             status-flash auto-clear are single one-shot after() timers for
+             transient feedback, which §6 permits by name ("a status line
+             that self-clears, a glyph that resets after a beat") since the
+             2026-07-26 narrowing.
+
+2026-08-10:  both timers now go through _after_once() and are cancelled in a
+             destroy() override. §6 still permits them; this is only teardown
+             hygiene — an uncancelled timer outlives the Tcl command it names
+             and makes Tcl print `invalid command name` on stderr.
+
+V0.03:       Walked through 2026-11-21 (the V0.03 walkthrough, CONVENTIONS
+             §3/§12). Built 2026-07-17. Checked: _ERROR_TEXT against every
+             code play_file() and delete_file() return (now a test); the
+             tips' bindtag survives the stop button's rebinds. Changed: a
+             click decodes on one daemon thread with a bounded drain chain
+             (the owner's pick; a 25-minute file froze Felhaven 3.2 s), and
+             §6 names the exception; the stale "No thread, no queue" and
+             "per the handoff" lines went; Upstream/Downstream added.
 """
 
+import queue
+import threading
 import tkinter as tk
+from typing import Any
 
+from panels import virgil_tooltip
 from theme import C, FONTS, PhosphorScroll
 
-from tools import orpheus
+from tools import orpheus, virgil
+
+# How often the drain chain polls the decode result while one runs.
+_DRAIN_MS = 100
 
 _NO_BIN_MSG = "ffmpeg not found — drop ffmpeg.exe in bin\\ or install to PATH"
 # bin\ffmpeg.exe is there, but aegis refused it (tools/aegis.py).
@@ -138,6 +173,17 @@ class OrpheusPanel(tk.Frame):
 
     A bare Frame tab body inside VoxArrayPanel (the ORPHEUS tab)."""
 
+    # Hover tooltips (Virgil), each a glossary entry (CONVENTIONS §7). _TIPS
+    # names the widgets built once, in self.tip_targets; _ROW_TIPS names the
+    # glyph each file row builds. The stop button binds and unbinds its own
+    # handlers as it lights and dims; the tip rides a bindtag and stays.
+    _TIPS = {
+        "stop": virgil.term("transport_stop"),
+    }
+    _ROW_TIPS = {
+        "file_remove": virgil.term("file_remove"),
+    }
+
     def __init__(self, parent):
         super().__init__(parent, bg=C["card"])
 
@@ -150,6 +196,11 @@ class OrpheusPanel(tk.Frame):
 
         # Pending one-shot after() ids (see _after_once / destroy).
         self._pending_after: "set[str]" = set()
+
+        # The decode thread's hand-off (module docstring, DECODE THREADING).
+        self._play_q: "queue.Queue[tuple[str, dict[str, Any]]]" = queue.Queue()
+        self._decoding = False
+        self._drain_after_id: "str | None" = None
 
         self._build_transport()
         if self._enabled:
@@ -170,6 +221,8 @@ class OrpheusPanel(tk.Frame):
         self._stop_btn = tk.Label(tr, text="⏹", font=FONTS["medium"],
                                    fg=C["text3"], bg=C["card"], padx=6)
         self._stop_btn.pack(side="right")
+        self.tip_targets: dict[str, tk.Misc] = {"stop": self._stop_btn}
+        virgil_tooltip.attach(self._stop_btn, self._TIPS["stop"])
 
         self._now_lbl = tk.Label(
             tr, text="nothing playing", font=FONTS["small_bold"],
@@ -233,6 +286,7 @@ class OrpheusPanel(tk.Frame):
             glyph.bind("<Leave>", lambda e, g=glyph: self._glyph_hover(g, C["text3"]))
             glyph.bind("<Button-1>",
                        lambda e, n=name, g=glyph: self._on_remove_file(n, g))
+            virgil_tooltip.attach(glyph, self._ROW_TIPS["file_remove"])
 
             title = tk.Label(outer, text=name, font=FONTS["body"],
                              fg=C["text1"], bg=C["card"], anchor="w",
@@ -259,8 +313,37 @@ class OrpheusPanel(tk.Frame):
         s = int(seconds)
         return f"{s // 60}:{s % 60:02d}"
 
+    # ── play (daemon decode thread + bounded drain chain) ────────────────────
+
     def _on_play(self, name: str) -> None:
-        result = orpheus.play_file(name)
+        """Start decoding `name` off the UI thread. Single-flight: a click
+        while one decodes is a no-op, not a queued second job."""
+        if self._decoding:
+            return
+        self._decoding = True
+        self._status.config(text=f"decoding {name} …", fg=C["text3"])
+        # The thread's only shared touch is the queue put — no Tk.
+        threading.Thread(
+            target=lambda n=name: self._play_q.put((n, orpheus.play_file(n))),
+            daemon=True,
+        ).start()
+        self._drain_after_id = self.after(_DRAIN_MS, self._drain)
+
+    def _drain(self) -> None:
+        """Bounded, self-terminating poll of the decode result: re-arms only
+        while the queue is empty, stops once the result arrives."""
+        if not self.winfo_exists():
+            return
+        try:
+            name, result = self._play_q.get_nowait()
+        except queue.Empty:
+            self._drain_after_id = self.after(_DRAIN_MS, self._drain)
+            return
+        self._drain_after_id = None
+        self._decoding = False
+        self._deliver_play(name, result)
+
+    def _deliver_play(self, name: str, result: "dict[str, Any]") -> None:
         if "error" in result:
             self._status.config(
                 text=_ERROR_TEXT.get(result["error"], f"error: {result['error']}"),
@@ -291,10 +374,15 @@ class OrpheusPanel(tk.Frame):
         self._pending_after.add(after_id)
 
     def destroy(self) -> None:
-        """Cancel every pending one-shot timer before teardown."""
+        """Cancel every pending one-shot timer, and the decode drain, before
+        teardown. A decode still in flight is left to its daemon thread; its
+        result goes to a queue nobody reads."""
         for after_id in list(self._pending_after):
             self.after_cancel(after_id)
         self._pending_after.clear()
+        if self._drain_after_id is not None:
+            self.after_cancel(self._drain_after_id)
+            self._drain_after_id = None
         super().destroy()
 
     # ── remove (two-click confirm — the MorpheusPanel playlist-row pattern) ───

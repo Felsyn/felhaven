@@ -8,6 +8,23 @@ Job:         Own the clock. Fire workers. Dispatch results to panels.
 No panel manages its own timing. Panels are dumb display surfaces.
 Kairos owns the clock.
 
+Contract:    §2's "Device / infrastructure authority" flavor: no fetch(), no
+             TOOL_DEFINITION. One class, Kairos(root):
+
+               WORKERS            — (name, interval_s, "module.fetch") rows; each
+                                    fetch() runs on its own daemon thread when
+                                    due, never two of one name at once.
+               register_panel(name, panel)
+                                  — panel.update(data) gets every result of that
+                                    worker, None when its fetch() raised.
+               refetch(*names)    — fire those workers on the next tick.
+               start() / stop()   — begin the TICK_MS heartbeat / cancel it.
+
+             A panel's update() that raises is logged once (ERROR, with its
+             traceback) and skipped; every other panel, and the tick, carry
+             on, and a later success logs that it works again. The tick
+             re-arms itself even if a step raised.
+
 Thread-safety contract:
     result_queue is the only object shared between the worker threads and the
     main thread (§6). Workers write to it; _drain_queue (main thread) reads it
@@ -17,16 +34,18 @@ Thread-safety contract:
     one-queue contract holds.
 
 Upstream:    felhaven.py — constructs Kairos, registers panels, calls
-             start()/stop(), and wires refetch() to the Settings tab.
-Downstream:  each WORKERS entry's fetch() (tools.*), resolved by dotted path at
-             startup; each registered panel's update(data), called on the main
-             thread.
+             start()/stop(), and wires refetch() to the Settings tab and
+             Atmospherics' PLACE pick.
+Downstream:  each WORKERS entry's fetch() (tools.*, and cerberus.py and awen.py
+             at the app root), resolved by dotted path at startup; each
+             registered panel's update(data), called on the main thread.
 
 Requires:    importlib, logging, queue, threading, time (stdlib only).
 
-V0.02: Audited 2026-07-25 — verified honest (exhaustive coverage, no dead code);
-       tightened the thread-safety contract to §6's precise worker↔main-thread
-       wording (§12); added Upstream/Downstream/Requires.
+2026-07-25:  The first audit found it honest (exhaustive coverage, no dead
+             code), tightened the thread-safety contract to §6's precise
+             worker↔main-thread wording (§12) and added Upstream/Downstream/
+             Requires.
 
 2026-09-15: added the RETRY_DELAYS re-attempt ladder. A failed fetch used to
        wait out the worker's whole interval before trying again, so one blip
@@ -34,6 +53,16 @@ V0.02: Audited 2026-07-25 — verified honest (exhaustive coverage, no dead code
        sky was fine. _note_outcome now backdates _last_run on failure to pull
        the next attempt forward. Main-thread only; the threading contract above
        is unchanged.
+
+V0.03: Walked through 2026-11-21 (in the repo's first commit, 2026-06-10;
+       first audited 2026-07-25). One panel's update() raising used to end
+       the tick chain: _tick re-armed its after() only once the drain
+       returned, so every panel froze until a restart (measured: no
+       delivery in the next 2 s). The tick is itself a Tk callback, and
+       under pythonw Tk's report of it went nowhere, so the freeze left no
+       log line either. Each update() is now guarded and the tick re-arms in
+       a finally (BACKLOG, routed here by S22). Contract added; Upstream and
+       Downstream name the PLACE pick and the two app-root workers.
 """
 
 import importlib
@@ -52,6 +81,13 @@ class Kairos:
     WORKERS = [
         ("aether",      300, "tools.aether.fetch"),
         ("aura",       1800, "tools.aura.fetch"),
+        # Weather warnings: a warning is news within minutes, and the answer
+        # is a few hundred bytes. The retry ladder skips every rung (all are
+        # >= 60 s), so a failed check is simply tried again next minute.
+        ("iris",         60, "tools.iris.fetch"),
+        # Space weather: NOAA's scales move within minutes and Kp every three
+        # hours; two small reads (1.1 KB + 6.9 KB) every ten minutes.
+        ("eos",         600, "tools.eos.fetch"),
         # Computed, not fetched: arithmetic on the clock and Themis, a few ms.
         # 300 s gets a new day on screen within five minutes; a Settings save
         # refetches them at once. Off Aura's tick, so an outage can't blank them.
@@ -64,6 +100,9 @@ class Kairos:
         # idle) and reports it, so every gate reseals within one tick.
         ("cerberus",      2, "cerberus.fetch"),
         ("hephaestus",    5, "tools.hephaestus.fetch"),
+        # Ollama's models: two GETs of a few hundred bytes on loopback, so the
+        # loaded-model line and the MODEL row follow a switch within 5 s.
+        ("talos",         5, "tools.talos.fetch"),
         ("argus",         5, "tools.argus.fetch"),
         ("horai",         1, "tools.horai.fetch"),
         ("emanon",        2, "tools.emanon.fetch"),
@@ -99,6 +138,9 @@ class Kairos:
         self._fetch_fns = {}        # name -> callable, resolved once at startup
         self._intervals = {}        # name -> interval seconds, for the retry ladder
         self._fail_counts = {}      # name -> consecutive failures (main thread only)
+        # (worker name, id(panel)) whose update() raised last time: logged once
+        # when it starts failing and once when it works again (main thread only).
+        self._failing_panels: set[tuple[str, int]] = set()
         for name, interval, dotted in self.WORKERS:
             module_path, _, attr = dotted.rpartition(".")
             module = importlib.import_module(module_path)
@@ -140,9 +182,13 @@ class Kairos:
             self.root.after_cancel(self._after_id)
 
     def _tick(self) -> None:
-        self._drain_queue()
-        self._schedule_workers()
-        self._after_id = self.root.after(self.TICK_MS, self._tick)
+        # Re-armed in a finally: a step that raised used to end the chain, and
+        # with it every panel's updates, until a restart.
+        try:
+            self._drain_queue()
+            self._schedule_workers()
+        finally:
+            self._after_id = self.root.after(self.TICK_MS, self._tick)
 
     def _drain_queue(self) -> None:
         while True:
@@ -151,8 +197,25 @@ class Kairos:
             except queue.Empty:
                 break
             for panel in self._panels.get(name, []):
-                panel.update(data)
+                self._deliver(name, panel, data)
             self._note_outcome(name, data)
+
+    def _deliver(self, name: str, panel, data) -> None:
+        """Hand one result to one panel. A panel that raises is logged when it
+        starts failing, not on every tick (a 1 s worker would fill the log),
+        and logged again when it works; the other panels never notice."""
+        key = (name, id(panel))
+        try:
+            panel.update(data)
+        except Exception:
+            if key not in self._failing_panels:
+                self._failing_panels.add(key)
+                log.error(f"{name}: {type(panel).__name__}.update() raised; "
+                          f"the other panels carry on", exc_info=True)
+            return
+        if key in self._failing_panels:
+            self._failing_panels.discard(key)
+            log.info(f"{name}: {type(panel).__name__}.update() works again")
 
     def _note_outcome(self, name: str, data) -> None:
         """Advance or clear a worker's retry ladder from its latest result.

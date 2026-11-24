@@ -73,6 +73,16 @@ class TestDaedalusPanelSmoke(unittest.TestCase):
         daedalus._APP_ROOT = _REAL_ROOT
         shutil.rmtree(self.tree, ignore_errors=True)
 
+    def test_the_legend_carries_its_tip(self):
+        from panels import virgil_tooltip
+        shared = virgil_tooltip._shared(self.root)
+        panel = self._panel()
+        texts = [w.cget("text") for w in panel.tip_targets["legend"].winfo_children()]
+        self.assertIn("── import   ┄┄ lazy import", texts)
+        self.assertEqual(sorted(DaedalusPanel._TIPS), sorted(panel.tip_targets))
+        for key, tip in DaedalusPanel._TIPS.items():
+            self.assertEqual(shared._tips.get(str(panel.tip_targets[key])), tip, key)
+
     def _panel(self) -> DaedalusPanel:
         panel = DaedalusPanel(self.root)
         panel.pack(fill="both", expand=True)
@@ -168,6 +178,19 @@ class TestDaedalusPanelSmoke(unittest.TestCase):
         panel.select("bare")
         self.assertEqual(self._pane_text(panel), "(no module docstring)")
 
+    def test_a_module_that_will_not_parse_is_said_in_words(self):
+        """§2: the slug becomes words; the detail (which file, which line)
+        stays, since it is what the owner opens next."""
+        with open(os.path.join(self.tree, "tools", "broken.py"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("def (:\n")
+        with self.assertLogs("METIS.daedalus", "WARNING"):   # broken.py is logged
+            panel = self._shown(self._panel())
+        panel.select("broken")
+        self.assertEqual(self._pane_text(panel),
+                         "(this module does not parse — tools/broken.py line 1)")
+        self.assertNotIn("parse_failed", self._pane_text(panel))
+
     # ── Notepad ─────────────────────────────────────────────────────────────
     def _notepad(self, windows=True):
         stack = [
@@ -187,8 +210,15 @@ class TestDaedalusPanelSmoke(unittest.TestCase):
         panel._open_in_notepad()
         popen.assert_called_once()
         self.assertEqual(popen.call_args.args[0],
-                         ["notepad.exe", daedalus.source_path("alpha")])
+                         [daedalus_panel._NOTEPAD, daedalus.source_path("alpha")])
         startfile.assert_not_called()
+
+    def test_notepad_runs_by_its_absolute_system32_path(self):
+        # A bare "notepad.exe" runs a file of that name from the working folder
+        # before System32's (measured 2026-11-17).
+        self.assertTrue(os.path.isabs(daedalus_panel._NOTEPAD))
+        self.assertTrue(os.path.normcase(daedalus_panel._NOTEPAD).endswith(
+            os.path.normcase(os.path.join("System32", "notepad.exe"))))
 
     def test_a_path_outside_the_app_root_is_refused(self):
         popen, startfile = self._notepad()

@@ -10,8 +10,10 @@ never touched.
 
 import os
 import shutil
+import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from tools import herodotus
@@ -108,7 +110,7 @@ class TestWriteAndFrontMatter(HerodotusBase):
 
     def test_empty_content_refused(self) -> None:
         self.assertEqual(herodotus.write_document("empty.md", "   ")["error"],
-                         "missing_content")
+                         "bad_arguments: content is empty")
 
     def test_size_cap_on_write(self) -> None:
         big = "x" * (herodotus._MAX_DOC_BYTES + 1)
@@ -204,7 +206,7 @@ class TestListAndSearch(HerodotusBase):
     def test_missing_archive_is_empty_not_error(self) -> None:
         herodotus._ARCHIVE_ROOT = os.path.join(self.tmp, "never_created")
         self.assertEqual(herodotus.list_documents(), {"documents": []})
-        self.assertEqual(herodotus.search_documents("x")["error"], "no_matches")
+        self.assertEqual(herodotus.search_documents("x")["error"], "no_results")
 
     def test_list_only_md_sorted(self) -> None:
         herodotus.write_document("b.md", "two")
@@ -221,13 +223,15 @@ class TestListAndSearch(HerodotusBase):
         self.assertEqual(hit["matches"][0]["filename"], "egypt.md")
         self.assertEqual(hit["matches"][0]["matches"], 1)
         self.assertIn("Nile", hit["matches"][0]["snippets"][0])
-        self.assertEqual(herodotus.search_documents("babylon")["error"], "no_matches")
-        self.assertEqual(herodotus.search_documents("  ")["error"], "missing_query")
+        self.assertEqual(herodotus.search_documents("babylon")["error"], "no_results")
+        self.assertEqual(herodotus.search_documents("  ")["error"],
+                         "bad_arguments: search needs a query")
 
     def test_search_skips_unreadable_file(self) -> None:
         herodotus.write_document("good.md", "findable text")
         self.raw("bad.md", b"\xff\x80 binary")
-        result = herodotus.search_documents("findable")
+        with self.assertLogs("METIS.herodotus", "WARNING"):
+            result = herodotus.search_documents("findable")
         self.assertEqual(len(result["matches"]), 1)
 
 
@@ -262,14 +266,14 @@ class TestEditEngine(HerodotusBase):
         self.assertEqual(
             herodotus.edit_document("doc.md", "replace", target="nowhere",
                                     content="x")["error"].split(":")[0],
-            "target_not_found")
+            "not_found")
         self.assertEqual(
             herodotus.edit_document("doc.md", "replace", target="body",
                                     content="x")["error"].split(":")[0],
             "target_ambiguous")
         self.assertEqual(
             herodotus.edit_document("doc.md", "replace", content="x")["error"].split(":")[0],
-            "missing_target")
+            "bad_arguments")
         herodotus.edit_document("doc.md", "replace", target="first body", content="FIRST")
         self.assertIn("FIRST", self.text())
 
@@ -295,7 +299,7 @@ class TestEditEngine(HerodotusBase):
         self.assertEqual(
             herodotus.edit_document("doc.md", "insert_after_heading",
                                     target="Omega", content="x")["error"].split(":")[0],
-            "heading_not_found")
+            "not_found")
         herodotus.edit_document("doc.md", "append", content="\n## Beta\n")
         self.assertEqual(
             herodotus.edit_document("doc.md", "insert_after_heading",
@@ -305,10 +309,10 @@ class TestEditEngine(HerodotusBase):
     def test_bad_operation_and_missing_content(self) -> None:
         self.assertEqual(
             herodotus.edit_document("doc.md", "delete")["error"].split(":")[0],
-            "missing_content")   # content check fires first, by design
+            "bad_arguments")   # content check fires first, by design
         self.assertEqual(
             herodotus.edit_document("doc.md", "delete", content="x")["error"].split(":")[0],
-            "bad_operation")
+            "unknown_action")
         self.assertEqual(herodotus.edit_document("ghost.md", "append",
                                                  content="x")["error"], "not_found")
 
@@ -344,9 +348,10 @@ class TestIOErrorsAreCleanSlugs(HerodotusBase):
     def test_list_failure_reports_class_not_path(self) -> None:
         leaky = "[Errno 13] Permission denied: '/home/u/herodotus_archive'"
         with mock.patch("pathlib.Path.iterdir",
-                        side_effect=PermissionError(leaky)):
+                        side_effect=PermissionError(leaky)), \
+                self.assertLogs("METIS.herodotus", "WARNING"):
             result = herodotus.list_documents()
-        self.assertEqual(result["error"], "list_failed: PermissionError")
+        self.assertEqual(result["error"], "read_failed: PermissionError")
         self.assertNotIn("herodotus_archive", result["error"])
 
     def test_search_survives_a_dir_walk_error(self) -> None:
@@ -354,19 +359,68 @@ class TestIOErrorsAreCleanSlugs(HerodotusBase):
         # permission error or a mid-scan delete RAISED, breaking the "never
         # raises" contract list_documents already honored. Now it degrades.
         with mock.patch("pathlib.Path.iterdir",
-                        side_effect=PermissionError("denied")):
+                        side_effect=PermissionError("denied")), \
+                self.assertLogs("METIS.herodotus", "WARNING"):
             result = herodotus.search_documents("anything")
-        self.assertEqual(result["error"], "search_failed: PermissionError")
+        self.assertEqual(result["error"], "read_failed: PermissionError")
 
 
 class TestToolExport(HerodotusBase):
     """The plural-export contract pythia.py relies on (CONVENTIONS §2/§3)."""
 
     def test_definitions_bind_to_like_named_functions(self) -> None:
-        self.assertEqual(len(herodotus.TOOL_DEFINITIONS), 5)
-        for d in herodotus.TOOL_DEFINITIONS:
-            name = d["function"]["name"]
+        # Three since 2026-11-14: one read tool and the two writers.
+        names = [d["function"]["name"] for d in herodotus.TOOL_DEFINITIONS]
+        self.assertEqual(names, ["read_archive", "write_document", "edit_document"])
+        for name in names:
             self.assertTrue(callable(getattr(herodotus, name)), msg=name)
+
+
+class TestReadArchive(HerodotusBase):
+    """read_archive picks one of the three reads by `action` and hands back
+    that read's own answer, slugs included."""
+
+    def test_each_action_routes_to_its_read(self) -> None:
+        cases = (("list", "list_documents", {}),
+                 ("search", "search_documents", {"query": "lich"}),
+                 ("read", "read_document", {"filename": "n.md", "offset": 6}))
+        for action, fn, kwargs in cases:
+            with self.subTest(action=action), \
+                 mock.patch.object(herodotus, fn,
+                                   return_value={"via": fn}) as called:
+                self.assertEqual(herodotus.read_archive(action, **kwargs),
+                                 {"via": fn})
+                called.assert_called_once_with(*kwargs.values())
+
+    def test_real_reads_end_to_end(self) -> None:
+        herodotus.write_document("lich.md", "A lich keeps a phylactery.")
+        self.assertEqual(
+            [d["filename"] for d in herodotus.read_archive("list")["documents"]],
+            ["lich.md"])
+        hits = herodotus.read_archive("search", query="phylactery")["matches"]
+        self.assertEqual(hits[0]["filename"], "lich.md")
+        self.assertIn("phylactery",
+                      herodotus.read_archive("read", filename="lich.md")["content"])
+
+    def test_missing_arguments_keep_the_reads_own_slugs(self) -> None:
+        self.assertEqual(herodotus.read_archive("search"),
+                         {"error": "bad_arguments: search needs a query"})
+        self.assertTrue(herodotus.read_archive("read")["error"]
+                        .startswith("invalid_filename"))
+
+    def test_an_action_outside_the_enum_is_unknown_action(self) -> None:
+        out = herodotus.read_archive("delete", filename="lich.md")
+        self.assertTrue(out["error"].startswith("unknown_action: "))
+        for action in ("list", "search", "read"):
+            self.assertIn(action, out["error"])
+
+    def test_paging_steering_survives_the_merge(self) -> None:
+        # read_document's T8 steering, word for word, now on read_archive.
+        desc = herodotus.READ_ARCHIVE_TOOL_DEFINITION["function"]["description"]
+        self.assertIn("A long document comes back in parts: if 'truncated' is "
+                      "true, call again with offset set to 'next_offset'. To "
+                      "change part of a long document, use edit_document "
+                      "rather than rewriting it.", desc)
 
     def test_no_handler_ever_raises(self) -> None:
         # Garbage in, error dict out — never an exception (§2: handle() never raises).
@@ -380,6 +434,100 @@ class TestToolExport(HerodotusBase):
             result = fn()
             self.assertIsInstance(result, dict)
             self.assertIn("error", result)
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  The V0.03 walkthrough (S32, 2026-11-23)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestOneOddDocumentNeverHidesTheRest(HerodotusBase):
+    """One document whose time Windows can't convert (before 1970 or past
+    year 9999) failed the whole listing as read_failed (measured)."""
+
+    def test_a_time_the_platform_cant_convert_lists_as_blank(self) -> None:
+        herodotus.write_document("good.md", "fine")
+        herodotus.write_document("future.md", "from the far future")
+        try:
+            os.utime(os.path.join(self.tmp, "future.md"), (3e11, 3e11))   # year ~11476
+        except OSError:
+            self.skipTest("this filesystem won't hold a year-11476 time")
+        try:
+            out = herodotus.list_documents()
+        except Exception as exc:
+            self.fail(f"list_documents raised {type(exc).__name__}")
+        self.assertEqual({d["filename"]: d["modified"] for d in out.get("documents", [])
+                          if d["filename"] == "future.md"}, {"future.md": ""})
+        self.assertIn("good.md", [d["filename"] for d in out["documents"]])
+
+    def test_a_document_it_cant_stat_is_skipped(self) -> None:
+        # The stat list_documents itself makes fails for one file (a file
+        # removed mid-scan, say); the others still list.
+        herodotus.write_document("good.md", "fine")
+        herodotus.write_document("gone.md", "vanishing")
+        real_stat = Path.stat
+
+        def stat(path: Path, *args, **kwargs):
+            if path.name == "gone.md" and sys._getframe(1).f_code.co_name == "list_documents":
+                raise FileNotFoundError("gone mid-scan")
+            return real_stat(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "stat", stat), \
+                self.assertLogs("METIS.herodotus", "WARNING"):
+            out = herodotus.list_documents()
+        self.assertEqual([d["filename"] for d in out.get("documents", [])], ["good.md"])
+
+
+class TestASymlinkOutIsSkipped(HerodotusBase):
+    """Rail 1 says every path resolves inside the archive. read and edit
+    refused a symlink out; list showed it and search read the file at its far
+    end (measured)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.outside = tempfile.mkdtemp(prefix="herodotus_outside_")
+        self.addCleanup(shutil.rmtree, self.outside, True)
+        secret = os.path.join(self.outside, "secret.md")
+        with open(secret, "w", encoding="utf-8") as fh:
+            fh.write("outside the archive\n")
+        try:
+            os.symlink(secret, os.path.join(self.tmp, "link.md"))
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks need a privilege this account lacks")
+        herodotus.write_document("inside.md", "inside the archive")
+
+    def test_list_doesnt_show_it(self) -> None:
+        self.assertEqual([d["filename"] for d in herodotus.list_documents()["documents"]],
+                         ["inside.md"])
+
+    def test_search_doesnt_read_through_it(self) -> None:
+        self.assertEqual(herodotus.search_documents("outside the archive"),
+                         {"error": "no_results"})
+
+
+class TestNeverRaisesOnAnInfiniteOffset(HerodotusBase):
+    def test_an_infinite_offset_is_bad_arguments(self) -> None:
+        # Pythia's gate refuses one; a direct caller of the public function
+        # got OverflowError (int(inf)).
+        herodotus.write_document("a.md", "text")
+        try:
+            out = herodotus.read_document("a.md", float("inf"))
+        except OverflowError:
+            self.fail("read_document raised OverflowError")
+        self.assertTrue(out.get("error", "").startswith("bad_arguments"), out)
+
+
+class TestSourceStaysOnOneLine(HerodotusBase):
+    def test_a_newline_in_source_cant_close_the_front_matter(self) -> None:
+        # It did: "x\n---\ninjected: yes" ended the block after source, and
+        # the rest of the block landed in the body (measured).
+        herodotus.write_document("a.md", "# Body", source="https://x.example\n---\ninjected: yes")
+        with open(os.path.join(self.tmp, "a.md"), encoding="utf-8") as fh:
+            lines = fh.read().split("\n")
+        close = lines.index("---", 1)
+        block = lines[1:close]
+        self.assertIn("source: https://x.example --- injected: yes", block)
+        self.assertIn("tags:", block)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,33 @@
+{
+  "about": "Phrasing -> the tool(s) Pythia should call. Played against the live model by hand (python -X utf8 -m tests.probe_routing); its shape is checked by tests/test_routing_corpus.py. expect = every tool that must be called; exact = no other tool may be; args = argument values the first matching call must carry (a list means any one of them); known_miss = a routing miss already logged in BACKLOG; history = earlier turns (plain user/assistant messages) for a phrasing that only makes sense mid-conversation. domain uses the V0.03 audit's domain ids; 'sky' is provisional until the domain-key decision is made.",
+  "probes": [
+    {"id": 1, "prompt": "How's the computer doing?", "expect": ["get_machine_status"], "args": {"part": ["vitals", "all"]}, "domain": "machine"},
+    {"id": 2, "prompt": "Am I online?", "expect": ["get_machine_status"], "args": {"part": "online"}, "domain": "machine"},
+    {"id": 3, "prompt": "Is the model server running?", "expect": ["get_machine_status"], "args": {"part": "online"}, "domain": "machine"},
+    {"id": 4, "prompt": "What is this PC connected to right now?", "expect": ["get_machine_status"], "args": {"part": "network"}, "domain": "machine"},
+    {"id": 5, "prompt": "Is the firewall on?", "expect": ["get_machine_status"], "args": {"part": "network"}, "domain": "machine"},
+    {"id": 6, "prompt": "When's sunset?", "expect": ["get_sky_report"], "domain": "sky"},
+    {"id": 7, "prompt": "How full is the moon tonight?", "expect": ["get_sky_report"], "domain": "sky"},
+    {"id": 8, "prompt": "Is Jupiter up?", "expect": ["get_sky_report"], "domain": "sky"},
+    {"id": 9, "prompt": "Weather, sunset and moon?", "expect": ["get_weather", "get_sky_report"], "domain": "atmospherics+sky"},
+    {"id": 10, "prompt": "What's the weather like?", "expect": ["get_weather"], "exact": true, "domain": "atmospherics"},
+    {"id": 11, "prompt": "What time is it?", "expect": ["get_time_context"], "domain": "resident"},
+    {"id": 12, "prompt": "Give me a morning briefing.", "expect": ["get_time_context", "get_weather", "get_news_stories", "get_machine_status", "get_market_prices"], "domain": "briefing"},
+    {"id": 13, "prompt": "What notes do I have saved?", "expect": ["read_archive"], "args": {"action": "list"}, "domain": "archive"},
+    {"id": 14, "prompt": "Do I have anything saved about Artemis?", "expect": ["read_archive"], "args": {"action": "search"}, "domain": "archive"},
+    {"id": 15, "prompt": "Read notes.md", "expect": ["read_archive"], "args": {"action": "read"}, "domain": "archive"},
+    {"id": 16, "prompt": "Search the archives of Nethys for lich", "expect": ["search_web"], "known_miss": true, "domain": "web"},
+    {"id": 17, "prompt": "Save that as lich.md", "expect": ["write_document"], "domain": "archive", "history": [{"role": "user", "content": "In two sentences, what is a lich in Pathfinder?"}, {"role": "assistant", "content": "A lich is a spellcaster who has used necromancy to become undead, binding its soul to an object called a phylactery. As long as the phylactery survives, a destroyed lich re-forms within days."}]},
+    {"id": 18, "prompt": "What's 17% of 240?", "expect": ["calculate"], "domain": "resident"},
+    {"id": 19, "prompt": "How many km is 26.2 miles?", "expect": ["convert_unit"], "domain": "cogitator"},
+    {"id": 20, "prompt": "Set a 20 minute timer", "expect": ["manage_timer"], "args": {"action": "start"}, "domain": "chronometry"},
+    {"id": 21, "prompt": "Play some Radiohead", "expect": ["play_music"], "domain": "vox"},
+    {"id": 22, "prompt": "Turn it down a bit", "expect": ["control_music"], "domain": "vox", "history": [{"role": "user", "content": "Play some Radiohead"}, {"role": "assistant", "content": "Now playing Karma Police by Radiohead."}]},
+    {"id": 23, "prompt": "What does the auto DJ do?", "expect": ["get_module_docstring"], "args": {"module": "awen"}, "domain": "codex"},
+    {"id": 24, "prompt": "What does Argus do?", "expect": ["get_module_docstring"], "args": {"module": "argus"}, "domain": "codex"},
+    {"id": 25, "prompt": "Any news?", "expect": ["get_news_stories"], "domain": "scriptorium"},
+    {"id": 26, "prompt": "How's my watchlist?", "expect": ["get_market_prices"], "domain": "vault"},
+    {"id": 27, "prompt": "Search the web for the latest Gemma release", "expect": ["search_web"], "domain": "web"},
+    {"id": 28, "prompt": "Tell me a joke", "expect": [], "exact": true, "domain": "none"}
+  ]
+}

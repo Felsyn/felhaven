@@ -1,11 +1,13 @@
 """
 Midas panel — market prices (PRICES tab) + holdings ledger (LEDGER tab).
 
+Job:         Show market prices and your holdings ledger, sealed behind the Cerberus PIN.
+
 Cerberus gate: the whole panel is sealed behind the Cerberus PIN (Midas is the
 guardian's first real consumer — see the Cerberus brief, locked decision #2).
 Until the PIN is entered the body shows an alarm-red-on-black gate; the tabs are
-built lazily on unlock and Kairos ticks are buffered until then. This is a
-UI-only wrapper — midas.py (the tool) is untouched. The gate calls
+built lazily on unlock and Kairos ticks are buffered until then. The gate is
+the panel's own: midas.py knows nothing of it. The gate calls
 cerberus.unlock() (not verify()) — midas.py reads the Finnhub key from the
 Vault at fetch-time, so the gate must open the same session that vault_get()
 reads from. Since Cerberus's session is module-level, unlocking here also
@@ -14,38 +16,69 @@ session can close anywhere — the Cerberus tab, idle, a Windows lock, sleep —
 and session_rider, registered on Kairos's 2 s `cerberus` worker, re-seals this
 panel within one tick of it, with the reason. (The LEDGER tab's edits are what
 the child lock is for, so 2 s, not the 60 s midas tick.) update() keeps its own
-liveness check as a second line.
+liveness check as a second line. Opening the gate asks Kairos to run the
+`midas` worker at once (Kairos.refetch): the tick kept while sealed says
+"locked", and the next one was up to 60 s away.
 
 MidasPanel hosts two tabs:
     PRICES — one row per ticker in midas_watchlist.json, current price + daily %
-             change (green/red). Driven by the `midas` Kairos worker via
-             update(). (Was the whole panel; now a tab.)
+             change (green/red), and "updated HH:MM" from the reading's as_of.
+             Driven by the `midas` Kairos worker via update(). (Was the whole
+             panel; now a tab.)
     LEDGER — Plutus: manual buy/sell entry + derived totals + scrolling record.
              No network, no Kairos worker — pure local CRUD. Rebuilt from the
              ledger file on each entry.
 
-Tab pattern mirrors PhemePanel: tk.Label tabs with a 1px underline indicator.
+The tab bar is its own (tk.Label tabs with a 1 px underline), not
+theme.TabHost: the tabs are built only once the gate opens.
 
 Plutus ledger UI:
-    Top:    total shares held · total cost invested   ('0 / $0.00' when empty)
+    Top:    total shares held · total cost invested   ('0 / $0.00' when empty),
+            in red with what's wrong when the file can't be read or some
+            records aren't counted
     Entry:  ticker dropdown (from watchlist) · shares · price · BUY/SELL · Add
-    Below:  scrolling record, newest first —
+    Below:  scrolling record (theme.ScrollColumn), newest first —
             date · ticker · action · shares · cost-of-this-event
             BUY rows green, SELL rows red.
 
-V0.02:  Audited 2026-07-24 — map the five midas error slugs to short human text
-        (was a constant "err" for every one), and dim stale prices instead of
-        showing a stale value as if it were current.
+Contract:    update(data) takes midas.fetch()'s dict, or None (kept as it
+             is). session_rider.update(data) takes cerberus.fetch()'s report.
+             set_refetch(fn) takes Kairos.refetch. Tk thread only; no thread
+             or after() of its own (§6).
+Upstream:    felhaven.py (builds it, registers it on "midas" and its
+             session_rider on "cerberus", and calls set_refetch)
+Downstream:  tools/midas.py (load_watchlist, the error slugs), tools/plutus.py
+             (the ledger), cerberus.py (the gate and the session),
+             panels/cerberus_panel.py (LOCK_REASON_TEXT), theme.py
+             (ScrollColumn), tools/virgil.py and panels/virgil_tooltip.py
+Requires:    tkinter, datetime, typing (stdlib).
+
+2026-07-24:  walkthrough audit — map the five midas error slugs to short
+             human text (was a constant "err" for every one), and dim stale
+             prices instead of showing a stale value as if it were current.
+
+V0.03:       Walked through 2026-11-22 (the V0.03 walkthrough, CONVENTIONS
+             §3; born 2026-06-10). Opening the gate showed "locked" on every
+             row until the next 60 s tick; it now asks Kairos for prices at
+             once, and Midas no longer reuses a cached refusal. The ledger's
+             record scrolled only off its rows: the canvas heard <Leave> as
+             the pointer moved onto them and dropped the wheel; it is
+             theme.ScrollColumn now. A failed write escaped ADD's callback,
+             and an unreadable ledger read as "no transactions yet"; both
+             say so in red. One read per refresh, not two. Two entry boxes
+             drop the theme's own cursor colour (§7).
 """
 
 import tkinter as tk
 from datetime import datetime
+from typing import Any, Callable
 
-from theme import C, FONTS, Card, PhosphorScroll
+from panels import virgil_tooltip
+from theme import C, FONTS, Card, ScrollColumn
 
 import cerberus
 from panels.cerberus_panel import LOCK_REASON_TEXT
-from tools import midas, plutus
+from tools import midas, plutus, virgil
 
 
 # Midas hands the panel a slug when a ticker can't be priced; §2 says the panel
@@ -58,6 +91,21 @@ _ERROR_TEXT = {
     midas.ERR_NO_DATA:      "no data",
     midas.ERR_FETCH_FAILED: "net err",
 }
+
+
+def _all_locked(data: Any) -> bool:
+    """A reading where every ticker is vault_locked: what a sealed tick says."""
+    tickers = data.get("tickers") if isinstance(data, dict) else None
+    return bool(tickers) and all(
+        r.get("error") == midas.ERR_VAULT_LOCKED for r in tickers)
+
+
+def _hhmm(as_of: Any) -> str:
+    """as_of's time of day, or "" when there isn't a readable one."""
+    try:
+        return datetime.fromisoformat(as_of).strftime("%H:%M")
+    except (TypeError, ValueError):
+        return ""
 
 
 class _SessionRider:
@@ -84,10 +132,25 @@ class MidasPanel(Card):
         "ledger": "DYNASTIC VAULT — HOLDINGS LEDGER",
     }
 
+    # Each tab's hover tooltip (Virgil): a tab says who works there, so it is
+    # the gloss of the module that fills it (CONVENTIONS §7). Keys are the
+    # tab keys in self._tabs.
+    _TAB_TIPS = {
+        "prices": virgil.module("midas"),
+        "ledger": virgil.module("plutus"),
+    }
+    # The ledger's BUY/SELL toggle looks like a button that submits; its tip
+    # says it only picks the side (a glossary entry). Keys name the widgets in
+    # self.tip_targets, built with the ledger once the vault is open.
+    _TIPS = {
+        "action": virgil.term("ledger_action"),
+    }
+
     def __init__(self, parent):
         super().__init__(parent, "Dynastic Vault — market prices", C["amber"])
 
-        self._watchlist = midas._load_watchlist()
+        self._watchlist = midas.load_watchlist()
+        self._refetch: Callable[..., None] = lambda *names: None
 
         # ── Cerberus PIN gate ─────────────────────────────────────────────────
         # The Vault is sealed until the Cerberus PIN is entered (Cerberus is the
@@ -106,8 +169,13 @@ class MidasPanel(Card):
         self._content = tk.Frame(self.body, bg=C["card"])
         self.session_rider = _SessionRider(self)
 
+    def set_refetch(self, fn: Callable[..., None]) -> None:
+        """felhaven.py passes Kairos.refetch once Kairos exists, so opening the
+        gate can fetch prices now rather than at the next 60 s tick."""
+        self._refetch = fn
+
     # ─────────────────────────────────────────────────────────────────────────
-    #  Cerberus gate (alarm red on black) — the only new surface; verify() only.
+    #  Cerberus gate (alarm red on black): unlock() opens the shared session.
     # ─────────────────────────────────────────────────────────────────────────
 
     def _build_gate(self, parent: tk.Frame) -> None:
@@ -176,9 +244,13 @@ class MidasPanel(Card):
         self._build_content()
         self._gate.pack_forget()
         self._content.pack(fill="both", expand=True)
-        if self._pending is not None:      # apply the tick that arrived while sealed
+        # A tick kept while sealed says "locked" on every row, which just
+        # stopped being true; one fetched while the session was open
+        # elsewhere is still worth showing until the refetch lands.
+        if self._pending is not None and not _all_locked(self._pending):
             self.update(self._pending)
-            self._pending = None
+        self._pending = None
+        self._refetch("midas")
 
     def _reseal(self, reason: str | None = None) -> None:
         """The shared Cerberus session closed somewhere else (the Cerberus tab,
@@ -212,6 +284,7 @@ class MidasPanel(Card):
             lbl.bind("<Button-1>", lambda e, k=key: self._show_tab(k))
             self._tabs[key]  = lbl
             self._lines[key] = line
+            virgil_tooltip.attach(lbl, self._TAB_TIPS[key])
 
         # ── Content frames ────────────────────────────────────────────────────
         self._prices_frame = tk.Frame(self._content, bg=C["card"])
@@ -313,7 +386,8 @@ class MidasPanel(Card):
                 price_lbl.config(text=r["price_fmt"], fg=C["text1"])
                 color = C["green"] if r["direction"] == "up" else C["red"]
                 pct_lbl.config(text=r["pct_fmt"], fg=color)
-        self._last_lbl.config(text=f"updated {datetime.now().strftime('%H:%M')}")
+        when = _hhmm(data.get("as_of")) or datetime.now().strftime("%H:%M")
+        self._last_lbl.config(text=f"updated {when}")
 
     # ─────────────────────────────────────────────────────────────────────────
     #  LEDGER tab (Plutus)
@@ -344,7 +418,7 @@ class MidasPanel(Card):
         # Shares
         self._sh_var = tk.StringVar()
         tk.Entry(entry, textvariable=self._sh_var, font=FONTS["small"], width=6,
-                 bg=C["bar_bg"], fg=C["text1"], insertbackground=C["text1"],
+                 bg=C["bar_bg"], fg=C["text1"],
                  highlightthickness=1, highlightbackground=C["border"], bd=0
                  ).pack(side="left", padx=(0, 4))
         tk.Label(entry, text="sh", font=FONTS["tiny"], fg=C["text3"],
@@ -355,7 +429,7 @@ class MidasPanel(Card):
                  bg=C["card"]).pack(side="left")
         self._pr_var = tk.StringVar()
         tk.Entry(entry, textvariable=self._pr_var, font=FONTS["small"], width=8,
-                 bg=C["bar_bg"], fg=C["text1"], insertbackground=C["text1"],
+                 bg=C["bar_bg"], fg=C["text1"],
                  highlightthickness=1, highlightbackground=C["border"], bd=0
                  ).pack(side="left", padx=(0, 6))
 
@@ -367,6 +441,9 @@ class MidasPanel(Card):
         )
         self._action_btn.pack(side="left", padx=(0, 6))
         self._action_btn.bind("<Button-1>", lambda e: self._toggle_action())
+        self.tip_targets: dict[str, tk.Misc] = {"action": self._action_btn}
+        for key, tip in self._TIPS.items():
+            virgil_tooltip.attach(self.tip_targets[key], tip)
 
         # Add
         add_btn = tk.Label(entry, text="+ ADD", font=FONTS["small_bold"],
@@ -380,7 +457,7 @@ class MidasPanel(Card):
         self._ledger_msg.pack(fill="x")
 
         # ── Scrolling record ──────────────────────────────────────────────────
-        self._record = _LedgerScroll(parent)
+        self._record = ScrollColumn(parent)
         self._record.pack(fill="both", expand=True, pady=(4, 0))
 
     def _toggle_action(self) -> None:
@@ -402,8 +479,15 @@ class MidasPanel(Card):
             return
         try:
             plutus.add_event(ticker, action, shares, price)
-        except ValueError as e:
-            self._ledger_msg.config(text=str(e), fg=C["red"])
+        except (ValueError, plutus.LedgerError) as e:
+            prefix = "not saved: " if isinstance(e, plutus.LedgerError) else ""
+            self._ledger_msg.config(text=f"{prefix}{e}", fg=C["red"])
+            return
+        except OSError:
+            # Plutus logged it. The error's own text names the file's path (§2).
+            self._ledger_msg.config(
+                text="not saved: the ledger couldn't be written (see the log)",
+                fg=C["red"])
             return
 
         self._sh_var.set("")
@@ -413,66 +497,40 @@ class MidasPanel(Card):
         self._refresh_ledger()
 
     def _refresh_ledger(self) -> None:
-        """Recompute totals + rebuild the record from the ledger file."""
-        t = plutus.totals()
-        self._totals_lbl.config(
-            text=f"{t['shares']:g} shares  ·  ${t['cost']:,.2f} invested")
-        self._record.set_rows(plutus.history())
+        """Recompute totals + rebuild the record from the ledger file: one
+        read, three views (the plutus.positions idiom)."""
+        try:
+            events = plutus.read_events()
+        except plutus.LedgerError as e:
+            # Plutus logged it. "no transactions yet" would be false, and ADD
+            # refuses to write over the file.
+            self._totals_lbl.config(text=f"{e}; see the log", fg=C["red"])
+            self._fill_record([], empty="")
+            return
+        t = plutus.totals(events)
+        text = f"{t['shares']:g} shares  ·  ${t['cost']:,.2f} invested"
+        skipped = plutus.unreadable(events)
+        if skipped:
+            noun = "record" if skipped == 1 else "records"
+            text += f"  ·  {skipped} {noun} unreadable, not counted"
+        self._totals_lbl.config(text=text, fg=C["red"] if skipped else C["text1"])
+        self._fill_record(plutus.history(events))
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Scrollable ledger record
-# ─────────────────────────────────────────────────────────────────────────────
-
-class _LedgerScroll(tk.Frame):
-    """Vertically-scrollable container for ledger rows (Canvas + Scrollbar)."""
-
-    def __init__(self, parent):
-        super().__init__(parent, bg=C["card"])
-        self._canvas = tk.Canvas(self, bg=C["card"], highlightthickness=0, bd=0)
-        self._scroll = PhosphorScroll(self, command=self._canvas.yview)
-        self._canvas.configure(yscrollcommand=self._scroll.set)
-        self._scroll.pack(side="right", fill="y")
-        self._canvas.pack(side="left", fill="both", expand=True)
-
-        self.inner = tk.Frame(self._canvas, bg=C["card"])
-        self._win = self._canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        self.inner.bind("<Configure>",
-                        lambda e: self._canvas.configure(scrollregion=self._canvas.bbox("all")))
-        self._canvas.bind("<Configure>",
-                          lambda e: self._canvas.itemconfig(self._win, width=e.width))
-        self._canvas.bind("<Enter>", self._bind_wheel)
-        self._canvas.bind("<Leave>", self._unbind_wheel)
-
-    def _bind_wheel(self, _e):
-        self._canvas.bind_all("<MouseWheel>", self._wheel)
-        self._canvas.bind_all("<Button-4>", self._wheel)
-        self._canvas.bind_all("<Button-5>", self._wheel)
-
-    def _unbind_wheel(self, _e):
-        self._canvas.unbind_all("<MouseWheel>")
-        self._canvas.unbind_all("<Button-4>")
-        self._canvas.unbind_all("<Button-5>")
-
-    def _wheel(self, event):
-        if event.num == 5 or event.delta < 0:
-            self._canvas.yview_scroll(1, "units")
-        elif event.num == 4 or event.delta > 0:
-            self._canvas.yview_scroll(-1, "units")
-
-    def set_rows(self, rows: list) -> None:
-        for w in self.inner.winfo_children():
+    def _fill_record(self, rows: list, empty: str = "no transactions yet") -> None:
+        inner = self._record.body
+        for w in inner.winfo_children():
             w.destroy()
 
         if not rows:
-            tk.Label(self.inner, text="no transactions yet",
-                     font=FONTS["small_italic"], fg=C["text3"],
-                     bg=C["card"]).pack(anchor="w", pady=(8, 0))
+            if empty:
+                tk.Label(inner, text=empty,
+                         font=FONTS["small_italic"], fg=C["text3"],
+                         bg=C["card"]).pack(anchor="w", pady=(8, 0))
             return
 
         for r in rows:
             color = C["green"] if r["action"] == "buy" else C["red"]
-            line = tk.Frame(self.inner, bg=C["card"])
+            line = tk.Frame(inner, bg=C["card"])
             line.pack(fill="x", pady=1)
 
             tk.Label(line, text=r["date"], font=FONTS["tiny"], fg=C["text3"],
@@ -486,4 +544,4 @@ class _LedgerScroll(tk.Frame):
             tk.Label(line, text=f"${r['cost']:,.2f}", font=FONTS["small"],
                      fg=color, bg=C["card"], anchor="e").pack(side="right")
 
-            tk.Frame(self.inner, bg=C["border"], height=1).pack(fill="x")
+            tk.Frame(inner, bg=C["border"], height=1).pack(fill="x")

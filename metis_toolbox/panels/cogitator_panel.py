@@ -17,9 +17,24 @@ Kairos and this host never sees a tick. Do NOT register the host with Kairos —
 Card (a tk.Frame) has a built-in update() that takes no data arg, so a Kairos
 dispatch would TypeError.
 
-V0.02: Audited 2026-07-26 — verified honest; no polled tab (nothing here is a
-       Kairos worker). Scribe gets the shared data dict + save callback; Zeno
-       and Eudoxus are self-contained. First smoke coverage.
+Upstream:    felhaven.py (builds it as the "cogitator" view with the Scribe
+             data dict and its debounced save, and reaches through it to
+             .scribe.show_saved() after each save).
+Downstream:  theme.py (TabHost), tools/virgil.py and panels/virgil_tooltip.py
+             (each tab's tip), panels/scribe_panel.py, zeno_panel.py,
+             eudoxus_panel.py.
+
+Requires:    tkinter, through theme.TabHost.
+
+2026-07-26:  The first audit found it honest, with no polled tab (nothing
+             here is a Kairos worker): Scribe gets the shared data dict + save
+             callback; Zeno and Eudoxus are self-contained. First smoke
+             coverage.
+
+V0.03: Walked through 2026-11-21 (born 2026-06-23, when Scribe and Zeno
+       became one tabbed view; first audited 2026-07-26). True as written;
+       Upstream (felhaven reaches through to SCRIBE since S25), Downstream
+       and Requires added.
 """
 
 from theme import C, TabHost

@@ -31,9 +31,10 @@ Contract:    A hybrid flavor, new to the stack — document it here so future-yo
                - mutations: play / toggle_pause / set_paused / next_track /
                             prev_track / stop / set_volume fire from
                             deliberate UI action in
-                            MorpheusPanel — plus two non-UI callers: harmonia.py
-                            calls duck() at the top of its play() and unduck()
-                            from its tick_yield(). duck() runs on whatever
+                            MorpheusPanel, from the two tools below, and from
+                            awen.py (Auto-DJ: play, taper, release_taper) —
+                            plus harmonia.py, which calls duck() at the top of
+                            its play() and unduck() from its tick_yield(). duck() runs on whatever
                             thread entered play() — Calliope's release worker
                             (speech) or the UI thread (an Orpheus briefing),
                             never Harmonia's own play worker (which
@@ -47,7 +48,9 @@ Contract:    A hybrid flavor, new to the stack — document it here so future-yo
                - play_music    : "play this song" searches YouTube's top hit
                                  and plays it. STARTS something new. (It
                                  mutates audio, not records, so it's a safe
-                                 LLM tool.)
+                                 LLM tool.) It answers once the track is
+                                 audible or has failed, not when loadfile is
+                                 sent — see "The verdict" below.
                - control_music : governs what is ALREADY playing — one
                                  `action` enum over pause / resume / stop /
                                  next / previous / replay / status / volume.
@@ -183,6 +186,21 @@ failures:    yt-dlp asynchronously and reports nothing back on the write. So a
              mpv's log lines carry full signed googlevideo URLs). The reason
              goes to the logs instead.
 
+The verdict: play_music waits for the load's verdict before it answers
+             (the owner's pick, 2026-11-23). Until then it answered now_playing
+             the moment loadfile was written, so when YouTube refused the
+             stream Pythia had already said the song was playing; the owner's
+             log held 45 Morpheus errors from 2026-09-17 on, most of them that
+             (counted by level and logger, the messages unread). It polls
+             status() every _VERDICT_POLL, the same read control_music makes,
+             until media exists (now_playing), the load is condemned or mpv is
+             gone (unavailable), a stop disarmed it (not_playing), or another
+             play() replaced it (now_playing: ours did start). Past
+             _VERDICT_WAIT it answers now_playing with "loading": True, which
+             is what a slow resolve honestly is. play() also says whether it
+             sent anything at all, so a refused URL or an mpv that won't start
+             is unavailable at once.
+
 Ducking:     Narration does not STOP music, it lowers it: harmonia.play() calls
              duck() before buffering any audio, and harmonia.tick_yield() calls
              unduck() once its buffer has been quiet for a beat.
@@ -284,8 +302,11 @@ mpv log:     TWO files in logs/mpv/, because mpv's own log is unusable as-is.
              felhaven.log is what Emanon surfaces on the dashboard, and it stands
              on its own if --log-file is ever dropped entirely.
 
-Upstream:    kairos.py (calls fetch), panels/morpheus_panel.py (UI mutations),
-             felhaven.py (calls shutdown() on close)
+Upstream:    kairos.py (calls fetch every 2 s), panels/morpheus_panel.py (UI
+             mutations), pythia.py (play_music / control_music), awen.py
+             (play, taper, release_taper, last_snapshot, search, describe),
+             harmonia.py (duck / unduck), panels/home_panel.py (is_audible,
+             tick_fade), felhaven.py (calls shutdown() on close)
 Tapering:    The volume mpv holds is a COMPOSITION of three factors, written in
              one private place (_apply_volume): the user's level, times the duck
              latch, times a taper gain.
@@ -336,12 +357,14 @@ Metadata:    search() runs --flat-playlist, which is what makes ten results one
              euterpe owns every judgment about what a song is, exactly as it did
              when a title was all there was (§0).
 
-Downstream:  mpv.exe (audio engine) + yt-dlp.exe (search / URL resolution)
+Downstream:  mpv.exe (audio engine) + yt-dlp.exe (search / URL resolution),
+             each vouched for by tools/aegis.py
 
-Requires:    mpv + yt-dlp binaries (bin/ or PATH).
-             json, logging, os, shutil, subprocess, time (stdlib).
+Requires:    mpv + yt-dlp binaries (bin/ or PATH), tools/aegis.py.
+             json, logging, math, os, re, subprocess, sys, time, typing
+             (stdlib).
 
-V0.02:       Audited 2026-07-25 — the last output-contract allowlist entry:
+2026-07-25:  walkthrough audit — the last output-contract allowlist entry:
              search()'s "search failed" ×3 → "search_failed" (§2 slug), which
              empties the allowlist. Also: dead _get_prop() removed (superseded by
              _get_props); the harmonia caller re-described as running on the
@@ -349,25 +372,47 @@ V0.02:       Audited 2026-07-25 — the last output-contract allowlist entry:
              corrected to config/. Never-raise verified across fetch/mutations/
              search/play_music/resume_music.
 
-NOTE (2026-08-20, post-audit): --log-file and load-failure detection added after
-a real outage in which a stale yt-dlp made every play a no-op — the panel showed
-"(loading…)" indefinitely and felhaven.log had not one METIS.morpheus line. The
-audit above verified the never-raise contract and the slug vocabulary and both
-still hold; what it did not ask was whether a failure could be SEEN. See the
-"Load failures" and "mpv log" sections. fetch() gained an "error" key, so the §2
-error vocabulary now applies to this module's polled output as well as its tool
-handles — the slug is bare and deliberately carries none of mpv's own text.
+2026-08-20:  --log-file and load-failure detection added after a real outage
+             in which a stale yt-dlp made every play a no-op — the panel showed
+             "(loading…)" indefinitely and felhaven.log had not one
+             METIS.morpheus line. The audit above verified the never-raise
+             contract and the slug vocabulary and both still hold; what it did
+             not ask was whether a failure could be SEEN. See the "Load
+             failures" and "mpv log" sections. fetch() gained an "error" key,
+             so the §2 error vocabulary now applies to this module's polled
+             output as well as its tool handles — the slug is bare and
+             deliberately carries none of mpv's own text.
 
-NOTE (2026-09-19, post-audit): the taper's hold stopped being a fixed 6s and
-became a conditional one, released by a new function (release_taper()) rather
-than by its own clock. See "Tapering" and release_taper()'s docstring. The
-audit above never touched taper() — it did not exist yet — so nothing it
-verified is at stake; this is a new capability on the same volume-composition
-model, through the same one writer.
+2026-09-19:  the taper's hold stopped being a fixed 6s and became a
+             conditional one, released by a new function (release_taper())
+             rather than by its own clock. See "Tapering" and release_taper()'s
+             docstring. The audit above never touched taper() — it did not
+             exist yet — so nothing it verified is at stake; this is a new
+             capability on the same volume-composition model, through the same
+             one writer.
+
+2026-11-16:  the Pythia tool audit (CONVENTIONS §12). Both descriptions open
+             with what the tool does (§3), and each names the other as the one
+             to use instead (one domain, T5). The gate normalizes an action's
+             case (T3, the audit's H4). TOOL_META says music, and both change
+             state: play_music is live (yt-dlp searches YouTube), control_music
+             local. Its failures use the shared unavailable and bad_arguments
+             (T9, 2026-11-16); not_playing and nothing_to_resume stay its own.
+
+V0.03:       Walked through 2026-11-23 (the V0.03 walkthrough, S35; born
+             2026-06-10). The BACKLOG's load failure that never reached the
+             chat is closed the way the owner picked: play_music waits for the
+             verdict (see "The verdict"), and play() says whether it sent
+             anything. set_volume(nan) set full volume (min() with a NaN keeps
+             its first argument); a level that isn't a number now changes
+             nothing. Contract, Upstream, Downstream and Requires (shutil was
+             listed, never imported) caught up; the taper's "6 s hold" became
+             the hold; the two post-audit NOTEs became dated paragraphs.
 """
 
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -455,6 +500,13 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # so this is not a resolve-time budget (see the "Load failures" docstring).
 _PENDING_GRACE = 4.0   # seconds
 
+# How long play_music waits for a load's verdict, and how often it looks (see
+# "The verdict"). A load took roughly 4.5-6.5 s to become audible (measured
+# 2026-09-19, the taper's handover), so 15 s is that worst case doubled with a
+# margin; past it the answer says the track is still loading.
+_VERDICT_WAIT = 15.0   # seconds
+_VERDICT_POLL = 0.5    # seconds between status() reads while waiting
+
 # mpv's `volume` property is a 0-100 scale. _FULL_VOLUME is where mpv boots and
 # the default the user starts from; _DUCK_RATIO is the FRACTION of the user's
 # level narration pulls it down to.
@@ -494,7 +546,7 @@ _TAPER_HOLD_MAX = 12.0          # seconds at the floor, worst case, unreleased
 _TAPER_UP = 2.5                 # seconds fading back in
 _TAPER_FLOOR = 0.15             # lowest gain. NEVER 0 — see above.
 
-# Volume points. Below this the write is skipped, which is what makes the 6 s
+# Volume points. Below this the write is skipped, which is what makes the
 # hold cost zero pipe traffic.
 _FADE_MIN_STEP = 1.0
 
@@ -908,7 +960,7 @@ def _checkpoint() -> None:
     _ipc(["write-watch-later-config"])
 
 
-def play(url: str, *, from_start: bool = False) -> None:
+def play(url: str, *, from_start: bool = False) -> bool:
     """Load (and start) a URL, replacing whatever was playing. Starts mpv if
     needed. mpv natively queues a full playlist URL; next/prev then walk it.
     Bookmarks the outgoing track first so switching videos keeps its place.
@@ -936,14 +988,18 @@ def play(url: str, *, from_start: bool = False) -> None:
     URL (built by yt-dlp from the video id) or a saved playlist (checked by the
     panel's add form), but the playlists file is hand-editable, so the check
     lives here, at the program boundary, like describe()'s (CONVENTIONS §12,
-    2026-10-03). Case-sensitive, so anything unexpected fails closed."""
+    2026-10-03). Case-sensitive, so anything unexpected fails closed.
+
+    Returns True once loadfile was sent, False when nothing was: a refused
+    URL, or an mpv that would not start. True is not "it plays" — that is the
+    verdict play_music waits for."""
     global _last_url, _pending_load, _load_error
     if not (isinstance(url, str) and url.startswith(("http://", "https://"))):
         log.warning("play: refused a URL that is not http(s)")
-        return
+        return False
     _recycle_if_log_is_huge()          # before _ensure_mpv, so it respawns clean
     if not _ensure_mpv():
-        return
+        return False
     _checkpoint()                      # bookmark the outgoing track, if any
     if from_start:
         # loadfile <url> <flags> <index> <options> — the -1 is "append at the
@@ -955,6 +1011,7 @@ def play(url: str, *, from_start: bool = False) -> None:
     _last_url = url
     _pending_load = time.monotonic()   # status() confirms or condemns it
     _load_error = None                 # a new attempt clears the last verdict
+    return True
 
 
 def toggle_pause() -> None:
@@ -1045,7 +1102,7 @@ def _apply_volume(*, force: bool = True) -> None:
 
     `force=False` applies the step quantiser, for the ramp: below
     _FADE_MIN_STEP volume points nobody can hear the difference and the write is
-    skipped, which is what makes the taper's 6 s hold cost zero pipe traffic.
+    skipped, which is what makes the taper's hold cost zero pipe traffic.
     Never raises (_ipc doesn't).
     """
     global _volume_written
@@ -1256,9 +1313,17 @@ def set_volume(level: float) -> float:
     Write-only like duck()/unduck(), and for a weaker reason: this one is
     called from the Kairos worker or the UI, not the audio thread. It stays
     write-only for consistency, and because there is nothing to read back.
+    A level that isn't a finite number changes nothing: NaN set full volume,
+    since min() keeps its first argument against one (measured 2026-11-23).
     Never raises."""
     global _user_volume
-    _user_volume = max(0.0, min(100.0, float(level)))
+    try:
+        wanted = float(level)
+    except (TypeError, ValueError):
+        return _user_volume
+    if not math.isfinite(wanted):
+        return _user_volume
+    _user_volume = max(0.0, min(100.0, wanted))
     if _ducked:
         return _user_volume         # unduck() will apply it — see above
     _apply_volume()             # no-op when mpv is not running
@@ -1273,13 +1338,13 @@ def search(query: str, limit: int = 10) -> list[dict[str, Any]]:
     MorpheusPanel calls this on a daemon thread, never the main thread.
 
     Returns up to `limit` rows: {"title", "channel", "duration", "url"}.
-    On any failure returns [{"error": "search_failed"}] so the panel can render
+    On any failure returns [{"error": "unavailable"}] so the panel can render
     a single error row.
     """
     ytdlp = _resolve("yt-dlp")
     if not ytdlp:
         log.warning("search: yt-dlp not found")
-        return [{"error": "search_failed"}]
+        return [{"error": "unavailable"}]
 
     args = [ytdlp, f"ytsearch{limit}:{query}", "--flat-playlist", "-J", "--no-warnings"]
     try:
@@ -1288,11 +1353,11 @@ def search(query: str, limit: int = 10) -> list[dict[str, Any]]:
         if proc.returncode != 0:
             log.warning("search: yt-dlp exit %s: %s",
                         proc.returncode, proc.stderr.decode("utf-8", "replace")[:200])
-            return [{"error": "search_failed"}]
+            return [{"error": "unavailable"}]
         data = json.loads(proc.stdout)
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
         log.warning("search failed: %s", e)
-        return [{"error": "search_failed"}]
+        return [{"error": "unavailable"}]
 
     rows = []
     for entry in data.get("entries") or []:
@@ -1338,7 +1403,7 @@ def describe(url: str) -> dict[str, Any]:
     and euterpe.has_music_evidence() own the judgment, exactly as they did when
     a title was all there was (§0).
 
-    Returns the _DESCRIBE_FIELDS it could read, or {"error": "describe_failed"}
+    Returns the _DESCRIBE_FIELDS it could read, or {"error": "unavailable"}
     on any failure — a bare slug (§2), never yt-dlp's stderr, which carries
     signed URLs. Never raises.
 
@@ -1349,13 +1414,13 @@ def describe(url: str) -> dict[str, Any]:
     found = _WATCH_URL.fullmatch(url)
     if found is None:
         log.warning("describe: refused a URL that is not a YouTube watch URL")
-        return {"error": "describe_failed"}
+        return {"error": "unavailable"}
     watch = f"https://www.youtube.com/watch?v={found.group(1)}"
 
     ytdlp = _resolve("yt-dlp")
     if not ytdlp:
         log.warning("describe: yt-dlp not found")
-        return {"error": "describe_failed"}
+        return {"error": "unavailable"}
 
     args = [ytdlp, "-J", "--no-playlist", "--no-warnings", "--", watch]
     try:
@@ -1365,14 +1430,14 @@ def describe(url: str) -> dict[str, Any]:
             log.warning("describe: yt-dlp exit %s: %s",
                         proc.returncode,
                         proc.stderr.decode("utf-8", "replace")[:200])
-            return {"error": "describe_failed"}
+            return {"error": "unavailable"}
         data = json.loads(proc.stdout)
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
         log.warning("describe failed: %s", e)
-        return {"error": "describe_failed"}
+        return {"error": "unavailable"}
 
     if not isinstance(data, dict):
-        return {"error": "describe_failed"}
+        return {"error": "unavailable"}
     out: dict[str, Any] = {}
     for field in _DESCRIBE_FIELDS:
         if field in data:
@@ -1628,16 +1693,26 @@ def load_playlists() -> list[dict[str, Any]]:
     Ordered playlist rows from morpheus_playlists.json (UI order follows file
     order). Returns [] on any failure (panel shows a hint row), logs ERROR.
     Called from MorpheusPanel._reload_playlists().
+
+    Rows come back as the file holds them, one per position, because
+    remove_playlist() deletes BY position: a row this left out would shift
+    every index after it onto the wrong entry. So a row that isn't an object
+    stays in the list, and the panel skips it (§4). A "playlists" that isn't
+    a list is no playlists, logged; as a dict it stopped the panel, and so
+    Felhaven, from opening (measured 2026-11-23).
     """
     try:
         with open(_PLAYLISTS_PATH, "r", encoding="utf-8") as f:
-            playlists: list[dict[str, Any]] = json.load(f).get("playlists", [])
-            return playlists
+            playlists: Any = json.load(f).get("playlists", [])
     except FileNotFoundError:
         return []
     except Exception as e:
         log.error("failed to load playlists: %s", e)
         return []
+    if not isinstance(playlists, list):
+        log.error('failed to load playlists: "playlists" is not a list')
+        return []
+    return playlists
 
 
 def save_playlist(label: str, url: str) -> bool:
@@ -1722,7 +1797,7 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "play_music",
             "description": (
-                "Search YouTube for a song, artist, or any audio and play the top "
+                "Searches YouTube for a song, artist, or any audio and plays the top "
                 "result through the local audio engine (mpv). Call whenever the user "
                 "asks to play, put on, or listen to music or a specific track. To "
                 "change or inspect audio that is ALREADY playing — pause, skip, stop, "
@@ -1745,7 +1820,7 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "control_music",
             "description": (
-                "Control audio that is already playing, or report on it. Call when "
+                "Controls audio that is already playing, or reports on it. Call when "
                 "the user asks to pause, unpause, stop, skip, go back, put the last "
                 "track back on, or asks what is playing right now. To start "
                 "something new, use play_music instead."
@@ -1788,33 +1863,70 @@ TOOL_DEFINITIONS = [
     },
 ]
 
+# What the code reads about each tool here; the model never sees it
+# (CONVENTIONS §8, "TOOL_META"). network: none = local only, cached = a poll
+# or TTL cache, live = may reach the network on every call. mutates = it
+# changes state outside the turn.
+TOOL_META: dict[str, dict[str, Any]] = {
+    "play_music":    {"domain": "music", "network": "live", "mutates": True},
+    "control_music": {"domain": "music", "network": "none", "mutates": True},
+}
+
 
 def play_music(query: str = "") -> dict[str, Any]:
-    """Toolbox entry: search + play the top hit. BLOCKS for a few seconds on the
-    yt-dlp search, so the caller must thread it — Pythia already runs tool calls
-    on a worker thread. Never raises: a missing binary, empty query, or no
-    result degrades to an error dict the model can relay."""
+    """Toolbox entry: search + play the top hit, and answer with the load's
+    verdict. BLOCKS for the yt-dlp search and then up to _VERDICT_WAIT for the
+    track to become audible, so the caller must thread it — Pythia already runs
+    tool calls on a worker thread. Never raises: a missing binary, empty query,
+    no result, or a load that fails degrades to an error dict the model can
+    relay (see "The verdict")."""
     query = (query or "").strip()
     if not query:
-        return {"error": "no_query", "detail": "No song was specified."}
+        return {"error": "bad_arguments", "detail": "No song was specified."}
 
     bins = available()
     if not bins["ytdlp"]:
-        return {"error": "player_unavailable", "detail": "yt-dlp binary not found."}
+        return {"error": "unavailable", "detail": "yt-dlp binary not found."}
     if not bins["mpv"]:
-        return {"error": "player_unavailable", "detail": "mpv binary not found."}
+        return {"error": "unavailable", "detail": "mpv binary not found."}
 
     results = search(query, limit=1)
     if not results or "error" in results[0] or not results[0].get("url"):
         return {"error": "no_results", "detail": f"Nothing found for {query!r}."}
 
     top = results[0]
-    play(top["url"])
-    return {
+    started = {
         "now_playing": top["title"],
         "channel":     top.get("channel", ""),
         "url":         top["url"],
     }
+    if not play(top["url"]):
+        return {"error": "unavailable", "detail": "The player could not start."}
+    return _await_verdict(top["url"], started)
+
+
+def _await_verdict(url: str, started: dict[str, Any]) -> dict[str, Any]:
+    """Poll status() until the load just sent is judged, and answer with that.
+    See "The verdict" for each outcome and why."""
+    deadline = time.monotonic() + _VERDICT_WAIT
+    while True:
+        snap = status()
+        if _last_url != url:                      # another play() replaced ours
+            return started
+        if snap.get("error"):
+            return {"error": "unavailable",
+                    "detail": "The track was found but would not load."}
+        if not snap.get("running"):
+            return {"error": "unavailable",
+                    "detail": "The player stopped before the track loaded."}
+        if snap.get("pos") is not None or snap.get("dur") is not None:
+            return started                        # media exists: it plays
+        if not snap.get("loading"):
+            return {"error": "not_playing: playback was stopped before the "
+                             "track loaded."}
+        if time.monotonic() >= deadline:
+            return {**started, "loading": True}
+        time.sleep(_VERDICT_POLL)
 
 
 def _replay() -> "dict[str, Any] | None":
@@ -1824,8 +1936,9 @@ def _replay() -> "dict[str, Any] | None":
     if _last_url is None:
         return {"error": "nothing_to_resume", "detail": "Nothing has been played yet."}
     if not available()["mpv"]:
-        return {"error": "player_unavailable", "detail": "mpv binary not found."}
-    play(_last_url)
+        return {"error": "unavailable", "detail": "mpv binary not found."}
+    if not play(_last_url):
+        return {"error": "unavailable", "detail": "The player could not start."}
     return None
 
 
@@ -1879,7 +1992,7 @@ def control_music(action: str = "status",
     # a live pipe would refuse a perfectly meaningful "turn it down for later".
     if action == "volume":
         if level is None:
-            return {"error": "no_level: volume needs a level from 0 to 100."}
+            return {"error": "bad_arguments: volume needs a level from 0 to 100."}
         return {"action": action, "volume": set_volume(level),
                 "status": _model_status()}
 

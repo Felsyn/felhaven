@@ -1,6 +1,8 @@
 """
 Argus panel — network awareness display for the Felhaven dashboard.
 
+Job:         Show what the network is doing: connections, ports, traffic, DNS and firewall.
+
 ArgusPanel — a bare tk.Frame tab body inside ModeratiPanel (the ARGUS tab),
 the network sibling of Emanon. A glanceable summary line ("veins and synapses
 at a glance") over a scrollable body of collapsible sections: Connections,
@@ -10,24 +12,51 @@ Report-only: it reads what argus.fetch() hands it and shows it. It never blocks,
 kills, or modifies a connection. Kairos owns all timing — there is no after()
 here; the only interactivity is the user-driven ▶/▼ section toggles.
 
-The panel HUMANIZES (argus.fetch shapes): bytes/s → "24.5 KB/s", epoch → "22s
-ago", firewall profiles → colored dots. Same split as Aura → Helios/Selene.
+The panel HUMANIZES (argus.fetch returns raw numbers): bytes/s → "24.5 KB/s",
+epoch → "22s ago", firewall profiles → colored dots.
 
 Kairos contract (single method): update(data).
     data is None  -> summary shows "stale"; sections hold their last good state.
 
-V0.02:  Audited 2026-07-25. Report-only display verified: no after() (only the
-        user-driven ▶/▼ section toggles), None -> "stale" holds last good state,
-        per-field degradation surfaced (DNS unavailable, firewall not-ok). Health
-        dot shows visibility, never threat. No error-slug map — fetch() degrades
-        per-field, so the panel consumes state, never an {"error": ...} dict.
+The summary dot shows visibility, never threat: teal when every source Argus
+can read answered, amber when one failed or a connection's program went
+unnamed. A DNS cache Windows shows only to an administrator (argus's
+needs_admin) is a permission, not a failure: its section says so and the dot
+stays teal (CONVENTIONS §12, 2026-11-21).
+
+Upstream:    panels/moderati_panel.py (builds it as the ARGUS tab body),
+             felhaven.py (registers it with Kairos's `argus` worker, which
+             calls tools.argus.fetch every 5 s).
+Downstream:  tools/argus.py (the data's shape: Kairos hands the panel fetch()'s
+             dict, so nothing here imports it), theme.py (C, FONTS,
+             PhosphorScroll), tools/virgil.py and panels/virgil_tooltip.py
+             (the summary and section tips).
+
+2026-07-25:  walkthrough audit — report-only display verified: no after()
+             (only the user-driven ▶/▼ section toggles), None -> "stale" holds
+             last good state, per-field degradation surfaced (DNS unavailable,
+             firewall not-ok). Health dot shows visibility, never threat. No
+             error-slug map — fetch() degrades per-field, so the panel consumes
+             state, never an {"error": ...} dict.
+
+V0.03:       Walked through 2026-11-21 (the V0.03 walkthrough, CONVENTIONS
+             §3/§12). In the repo since 2026-06-22. Checked: still no after()
+             and no thread; None holds the sections. Changed: a DNS cache
+             Windows refuses reads "Windows shows the DNS cache only to an
+             administrator" where it read "cache unavailable (DNS Client
+             service stopped?)" with the service running, and its title gives
+             no count it couldn't take; the docstring dropped a comparison with
+             Aura's old feed of Helios and Selene, and gained Upstream and
+             Downstream. First smoke tests of its own.
 """
 
 import time
 import tkinter as tk
 from datetime import datetime
 
+from panels import virgil_tooltip
 from theme import C, FONTS, PhosphorScroll
+from tools import virgil
 
 # Cap the rows handed to Tk per section. The body scrolls, but rebuilding an
 # unbounded list every tick is neither useful nor cheap. Overflow is footnoted.
@@ -139,7 +168,7 @@ class _Section(tk.Frame):
 
         tk.Frame(self, bg=C["border"], height=1).pack(fill="x", pady=(6, 4))
 
-        header = tk.Frame(self, bg=C["card"])
+        header = self.header = tk.Frame(self, bg=C["card"])
         header.pack(fill="x")
         self._title = tk.Label(header, text=title, font=FONTS["card_header"],
                                fg=C["text3"], bg=C["card"], anchor="w", cursor="hand2")
@@ -186,6 +215,24 @@ class ArgusPanel(tk.Frame):
     set_summary here — the summary line lives in self.
     """
 
+    # The summary dot and line's hover tooltip (Virgil): what the numbers
+    # count and what the dot's colour means (it shows visibility, never
+    # threat). A glossary entry.
+    _TIPS = {
+        "summary": virgil.term("network_summary"),
+    }
+    # Each section header's tooltip: the sections name no module (Argus fills
+    # them all), so each says what its rows are, a glossary entry (CONVENTIONS
+    # §7). Keys are the keys of self._sections.
+    _SECTION_TIPS = {
+        "connections": virgil.term("net_connections"),
+        "listening": virgil.term("net_listening"),
+        "traffic": virgil.term("net_traffic"),
+        "dns": virgil.term("net_dns"),
+        "firewall": virgil.term("net_firewall"),
+        "timeline": virgil.term("net_timeline"),
+    }
+
     def __init__(self, parent):
         super().__init__(parent, bg=C["card"])
 
@@ -200,6 +247,8 @@ class ArgusPanel(tk.Frame):
                                  font=FONTS["card_header"], fg=C["text2"],
                                  bg=C["card"], anchor="w")
         self._summary.pack(side="left")
+        self.tip_targets: dict[str, tk.Misc] = {"summary": sumrow}
+        virgil_tooltip.attach(sumrow, self._TIPS["summary"])
 
         # ── Scrollable body of collapsible sections ──────────────────────────
         self._scroll = _ScrollFrame(self)
@@ -222,6 +271,7 @@ class ArgusPanel(tk.Frame):
                            on_show=lambda k=key: self._render_section(k))
             sec.pack(fill="x")
             self._sections[key] = sec
+            virgil_tooltip.attach(sec.header, self._SECTION_TIPS[key])
 
         # ── Footer ───────────────────────────────────────────────────────────
         self._footer = tk.Label(self, text="", font=FONTS["card_header"],
@@ -275,7 +325,8 @@ class ArgusPanel(tk.Frame):
         )
         # Dot is health, not threat (Argus shows, never judges): teal when the
         # picture is complete, amber when visibility is degraded (a source down
-        # or PIDs we couldn't attribute).
+        # or PIDs we couldn't attribute). A DNS cache only an administrator may
+        # read is needs_admin, not unavailable, so it leaves the dot teal.
         degraded = (s.get("unresolved_pids", 0) > 0
                     or data.get("dns", {}).get("state") == "unavailable"
                     or fw.get("state") == "unavailable")
@@ -297,8 +348,12 @@ class ArgusPanel(tk.Frame):
             f"CONNECTIONS ({len(data.get('connections', []))})")
         self._sections["listening"].set_title(
             f"LISTENING ({len(data.get('listening', []))})")
+        # A count only for a cache Argus could read: a refused or failed read
+        # has no entries, and "(0)" would say the cache is empty.
+        dns = data.get("dns", {})
         self._sections["dns"].set_title(
-            f"DNS CACHE ({len(data.get('dns', {}).get('entries', []))})")
+            f"DNS CACHE ({len(dns.get('entries', []))})"
+            if dns.get("state") in ("ok", "empty") else "DNS CACHE")
         self._sections["timeline"].set_title(
             f"TIMELINE ({len(data.get('timeline', []))})")
 
@@ -385,6 +440,9 @@ class ArgusPanel(tk.Frame):
         dns = self._payload.get("dns", {})
         state = dns.get("state")
         entries = dns.get("entries", [])
+        if state == "needs_admin":
+            self._empty(parent, "Windows shows the DNS cache only to an administrator")
+            return
         if state == "unavailable":
             self._empty(parent, "cache unavailable (DNS Client service stopped?)")
             return

@@ -6,50 +6,94 @@ Metis Toolbox | Anti-Legion: ONE JOB
 Job:         Report what this computer is communicating with on the network.
              Visibility, not enforcement. Veins and synapses, not threats.
 
-Contract:    Two surfaces over one snapshot. fetch() serves the panel the full
-             picture (every connection + the whole timeline). handle() /
-             TOOL_DEFINITION expose get_network_summary — a slimmed, glanceable
-             summary for the LLM (counts, throughput, firewall, top connections).
-             Read-only to the network: it queries the connection table, the
-             firewall state, the DNS cache, and the NIC counters, and reports
-             them. It never blocks, kills, captures packets, or elevates.
+Contract:    §2's dashboard-only watcher, degrading per field: fetch() for
+             Kairos and no TOOL_DEFINITION (since 2026-11-14). Asclepius hands
+             handle() to Pythia as get_machine_status part=network. Two
+             surfaces over one snapshot: fetch() serves the panel the full
+             picture (every connection + the whole timeline); handle() is a
+             slimmed, glanceable summary for the LLM (counts, throughput,
+             firewall, how many names the DNS cache holds when Windows lets
+             Argus read it, top connections). Read-only to the network: it
+             queries the connection table, the firewall state, the DNS cache,
+             and the NIC counters, and reports them. It never blocks, kills,
+             captures packets, or elevates.
 
              fetch() degrades PER FIELD (the Pheme precedent): a single
-             unresolvable PID, an empty DNS cache, or a failed netsh query
-             falls back inside the returned dict. fetch() only raises if
+             unresolvable PID, an empty or refused DNS cache, or a failed netsh
+             query falls back inside the returned dict. fetch() only raises if
              psutil.net_connections() itself throws wholesale — at which point
-             Kairos delivers None and the panel holds its last good state, stale.
+             Kairos delivers None and the panel holds its last good state,
+             stale. handle() never raises: that same failure comes back as
+             `unavailable: network snapshot raised <class>`.
+
+             Kairos's worker and Pythia's both call fetch(), and fetch() keeps
+             state between calls (the timeline baseline, the rate counters,
+             the throttled blocks), so it runs under one lock and hands out
+             copies (§6). The timeline file is read by the first fetch(), not
+             on import, so a test can point it elsewhere first.
 
 Sources:     psutil.net_connections   — active connections + listeners
              psutil.net_io_counters   — per-NIC byte counters (rate via delta)
              netsh advfirewall        — firewall on/off per profile (Aether's
                                         shell-out precedent; no elevation needed)
-             ipconfig /displaydns     — resolver CACHE snapshot (not a history)
+             ipconfig /displaydns     — resolver CACHE snapshot (not a history);
+                                        Windows 11 shows it only to an
+                                        administrator (see Honest limits)
+             Both programs run from System32 by absolute path, never a bare
+             name (CONVENTIONS §12, 2026-11-17).
 
 Honest limits (surfaced in the UI, never hidden):
    - No per-process bandwidth — psutil exposes none on Windows.
    - DNS is the resolver cache: point-in-time, TTL-bounded, not an append log.
+   - The DNS cache needs administrator rights. Measured 2026-11-21 on Windows
+     11 (build 26200) as a normal user: ipconfig refuses ("requires
+     elevation"), and the DNS API and PowerShell's Get-DnsClientCache return
+     nothing. Argus reports that as needs_admin, not as a failure, and
+     handle() leaves out the count rather than say 0 (CONVENTIONS §12).
    - Polling (5 s) misses any connection that opens and closes between ticks.
 
-Upstream:    kairos.py (calls fetch)
+Upstream:    kairos.py (calls fetch every 5 s), tools/asclepius.py (calls
+             handle, as get_machine_status part=network)
 Downstream:  panels/argus_panel.py (display surface)
 
-Requires:    psutil (already in the stack); os, json, time, socket, subprocess,
-             ctypes, collections, logging (stdlib).
+Requires:    psutil (already in the stack); collections, copy, ctypes, json,
+             logging, math, os, socket, subprocess, threading, time, typing
+             (stdlib).
 
-V0.02:       Audited 2026-07-25 — every docstring field verified honest: fetch()
+2026-07-25:  walkthrough audit — every docstring field verified honest: fetch()
              raises ONLY on a wholesale net_connections() failure (every other
              source degrades per-field), handle() never-raises to the
              network_unavailable slug (already §2-conformant). No dead code. The
              hand-run seed argus_peek.py was retired (superseded by this module).
+
+2026-11-14:  TOOL_DEFINITION removed. get_network_summary is retired; Pythia
+             reaches handle() through Asclepius's get_machine_status, with
+             Hephaestus and Aether (CONVENTIONS §12).
+
+V0.03:       Walked through 2026-11-21 (the V0.03 walkthrough, CONVENTIONS
+             §3/§12). In the repo since 2026-06-22. Checked: July's two flags
+             were fixed the day they were raised (2026-07-25) — the timeline
+             key leaves out TCP status, and "top" connections put live ones
+             first (socket order within each group, as handle() says); the
+             firewall read still works as a normal user. Changed: a DNS cache
+             Windows refuses is needs_admin, and handle() leaves its count out
+             (the owner's pick); fetch() runs under a lock and hands out
+             copies, because two calls at once raised (7 times in 3,000,
+             measured); the timeline loads on the first fetch() and drops
+             entries the panel couldn't draw; handle()'s failure says §2's
+             shared `unavailable` where it said network_unavailable; the
+             Contract names its §2 row; Requires names every import.
 """
 
+import copy
 import ctypes
 import json
 import logging
+import math
 import os
 import socket
 import subprocess
+import threading
 import time
 from collections import deque
 from typing import Any
@@ -74,9 +118,21 @@ _DNS_TTL      = 30   # seconds between ipconfig /displaydns reads
 _FW_TTL       = 60   # seconds between netsh firewall reads
 _PROC_TIMEOUT = 4    # seconds before we give up on a shell-out
 
+# What ipconfig says when Windows won't show a normal user the DNS cache
+# (exit code 1, measured 2026-11-21 on Windows 11 build 26200). English-locale,
+# like the two parsers below; any other failure stays "unavailable".
+_ELEVATION_REFUSAL = "requires elevation"
+
 # Hide the console window each shell-out would otherwise flash (Felhaven runs
 # under pythonw). getattr so importing on a non-Windows box can't AttributeError.
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+# Both programs by absolute path. A bare name is looked for in Python's folder
+# and the working folder before System32, so a netsh.exe or ipconfig.exe left
+# in either would run in its place (measured 2026-11-17; CONVENTIONS §12).
+_SYSTEM32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+_NETSH    = os.path.join(_SYSTEM32, "netsh.exe")
+_IPCONFIG = os.path.join(_SYSTEM32, "ipconfig.exe")
 
 # Bound the persisted timeline and the DNS list so neither grows without limit.
 _TIMELINE_MAX = 300
@@ -109,14 +165,23 @@ _fw_ts: float = 0.0
 # every already-established connection — they did not open *now*.
 _known: dict[str, dict[str, Any]] = {}
 _seeded = False
-_timeline: deque[dict[str, Any]] = deque(maxlen=_TIMELINE_MAX)   # loaded from disk on import
+_timeline: deque[dict[str, Any]] = deque(maxlen=_TIMELINE_MAX)   # loaded by the first fetch()
+_timeline_loaded = False
+
+# Kairos's worker and Pythia's (through Asclepius) both call fetch(), and every
+# bit of state above changes inside it. One lock, held across the whole call,
+# shell-outs included (the Aura shape, §6). Measured 2026-11-21 without it: two
+# threads calling fetch() at once raised 7 times in 3,000 calls (a PID deleted
+# twice from _proc_cache; a dict changing size mid-loop).
+_lock = threading.Lock()
 
 
-# ── Privilege (annotation only — Argus needs no elevation, ever) ─────────────
+# ── Privilege (annotation only — Argus never asks for elevation) ─────────────
 
 def _privilege() -> str:
-    """"user" / "admin". This only annotates the honest gap in the dict; Argus
-    queries nothing that requires elevation."""
+    """"user" / "admin". This only annotates the honest gaps in the dict: a
+    process Windows won't name, and the DNS cache, which Windows 11 shows only
+    to an administrator. Argus never asks for elevation."""
     try:
         return "admin" if ctypes.windll.shell32.IsUserAnAdmin() else "user"
     except Exception:
@@ -280,7 +345,7 @@ def _firewall() -> dict[str, Any]:
              "domain": "—", "private": "—", "public": "—"}
     try:
         r = subprocess.run(
-            ["netsh", "advfirewall", "show", "allprofiles", "state"],
+            [_NETSH, "advfirewall", "show", "allprofiles", "state"],
             capture_output=True, encoding="utf-8", errors="replace",
             timeout=_PROC_TIMEOUT, creationflags=_NO_WINDOW,
         )
@@ -330,9 +395,10 @@ def _parse_dns(text: str) -> list[dict[str, Any]]:
 
 
 def _dns() -> dict[str, Any]:
-    """Throttled DNS resolver-cache snapshot (Midas cache pattern). No elevation
-    needed. "empty" = service running but nothing cached; "unavailable" = the
-    command failed (e.g. the DNS Client service is stopped). Both non-fatal."""
+    """Throttled DNS resolver-cache snapshot (Midas cache pattern). "empty" =
+    read, but nothing cached; "needs_admin" = Windows refused a normal user
+    (_ELEVATION_REFUSAL); "unavailable" = the command failed some other way
+    (e.g. the DNS Client service is stopped). All non-fatal."""
     global _dns_block, _dns_ts
     now = time.monotonic()
     if _dns_block is not None and (now - _dns_ts) < _DNS_TTL:
@@ -340,13 +406,15 @@ def _dns() -> dict[str, Any]:
     block = {"as_of": time.time(), "state": "unavailable", "entries": []}
     try:
         r = subprocess.run(
-            ["ipconfig", "/displaydns"],
+            [_IPCONFIG, "/displaydns"],
             capture_output=True, encoding="utf-8", errors="replace",
             timeout=_PROC_TIMEOUT, creationflags=_NO_WINDOW,
         )
         if r.returncode == 0:
             entries = _parse_dns(r.stdout)
             block.update(state="ok" if entries else "empty", entries=entries)
+        elif _ELEVATION_REFUSAL in (r.stdout or "").lower():
+            block.update(state="needs_admin")
     except Exception as e:
         log.warning("Argus: DNS cache query failed: %s", e)
     _dns_block, _dns_ts = block, now
@@ -355,17 +423,38 @@ def _dns() -> dict[str, Any]:
 
 # ── Timeline — bounded rolling diff, persisted, silent launch baseline ───────
 
+def _valid_event(ev: Any) -> bool:
+    """One persisted event, shaped as _update_timeline writes it. The panel
+    draws these on the main thread, so one it can't draw would raise there."""
+    if not isinstance(ev, dict) or ev.get("event") not in ("open", "close"):
+        return False
+    t = ev.get("t")
+    return (isinstance(t, (int, float)) and math.isfinite(t)
+            and isinstance(ev.get("proc"), str)
+            and isinstance(ev.get("raddr"), str))
+
+
 def _load_timeline() -> None:
-    """Load the persisted timeline on import. Missing/corrupt file -> empty."""
+    """Load the persisted timeline, once, from the first fetch() (under _lock).
+    Missing/corrupt file -> empty; entries _valid_event refuses are dropped."""
+    global _timeline_loaded
+    _timeline_loaded = True
     try:
         with open(_TIMELINE_PATH, encoding="utf-8") as f:
             data = json.load(f)
-        for ev in data[-_TIMELINE_MAX:]:
-            _timeline.append(ev)
     except FileNotFoundError:
-        pass
+        return
     except Exception as e:
         log.warning("Argus: could not load timeline: %s", e)
+        return
+    if not isinstance(data, list):
+        log.warning("Argus: timeline file holds no list; starting empty")
+        return
+    kept = [ev for ev in data if _valid_event(ev)]
+    if len(kept) < len(data):
+        log.warning("Argus: dropped %d malformed timeline entries",
+                    len(data) - len(kept))
+    _timeline.extend(kept[-_TIMELINE_MAX:])
 
 
 def _save_timeline() -> None:
@@ -421,56 +510,42 @@ def _update_timeline(connections: list[dict[str, Any]]) -> None:
         _save_timeline()
 
 
-_load_timeline()   # history on import; the live diff baseline (_known) is separate
-
-
 # ── Public API ──────────────────────────────────────────────────────────────
 
 def fetch() -> dict[str, Any]:
-    """Kairos entry point (5 s). Assemble the network-awareness snapshot.
+    """Kairos entry point (5 s); handle() calls it too. Assemble the
+    network-awareness snapshot.
 
     Raises ONLY if net_connections() itself throws wholesale — Kairos then
     delivers None and the panel holds its last good state. Every other source
-    degrades inside the returned dict (the Pheme precedent)."""
-    conns = psutil.net_connections(kind="inet")    # the one call allowed to raise
+    degrades inside the returned dict (the Pheme precedent). Runs under _lock,
+    and the throttled blocks and timeline go out as copies, so no caller holds
+    an object Argus keeps (§6)."""
+    with _lock:
+        if not _timeline_loaded:
+            _load_timeline()   # history; the live diff baseline (_known) is separate
+        conns = psutil.net_connections(kind="inet")    # the one call allowed to raise
 
-    connections, listening, summary = _collect(conns)
-    _update_timeline(connections)
+        connections, listening, summary = _collect(conns)
+        _update_timeline(connections)
 
-    return {
-        "as_of":       time.time(),
-        "privilege":   _privilege(),
-        "summary":     summary,
-        "connections": connections,
-        "listening":   listening,
-        "traffic":     _traffic(),
-        "dns":         _dns(),
-        "firewall":    _firewall(),
-        "timeline":    list(_timeline),
-    }
+        return {
+            "as_of":       time.time(),
+            "privilege":   _privilege(),
+            "summary":     summary,
+            "connections": connections,
+            "listening":   listening,
+            "traffic":     _traffic(),
+            "dns":         copy.deepcopy(_dns()),
+            "firewall":    copy.deepcopy(_firewall()),
+            "timeline":    copy.deepcopy(list(_timeline)),
+        }
 
 
 # ── LLM tool contract ────────────────────────────────────────────────────────
 # handle() slims fetch()'s full snapshot (which carries the whole connection
 # table and timeline) down to a glanceable summary — the model doesn't need
 # every socket, just the shape of what's happening.
-
-TOOL_DEFINITION = {
-    "type": "function",
-    "function": {
-        "name": "get_network_summary",
-        "description": (
-            "Returns a read-only summary of this computer's current network "
-            "activity: counts of established and listening connections, upload "
-            "and download throughput, firewall state per profile, DNS cache "
-            "size, and the top active connections. Call when the user asks what "
-            "the machine is connected to, network or firewall status, or how "
-            "much bandwidth is in use right now."
-        ),
-        "parameters": {"type": "object", "properties": {}, "required": []},
-    },
-}
-
 
 def handle() -> dict[str, Any]:
     """Toolbox entry: a glanceable network-awareness summary for the LLM.
@@ -480,7 +555,7 @@ def handle() -> dict[str, Any]:
         snap = fetch()
     except Exception as e:
         log.warning(f"Argus: network snapshot failed: {e}")
-        return {"error": "network_unavailable"}
+        return {"error": f"unavailable: network snapshot raised {type(e).__name__}"}
 
     s, t, fw, dns = snap["summary"], snap["traffic"], snap["firewall"], snap["dns"]
     # ESTABLISHED connections are the live ones worth surfacing; teardown and
@@ -493,7 +568,7 @@ def handle() -> dict[str, Any]:
         {"proc": c["proc"], "remote": c["raddr"], "status": c["status"]}
         for c in ranked[:8]
     ]
-    return {
+    out: dict[str, Any] = {
         "privilege":         snap["privilege"],
         "established":       s["established"],
         "listening":         s["listening"],
@@ -503,9 +578,14 @@ def handle() -> dict[str, Any]:
         "down_bps":          t["down_bps"],
         "firewall":          {"state": fw["state"], "domain": fw["domain"],
                               "private": fw["private"], "public": fw["public"]},
-        "dns_cached_names":  len(dns["entries"]),
-        "top_connections":   top,
     }
+    # Only a cache Argus could read has a count. A refused or failed read
+    # would say 0 names, which is false, so the key is left out (§12,
+    # 2026-11-21).
+    if dns["state"] in ("ok", "empty"):
+        out["dns_cached_names"] = len(dns["entries"])
+    out["top_connections"] = top
+    return out
 
 
 # ── Standalone test ──────────────────────────────────────────────────────────

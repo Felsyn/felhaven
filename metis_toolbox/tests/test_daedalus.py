@@ -190,6 +190,19 @@ class TestNodes(_FixtureCase):
         self.assertEqual(daedalus.docstring("broken")["error"],
                          "parse_failed: broken.py line 2")
 
+    def test_a_file_nested_too_deeply_to_parse_is_a_node_too(self):
+        """ast.parse raises RecursionError, not SyntaxError, on one expression
+        a few thousand operators long (3,000 was enough on Python 3.13). That
+        one file must not cost the map, Home's version line or the enum."""
+        self.write("tools/deep_sum.py", "x = " + " + ".join(["1"] * 20_000) + "\n")
+        snap = daedalus.index()
+        self.assertEqual(snap["nodes"]["deep_sum"]["parse_error"], "too_deep")
+        self.assertIsNone(snap["nodes"]["deep_sum"]["error_line"])
+        self.assertIn("tool_a", snap["nodes"])
+        self.assertEqual(daedalus.docstring("deep_sum")["error"],
+                         "parse_failed: tools/deep_sum.py")
+        self.assertIsNone(daedalus.audit_version())   # an answer, not a raise
+
 
 class TestEdges(_FixtureCase):
     def test_every_import_form_resolves_and_nothing_else_does(self):
@@ -272,7 +285,7 @@ class TestResolution(_FixtureCase):
 
     def test_an_unknown_name_is_a_slug_with_suggestions(self):
         out = daedalus.handle("toool_a")
-        self.assertEqual(out["error"], "unknown_module: 'toool_a'")
+        self.assertEqual(out["error"], "not_found: 'toool_a'")
         self.assertIn("tool_a", out["did_you_mean"])
         self.assertLessEqual(len(out["did_you_mean"]), 3)
 
@@ -283,7 +296,7 @@ class TestResolution(_FixtureCase):
         for asked in ("", "   ", None, 42, ["aura"], "../../etc/passwd"):
             with self.subTest(asked=asked):
                 out = daedalus.handle(asked)
-                self.assertTrue(out["error"].startswith("unknown_module: "))
+                self.assertTrue(out["error"].startswith("not_found: "))
 
     def test_an_internal_failure_is_a_slug(self):
         daedalus.log.disabled = False
@@ -292,7 +305,7 @@ class TestResolution(_FixtureCase):
             out = daedalus.handle("tool_a")
         # The class name is logged; the exception's message never leaves.
         self.assertNotIn("secret", "".join(logged.output))
-        self.assertEqual(out, {"error": "daedalus_failed: RuntimeError"})
+        self.assertEqual(out, {"error": "unavailable: RuntimeError"})
 
 
 class TestSourcePath(_FixtureCase):
@@ -333,6 +346,50 @@ class TestGloss(_FixtureCase):
         with mock.patch.object(daedalus.copy, "deepcopy",
                                side_effect=AssertionError("deep copy")):
             self.assertEqual(daedalus.gloss("tool_a"), "Report the thing.")
+
+
+class TestAuditVersion(_FixtureCase):
+    """audit_version() is FOE's version: the newest V0.0x: audit marker on the
+    map, so it moves when the markers do and never by hand."""
+
+    def _marked(self, rel, marker):
+        return self.write(rel, f'"""\n{rel} — marked\n\nJob:         Carry a marker.\n\n'
+                               f'{marker}       Audited 2026-11-15 — a fixture.\n"""\n')
+
+    def test_no_marker_anywhere_is_none(self):
+        self.assertIsNone(daedalus.audit_version())
+
+    def test_one_marker_is_the_version_as_written(self):
+        self._marked("tools/tool_a.py", "V0.02:")
+        self.assertEqual(daedalus.audit_version(), "V0.02")
+
+    def test_the_newest_marker_wins(self):
+        """An audit marks only what its work touched, so the rest keep the
+        old marker — the oldest would never move."""
+        self._marked("tools/tool_a.py", "V0.02:")
+        self._marked("panels/panel_a.py", "V0.03:")
+        self._marked("core_a.py", "V0.02:")
+        self.assertEqual(daedalus.audit_version(), "V0.03")
+
+    def test_numbers_compare_as_numbers(self):
+        self._marked("tools/tool_a.py", "V0.9:")
+        self._marked("tools/tool_b.py", "V0.10:")
+        self.assertEqual(daedalus.audit_version(), "V0.10")
+
+    def test_a_marker_mid_sentence_is_not_a_marker(self):
+        self.write("tools/tool_a.py",
+                   '"""\nJob:         Mention one.\n\nFixed in the V0.03: audit.\n"""\n')
+        self.assertIsNone(daedalus.audit_version())
+
+    def test_it_follows_an_edit_without_a_restart(self):
+        self._marked("tools/tool_a.py", "V0.02:")
+        self.assertEqual(daedalus.audit_version(), "V0.02")
+        path = self._marked("tools/tool_a.py", "V0.03:")
+        # A same-size rewrite inside one clock tick could keep the (mtime,
+        # size) stamp; move the mtime so the cache is sure to see it.
+        st = os.stat(path)
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+        self.assertEqual(daedalus.audit_version(), "V0.03")
 
 
 class TestCache(_FixtureCase):
@@ -467,6 +524,13 @@ class TestRealTree(unittest.TestCase):
                          and p not in paths)
         self.assertFalse(missing, f"tracked but not indexed: {missing}")
 
+    def test_the_version_is_the_one_audit_marker_the_contract_test_allows(self):
+        """test_tool_output_contract holds every marker in tools/ and the app
+        root to the audits reached so far (V0.02, V0.03); the version read off
+        the whole map is the newest of them. When the next audit's markers
+        land, both move together."""
+        self.assertEqual(daedalus.audit_version(), "V0.03")
+
     def test_no_two_modules_share_a_key(self):
         self.assertEqual(daedalus.index()["collisions"], {},
                          "two files share a stem — pick a naming scheme before "
@@ -490,15 +554,6 @@ class TestRealTree(unittest.TestCase):
     # prose docstring, because it is a shell, not a tool (its V0.02 note). Its
     # gloss is its title line, which is not a sentence.
     _BY_DESIGN = {"felhaven"}
-    # Panels written before §0 asked for a Job: field. Their gloss falls back
-    # to the docstring's first line, which already keeps the shape below.
-    # Each comes off this list as it gains one (BACKLOG); a stale entry fails.
-    _NO_JOB_FIELD_YET = {
-        "argus_panel", "artemis_panel", "aura_panel", "echo_panel",
-        "emanon_panel", "eudoxus_panel", "hephaestus_panel", "horai_panel",
-        "hypatia_panel", "midas_panel", "morpheus_panel", "orpheus_panel",
-        "scribe_panel", "zeno_panel",
-    }
 
     def _has_job_field(self, key):
         doc = daedalus.docstring(key).get("docstring") or ""
@@ -520,7 +575,7 @@ class TestRealTree(unittest.TestCase):
 
     def test_every_module_has_a_job_field(self):
         for key, node in daedalus.index()["nodes"].items():
-            if key in self._BY_DESIGN | self._NO_JOB_FIELD_YET:
+            if key in self._BY_DESIGN:
                 continue
             with self.subTest(module=key):
                 self.assertTrue(self._has_job_field(key),
@@ -528,7 +583,7 @@ class TestRealTree(unittest.TestCase):
 
     def test_every_exemption_is_still_needed(self):
         nodes = daedalus.index()["nodes"]
-        for key in self._BY_DESIGN | self._NO_JOB_FIELD_YET:
+        for key in self._BY_DESIGN:
             with self.subTest(module=key):
                 self.assertIn(key, nodes, f"{key} is gone — drop its exemption")
                 self.assertFalse(self._has_job_field(key),

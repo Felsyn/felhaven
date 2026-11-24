@@ -17,20 +17,37 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import tkinter as tk
 
+
+def _geometry(widget: tk.Misc) -> list[tuple[int, int, int, int]]:
+    """Every widget's place and size under `widget`, to see a layout settle."""
+    out = [(widget.winfo_x(), widget.winfo_y(),
+            widget.winfo_width(), widget.winfo_height())]
+    for child in widget.winfo_children():
+        out.extend(_geometry(child))
+    return out
+
 import numpy as np
 
 import calliope
+import felhaven
 import harmonia
 import theme
 from panels import home_panel
+from panels.hestia_panel import HestiaBar
 from panels.home_panel import HomePanel
 from panels.queue_panel import QueueBox
+from panels.sidebar import Sidebar
+
+# What the status line (Hestia's line under the title) says while nothing is
+# happening: a blank status puts it back.
+_IDLE = HestiaBar.IDLE_LINE
 import awen
 from tools import ammit, morpheus
 
@@ -281,6 +298,101 @@ class TestHomePanelSmoke(unittest.TestCase):
 # ─────────────────────────────────────────────────────────────────────────────
 #  File-change questions — pythia.ask's on_confirm (CONVENTIONS §12)
 # ─────────────────────────────────────────────────────────────────────────────
+
+class TestTooltips(unittest.TestCase):
+    """HomePanel._TIPS and HestiaBar._TIPS against the live widgets
+    (test_virgil_surfaces holds the words; this holds the targets)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tk.Tk()
+        cls.root.withdraw()
+        theme._init_fonts(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+
+    def setUp(self):
+        from panels import virgil_tooltip
+        self.panel = HomePanel(self.root)
+        self.addCleanup(self.panel.destroy)
+        self.root.update_idletasks()
+        self.shared = virgil_tooltip._shared(self.root)
+
+    def _carried(self, target):
+        key = (str(target[0]), target[1]) if isinstance(target, tuple) else str(target)
+        return self.shared._tips.get(key)
+
+    def test_every_target_carries_its_tip(self):
+        panel = self.panel
+        self.assertEqual(sorted(HomePanel._TIPS), sorted(panel._tip_targets))
+        for key, tip in HomePanel._TIPS.items():
+            self.assertEqual(self._carried(panel._tip_targets[key]), tip,
+                             f"Home's {key} does not carry its tip")
+
+    def test_the_targets_are_the_status_row_and_the_transcript_spans(self):
+        panel = self.panel
+        targets = panel._tip_targets
+        self.assertIs(targets["cerberus"], panel.cerberus_lamp)
+        self.assertIs(targets["flux"], panel._flux)
+        self.assertIs(targets["rites"], panel._rites_main.master)
+        self.assertIs(panel._rites_fail.master, targets["rites"])
+        self.assertIs(targets["ammit"], panel._ammit_badge)
+        self.assertIs(targets["status"], panel._status)
+        self.assertIs(targets["version"], panel._version)
+        self.assertIs(targets["confirm"], panel._confirm_bar)
+        self.assertIs(targets["alerts"], panel.alert_badge)
+        self.assertIs(targets["aurora"], panel.aurora_notice)
+        for key in ("speak", "meta", "meta_fail"):
+            self.assertEqual(targets[key], (panel._log, key))
+
+    def test_the_span_tips_are_on_tags_the_transcript_really_uses(self):
+        """A tip on a tag nothing is inserted with would never show."""
+        panel = self.panel
+        panel._append_speak_button("an answer")
+        panel._append_meta_line(_stats(tools_failed=1, failed_tools=["get_weather"]))
+        for key in ("speak", "meta", "meta_fail"):
+            self.assertTrue(panel._log.tag_ranges(key), f"no text is tagged {key!r}")
+
+    def test_the_span_tips_survive_each_answers_own_tag_bindings(self):
+        """Every answer binds its own tags for the click and the hover, with
+        no add="+". The shared tags the tips ride must not be among them."""
+        panel = self.panel
+        before = {key: panel._log.tag_bind(key, "<Enter>", None)
+                  for key in ("speak", "meta", "meta_fail")}
+        self.assertTrue(all(before.values()))
+        panel._append_speak_button("an answer")
+        panel._append_meta_line(_stats(tools_failed=1, failed_tools=["get_weather"]))
+        after = {key: panel._log.tag_bind(key, "<Enter>", None) for key in before}
+        self.assertEqual(after, before)
+
+    def test_the_status_tip_shows_only_while_the_line_says_something(self):
+        panel = self.panel
+        when = self.shared._when[str(panel._status)]
+        panel._set_status("")
+        self.assertFalse(when())
+        panel._set_status("Auto-DJ: 2 queued", clickable=True)
+        self.assertTrue(when())
+        self.assertEqual([k for k in self.shared._when
+                          if k in map(str, panel._tip_targets.values())],
+                         [str(panel._status)], "only the status line is conditional")
+
+    def test_the_status_lines_own_bindings_are_untouched(self):
+        """Wiring, not a faked hover: Tk delivers no synthetic event to a
+        widget on a withdrawn root."""
+        status = self.panel._status
+        for sequence in ("<Button-1>", "<Enter>", "<Leave>"):
+            self.assertTrue(status.bind(sequence), f"the status line lost {sequence}")
+        self.assertIn(str(status), status.bindtags())
+
+    def test_the_face_carries_its_modules_gloss(self):
+        from panels.hestia_panel import HestiaBar
+        bar = self.panel._hestia
+        self.assertEqual(sorted(HestiaBar._TIPS), sorted(bar._tip_targets))
+        self.assertIs(bar._tip_targets["face"], bar._face)
+        self.assertEqual(self._carried(bar._face), HestiaBar._TIPS["face"])
+
 
 class TestFileChangeQuestions(unittest.TestCase):
     """A write or edit runs only on an Allow click; every other ending is no."""
@@ -642,10 +754,10 @@ class TestTheStatusLineHasThreeClaimants(unittest.TestCase):
     def _label(self, panel) -> str:
         return panel._status.cget("text")
 
-    def test_blank_when_nothing_is_happening(self):
+    def test_it_asks_the_oracle_when_nothing_is_happening(self):
         panel = self._panel()
         panel._tick_status()
-        self.assertEqual(self._label(panel), "")
+        self.assertEqual(self._label(panel), _IDLE)
 
     def test_auto_dj_reaches_the_status_line(self):
         panel = self._panel()
@@ -660,7 +772,7 @@ class TestTheStatusLineHasThreeClaimants(unittest.TestCase):
         panel._tick_status()
         awen._picking = False
         panel._tick_status()
-        self.assertEqual(self._label(panel), "")
+        self.assertEqual(self._label(panel), _IDLE)
 
     def test_a_question_in_flight_OUTRANKS_auto_dj(self):
         """Matthew asked; Matthew's turn wins the label. Auto-DJ picking behind
@@ -695,7 +807,7 @@ class TestTheStatusLineHasThreeClaimants(unittest.TestCase):
         with mock.patch("panels.home_panel.pythia.is_warming",
                         return_value=False):
             panel._tick_status()
-        self.assertEqual(self._label(panel), "")
+        self.assertEqual(self._label(panel), _IDLE)
 
     def test_it_writes_only_on_a_transition(self):
         """At 16 Hz an unconditional repaint would fight whatever else last set
@@ -715,6 +827,323 @@ class TestTheStatusLineHasThreeClaimants(unittest.TestCase):
         panel._poll()
         self.root.update_idletasks()
         self.assertIn("choosing", self._label(panel))
+
+
+class TestTheStatusBarSitsUnderTheInput(unittest.TestCase):
+    """The status bar is the bottom edge: under the input row, with FOE's
+    version on its left. The input row, the bar and the file-change question
+    share one dock, so the alert strips still land above all three."""
+
+    _REQUEST = TestFileChangeQuestions._REQUEST
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tk.Tk()
+        cls.root.withdraw()
+        theme._init_fonts(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+
+    def _panel(self) -> HomePanel:
+        panel = HomePanel(self.root)
+        self.addCleanup(panel.destroy)
+        self.root.update_idletasks()
+        return panel
+
+    def test_the_bar_is_under_the_input_row(self):
+        panel = self._panel()
+        self.assertEqual(panel._dock.pack_slaves(), [panel._entry.master, panel._bar])
+
+    def test_the_dock_is_the_last_thing_on_the_panel(self):
+        panel = self._panel()
+        slaves = panel.pack_slaves()
+        self.assertIs(slaves[-1], panel._dock)
+        self.assertLess(slaves.index(panel._log.master), slaves.index(panel._dock))
+
+    def test_the_alert_strips_land_above_the_dock(self):
+        panel = self._panel()
+        self.assertIs(panel.alert_badge._before, panel._dock)
+        self.assertIs(panel.aurora_notice._before, panel._dock)
+        # Shown the way each shows itself, they sit between transcript and dock.
+        panel.alert_badge.pack(fill="x", before=panel.alert_badge._before)
+        panel.aurora_notice.pack(fill="x", before=panel.aurora_notice._before)
+        slaves = panel.pack_slaves()
+        for strip in (panel.alert_badge, panel.aurora_notice):
+            self.assertLess(slaves.index(panel._log.master), slaves.index(strip))
+            self.assertLess(slaves.index(strip), slaves.index(panel._dock))
+
+    # ── A warning sits above the aurora line, whichever showed first ──────────
+
+    _WARNING = {"alerts": [{"tier": "warning", "seen": False,
+                            "event": "Winter Storm Warning"}],
+                "trouble_s": None, "since": None}
+    _AURORA = {"kp": 7.0, "aurora": {"mlat": 47.5, "now": True, "next_24h": True,
+                                     "kp_max_24h": 7.0}}
+
+    def _show_aurora(self, panel: HomePanel) -> None:
+        with mock.patch("panels.eos_panel.themis.space_aurora_notice", return_value=True):
+            panel.aurora_notice.update(self._AURORA)
+
+    def _strip_order(self, panel: HomePanel) -> list:
+        """The two strips and the dock, top to bottom, as packed."""
+        wanted = (panel.alert_badge, panel.aurora_notice, panel._dock)
+        return [w for w in panel.pack_slaves() if w in wanted]
+
+    def test_a_warning_arriving_after_the_aurora_line_lands_above_it(self):
+        panel = self._panel()
+        self._show_aurora(panel)
+        panel.alert_badge.show(self._WARNING)
+        self.assertTrue(panel.aurora_notice.shown and panel.alert_badge.shown)
+        self.assertEqual(self._strip_order(panel),
+                         [panel.alert_badge, panel.aurora_notice, panel._dock])
+
+    def test_an_aurora_line_arriving_after_a_warning_lands_below_it(self):
+        panel = self._panel()
+        panel.alert_badge.show(self._WARNING)
+        self._show_aurora(panel)
+        self.assertEqual(self._strip_order(panel),
+                         [panel.alert_badge, panel.aurora_notice, panel._dock])
+
+    def test_with_the_aurora_line_gone_the_warning_goes_back_above_the_dock(self):
+        panel = self._panel()
+        self._show_aurora(panel)
+        panel.alert_badge.show(self._WARNING)
+        panel.alert_badge.show({"alerts": [], "trouble_s": None, "since": None})
+        panel.aurora_notice.update(None)
+        panel.alert_badge.show(self._WARNING)
+        self.assertEqual(self._strip_order(panel), [panel.alert_badge, panel._dock])
+
+    def test_an_open_question_sits_above_the_input_inside_the_dock(self):
+        panel = self._panel()
+        panel._thread = mock.Mock(**{"is_alive.return_value": True})
+        reply = home_panel._ConfirmReply()
+        panel._q.put(("confirm", (self._REQUEST, reply), panel._epoch))
+        panel._poll()
+        self.assertEqual(panel._dock.pack_slaves(),
+                         [panel._confirm_bar, panel._entry.master, panel._bar])
+        panel._on_deny()
+        self.assertEqual(panel._dock.pack_slaves(), [panel._entry.master, panel._bar])
+
+    def test_the_version_is_foes_audit_version(self):
+        # Which version the tree is at is test_daedalus's one deliberate pin;
+        # here it is only that the bar shows whatever Daedalus reads.
+        panel = self._panel()
+        from tools import daedalus
+        self.assertEqual(panel._version.cget("text"), f"FOE {daedalus.audit_version()}")
+
+    def test_no_marker_means_a_blank_version_not_a_made_up_one(self):
+        with mock.patch.object(home_panel.daedalus, "audit_version", return_value=None):
+            panel = self._panel()
+        self.assertEqual(panel._version.cget("text"), "")
+        self.assertEqual(panel._version.winfo_manager(), "", "a blank version is never packed")
+        with mock.patch.object(panel._bar, "winfo_width", return_value=10_000):
+            panel._fit_version()
+        self.assertEqual(panel._version.winfo_manager(), "", "nor packed later")
+
+    # ── The version shows only while it fits whole (_fit_version) ─────────────
+
+    def _fit_with_room(self, panel: HomePanel, room: int) -> None:
+        """Run _fit_version with `room` px beside the readouts."""
+        width = panel._readouts.winfo_reqwidth() + room
+        with mock.patch.object(panel._bar, "winfo_width", return_value=width):
+            panel._fit_version()
+
+    def _whole(self, panel: HomePanel) -> int:
+        return panel._version.winfo_reqwidth() + home_panel._VERSION_GAP
+
+    def test_the_version_hides_rather_than_be_cut_off(self):
+        panel = self._panel()
+        self._fit_with_room(panel, self._whole(panel) - 1)
+        self.assertEqual(panel._version.winfo_manager(), "")
+
+    def test_it_comes_back_once_it_fits_whole(self):
+        """The readouts are packed first, so the room beside them is the same
+        with the version in or out: hiding it can't make room that brings it
+        straight back, which is why it can't flicker."""
+        panel = self._panel()
+        self._fit_with_room(panel, self._whole(panel) - 1)
+        self._fit_with_room(panel, self._whole(panel))
+        self.assertEqual(panel._bar.pack_slaves(), [panel._readouts, panel._version])
+        self.assertEqual(panel._version.pack_info()["side"], "left")
+
+    def test_the_version_is_read_once_as_the_panel_is_built(self):
+        """The running Felhaven's version: a marker edited on disk afterwards
+        is not what is running, so the label doesn't follow it."""
+        with mock.patch.object(home_panel.daedalus, "audit_version",
+                               return_value="V0.02") as read:
+            panel = self._panel()
+            for _ in range(3):
+                panel._poll()
+                panel.update(None)
+        self.assertEqual(read.call_count, 1)
+
+    def test_version_left_readouts_right(self):
+        panel = self._panel()
+        # Packing order is priority: the readouts claim their width first and
+        # the version takes what is left.
+        self.assertEqual(panel._bar.pack_slaves(), [panel._readouts, panel._version])
+        self.assertIs(panel._flux.master, panel._readouts)
+        self.assertEqual(panel._readouts.pack_info()["side"], "right")
+        self.assertEqual(panel._version.pack_info()["side"], "left")
+
+
+class TestTheStatusLineIsHestias(unittest.TestCase):
+    """What Pythia or the Auto-DJ is doing is written into Hestia's line under
+    the PYTHIA title, which asks the oracle while nothing is happening."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tk.Tk()
+        cls.root.withdraw()
+        theme._init_fonts(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+
+    def _panel(self) -> HomePanel:
+        panel = HomePanel(self.root)
+        self.addCleanup(panel.destroy)
+        self.root.update_idletasks()
+        return panel
+
+    def test_the_status_line_is_the_line_under_the_title(self):
+        panel = self._panel()
+        self.assertIs(panel._status, panel._hestia.line)
+        self.assertNotIn(panel._status, panel._bar.winfo_children())
+
+    def test_idle_it_asks_the_oracle_dimly(self):
+        panel = self._panel()
+        self.assertEqual(panel._status.cget("text"), _IDLE)
+        self.assertEqual(str(panel._status.cget("fg")), theme.C["text3"])
+
+    def test_a_status_replaces_it_in_amber_and_blank_puts_it_back(self):
+        panel = self._panel()
+        panel._set_status("consulting the oracle…")
+        self.assertEqual(panel._status.cget("text"), "consulting the oracle…")
+        self.assertEqual(str(panel._status.cget("fg")), theme.C["amber"])
+        panel._set_status("")
+        self.assertEqual(panel._status.cget("text"), _IDLE)
+        self.assertEqual(str(panel._status.cget("fg")), theme.C["text3"])
+        self.assertEqual(panel._status_shown, "", "the idle line is not a status")
+
+    def test_a_pointer_leaving_the_idle_line_leaves_it_dim(self):
+        panel = self._panel()
+        panel._on_status_enter(None)
+        panel._on_status_leave(None)
+        self.assertEqual(str(panel._status.cget("fg")), theme.C["text3"])
+
+
+class TestTheHomeLayoutAtRealWidths(unittest.TestCase):
+    """Real geometry, real fonts. The bottom bar holds the version beside the
+    readouts even at the 760 px minimum, until a long session fills it; and a
+    long status wraps in Hestia's title column without moving the face off
+    the centre line."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tk.Tk()
+        cls.root.withdraw()
+        theme._init_fonts(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+
+    def _bar_at(self, window_w: int) -> HomePanel:
+        """HomePanel at the width the content area has in a window this wide:
+        less the body's padding (padx=16 each side in felhaven.py) and the
+        nav rail with its scroll lane."""
+        content_w = window_w - 2 * 16 - (Sidebar.BASE_WIDTH + theme.PhosphorScroll.LANE)
+        top = tk.Toplevel(self.root)
+        top.attributes("-alpha", 0.0)
+        top.overrideredirect(True)
+        self.addCleanup(top.destroy)
+        panel = HomePanel(top)
+        self.addCleanup(panel.destroy)
+        panel.pack(fill="both", expand=True)
+        top.geometry(f"{content_w}x500+0+0")
+        self._settle(top)
+        if panel._bar.winfo_width() <= 1:
+            self.skipTest("no display to map a window on")
+        return panel
+
+    @staticmethod
+    def _settle(widget: tk.Misc) -> None:
+        # The window's update(), not the panel's: HomePanel.update is Kairos's.
+        # Until the geometry stops moving, three rounds at least and twenty at
+        # most: a hide, show or re-wrap is one more round each. update() also
+        # runs Home's 60 ms poll, so a status line a test needs to stay up has
+        # to be the poll's own answer too (_auto_dj_choosing).
+        top = widget.winfo_toplevel()
+        last = None
+        for round_ in range(20):
+            top.update()
+            shape = _geometry(top)
+            if round_ >= 2 and shape == last:
+                return
+            last = shape
+
+    def _auto_dj_choosing(self, panel: HomePanel) -> None:
+        """Raise Auto-DJ's longest line the way the app does, so it stays up.
+
+        Not a bare _set_status: Home's poll asks awen.status_line() what the
+        line should say and writes the answer whenever the two differ. A line
+        set by hand went back to "ask the oracle" at the first poll inside
+        _settle. On a loaded machine the settle takes longer, so more polls
+        land in it: 22 of 24 runs of this class at four at once read one line
+        high (2026-11-23)."""
+        saved = awen._picking
+        awen._picking = True
+        self.addCleanup(setattr, awen, "_picking", saved)
+        warming = mock.patch("panels.home_panel.pythia.is_warming", return_value=False)
+        warming.start()
+        self.addCleanup(warming.stop)
+        panel._tick_status()                    # the poll's own writer
+        self.assertEqual(panel._status.cget("text"), "Auto-DJ: choosing the next song…")
+
+    def test_at_the_minimum_width_the_version_still_fits(self):
+        panel = self._bar_at(felhaven.MIN_W)
+        self.assertEqual(panel._version.winfo_manager(), "pack")
+
+    def test_a_full_bar_hides_the_version_rather_than_cut_it(self):
+        """A long session at the minimum width: Flux in the millions and
+        failed Rites leave no room for the version whole."""
+        panel = self._bar_at(felhaven.MIN_W)
+        panel._flux.config(text="Scraptoken Flux: 1234567")
+        panel._rites_fail.config(text=" · 12 failed")
+        self._settle(panel)
+        self.assertEqual(panel._version.winfo_manager(), "")
+        panel._flux.config(text="Scraptoken Flux: 0")
+        panel._rites_fail.config(text="")
+        self._settle(panel)
+        self.assertEqual(panel._version.winfo_manager(), "pack", "and back once it fits")
+
+    def test_a_long_status_wraps_and_the_face_stays_centred(self):
+        panel = self._bar_at(felhaven.MIN_W)
+        self._auto_dj_choosing(panel)
+        self._settle(panel)
+        line, hestia, face = panel._status, panel._hestia, panel._hestia._face
+        self.assertEqual(line.cget("text"), "Auto-DJ: choosing the next song…", "still up")
+        one_line = theme.FONTS["subtitle"].metrics("linespace")
+        self.assertGreater(line.winfo_height(), 1.5 * one_line, "it wrapped")
+        side = (hestia.winfo_width() - face.winfo_width() - 24) // 2
+        self.assertLessEqual(line.winfo_width(), side, "inside the title column")
+        face_centre = face.winfo_x() + face.winfo_width() / 2
+        self.assertAlmostEqual(face_centre, hestia.winfo_width() / 2, delta=1)
+
+    def test_with_room_the_same_status_takes_one_line(self):
+        """The wrap follows the column, not a fixed width: at 960 px the
+        column (~253 px) holds the longest Auto-DJ line (~231 px) whole."""
+        panel = self._bar_at(felhaven.BASE_W)
+        self._auto_dj_choosing(panel)
+        self._settle(panel)
+        self.assertEqual(panel._status.cget("text"), "Auto-DJ: choosing the next song…",
+                         "still Auto-DJ's line, not the shorter idle one")
+        one_line = theme.FONTS["subtitle"].metrics("linespace")
+        self.assertLess(panel._status.winfo_height(), 1.5 * one_line)
 
 
 class TestTheChatBarCannotBeSqueezedOut(unittest.TestCase):
@@ -751,11 +1180,11 @@ class TestTheChatBarCannotBeSqueezedOut(unittest.TestCase):
         panel = HomePanel(self.root)
         self.root.update_idletasks()
         transcript_row = panel._log.master
-        below = (panel._status.master.winfo_reqheight()
+        below = (panel._bar.winfo_reqheight()
                  + panel._entry.master.winfo_reqheight())
         self.assertLess(
             transcript_row.winfo_reqheight(), below + 60,
-            "the transcript row out-requests the status line and the entry row "
+            "the transcript row out-requests the status bar and the entry row "
             "together — on a small window pack will squeeze the chat bar out")
 
     def test_the_transcript_still_expands_to_take_the_leftover(self):
@@ -979,7 +1408,7 @@ class TestStopRefreshEdgeCases(unittest.TestCase):
         self.assertNotIn("still generat", self._transcript_text(panel))
         self.assertEqual(panel._history, [])
         self.assertFalse(panel._resp_started)
-        self.assertEqual(panel._status.cget("text"), "")
+        self.assertEqual(panel._status.cget("text"), _IDLE)
         self.assertFalse(panel._hestia._vox._end._active)
 
     def test_double_refresh_is_idempotent_and_epoch_advances_by_one_each_time(self):
@@ -1425,6 +1854,14 @@ class TestTheQueueBoxOnItsOwn(unittest.TestCase):
         self.addCleanup(box.destroy)
         return box
 
+    def test_every_row_carries_the_remove_tip(self):
+        from panels import virgil_tooltip
+        box = self._box([{"id": 7, "name": "A - One"}, {"id": 9, "name": "B - Two"}])
+        shared = virgil_tooltip._shared(self.root)
+        self.assertEqual(sorted(box._rows), [7, 9])
+        for frame in box._rows.values():
+            self.assertEqual(shared._tips.get(str(frame)), QueueBox._ROW_TIPS["remove"])
+
     def test_clicking_a_row_removes_THAT_id(self):
         """Driven through the handler, not event_generate: Tk will not deliver
         a synthetic button press to an unmapped widget in a withdrawn root, and
@@ -1601,7 +2038,7 @@ class TestHomePanelWarmupNotice(unittest.TestCase):
                         return_value=False):
             panel._poll()
             self.root.update_idletasks()
-            self.assertEqual(panel._status.cget("text"), "")
+            self.assertEqual(panel._status.cget("text"), _IDLE)
 
     def test_warmup_notice_never_stomps_an_in_flight_question(self):
         """A live request owns the status line — 'consulting the oracle…' must

@@ -9,7 +9,15 @@ Feeds live in config/pheme_rumormill.json under the app root — one row per sou
 ({id, label, url, format}). Adding or removing a feed is a JSON edit, never a
 code change. The parser branches on `format` ("rss" 2.0 vs "atom").
 
-Contract:    Exposes TOOL_DEFINITION, handle(), and fetch().
+Contract:    Exposes TOOL_DEFINITION, TOOL_META, handle(), fetch() and
+             load_feeds(), plus the read state below.
+
+             load_feeds() -> list: the usable rows of the config, in order.
+                 Raises only when the file can't be read (missing, not JSON,
+                 no "feeds" list, or rows with none usable). A row it can't
+                 use (not an object, no id or url, an id already taken) is
+                 left out and logged, so one bad row costs that feed, never
+                 the others or the app (§4). A missing label reads as the id.
 
              fetch()  (Kairos): fans every feed out concurrently and returns
                  {"feeds": {feed_id: {"stories": [...]} | {"error": str}}}.
@@ -19,12 +27,13 @@ Contract:    Exposes TOOL_DEFINITION, handle(), and fetch().
              _fetch_feed(): never raises — one dead feed yields {"error": ...}
                  for its id only and cannot poison its siblings. Per-feed
                  identifiers (§2 slugs):
-                   http_error: <status>       server answered with an error
-                   feed_timeout               no answer within its deadline
-                   feed_too_large             bigger than _MAX_BYTES
-                   network_error              connection-level failure
-                   invalid_feed_xml           response was not parseable XML
-                   fetch_failed: <ClassName>  anything else — class name only,
+                   unavailable: HTTP <status> server answered with an error
+                   timeout                    no answer within its deadline
+                   too_large                  bigger than _MAX_BYTES
+                   offline                    connection-level failure
+                   invalid_feed_xml           response was not parseable XML,
+                                              or it declared an entity (refused)
+                   unavailable: <ClassName>   anything else — class name only,
                                               never the message (§2)
 
              handle(feed=None)  (Brain): never raises; returns a flat
@@ -32,9 +41,10 @@ Contract:    Exposes TOOL_DEFINITION, handle(), and fetch().
                  arg narrows results to a single source. Its own failures are
                  §2 errors, so the model can tell "no news" from "broken":
                    config_unreadable          pheme_rumormill.json missing/bad
-                   unknown_feed: <id>         `feed` matches no configured id
-                   all_feeds_failed           every source errored this call
-                   news_failed: <ClassName>   the never-raises safety net
+                   not_found: <id>            `feed` matches no configured id
+                   unavailable: all feeds failed
+                                              every source errored this call
+                   unavailable: <ClassName>   the never-raises safety net
                  An empty `stories` list therefore always means the feeds
                  answered and were empty — never a masked failure.
 
@@ -56,6 +66,12 @@ Contract:    Exposes TOOL_DEFINITION, handle(), and fetch().
                  before returning — it is the panel's merge key, and the Brain's
                  story shape is deliberately unchanged.
 
+                 Each field is bounded, because one long headline froze the
+                 panel (measured 2026-11-23: a 1,000,000-character title took
+                 137 s to draw): a title or author past its cap is cut and ends
+                 in "…", and a url past _MAX_URL is dropped (a cut url is a
+                 wrong link), so that story isn't clickable.
+
              Read state (panel-facing; no LLM surface):
                  read_key(url) -> str     stable per-story identity
                  read_keys()   -> set     snapshot of the seen-set
@@ -63,10 +79,16 @@ Contract:    Exposes TOOL_DEFINITION, handle(), and fetch().
 
                  Persisted to pheme_read.json beside argus_timeline.json —
                  runtime state, gitignored (§9), atomic writes, written on
-                 change only. Capped at _READ_MAX (2000), evicted oldest first;
-                 evicting a story still on screen re-brightens it, accepted at
-                 this cap. A missing or corrupt file means everything reads as
-                 unread — it never raises.
+                 change only. Read on first use, not at import, so a test can
+                 point it elsewhere first. Capped at _READ_MAX (2000), evicted
+                 oldest first; evicting a story still on screen re-brightens
+                 it, accepted at this cap. A missing or corrupt file means
+                 everything reads as unread — it never raises.
+
+Threads:     fetch() runs on Kairos's worker and handle() on Pythia's request
+             thread; both hold _lock across a fan-out (see "Freshness"). The
+             read state is the panel's alone, on the Tk thread, so its file
+             can't meet the os.replace race (§12, 2026-11-21).
 
 Scope:       Feed data and read state. Read state sits here rather than in a
              module of its own because it is an attribute OF a headline —
@@ -89,15 +111,18 @@ Source:      The feeds configured in config/pheme_rumormill.json (7 as shipped:
 
 Upstream:    kairos.py — the "pheme" worker polls fetch() every 900 s.
              pythia.py — exposes handle() to the LLM via TOOL_DEFINITION.
+             panels/pheme_panel.py — load_feeds() and the read state.
 
-Downstream:  panels/pheme_panel.py (display surface; maps the slugs above to
-             human text in its _ERROR_TEXT dict)
+Downstream:  panels/pheme_panel.py (fetch()'s payload, through Kairos; maps
+             the slugs above to human text in its _ERROR_TEXT dict)
 
 Requires:    tools/hermes.py (the bounded network read)
-             concurrent.futures, json, html, hashlib, tempfile, collections,
-             datetime, urllib.parse, xml.etree (stdlib)
+             collections, concurrent.futures, copy, dataclasses, datetime,
+             hashlib, html, itertools, json, logging, os, pyexpat, sys,
+             tempfile, threading, time, typing, urllib.parse, xml.etree
+             (stdlib)
 
-V0.02:       Audited 2026-07-23 — error identifiers normalized to §2 slugs
+2026-07-23:  walkthrough audit — error identifiers normalized to §2 slugs
              (one literal per except arm; no more raw str(e)), handle() failures
              made distinguishable from an empty news day, docstring gained
              Source/Upstream/Downstream, first tests added.
@@ -107,6 +132,25 @@ V0.02:       Audited 2026-07-23 — error identifiers normalized to §2 slugs
              Extended 2026-09-28 (V0.03 audit T7): handle() answers from the
              last good fan-out, dated with `as_of`, instead of fetching again
              on every question. The story shape is unchanged.
+
+2026-11-16:  the Pythia tool audit (CONVENTIONS §12). handle() answers from
+             the last good fan-out with as_of (T7, above), and the description
+             follows §3's grammar, leaving how to pick a feed to the `feed`
+             parameter. TOOL_META says news / cached / changes nothing. Its
+             failures use the shared offline / timeout / unavailable /
+             not_found / too_large (T9, 2026-11-16); invalid_feed_xml and
+             config_unreadable stay its own.
+
+V0.03:       Walked through 2026-11-23 (the V0.03 walkthrough, S30; born
+             2026-06-10). Every function was read against the docstring, the
+             §2 slugs, the cache and the read state. A feed's fields are now
+             bounded and a feed that declares an XML entity is refused: expat
+             2.8.2 stops a billion laughs, but let a 900 KB feed expand to one
+             54,000,000-character title (measured). The config is checked row
+             by row (load_feeds), because a row with no id stopped Felhaven
+             from opening. The read state loads on first use, not at import.
+             The byte cap is 2 MiB, 4x the largest feed again (The Register,
+             300,830 B). Contract, Threads, Upstream and Requires caught up.
 """
 
 import copy
@@ -115,6 +159,7 @@ import html
 import json
 import logging
 import os
+import pyexpat
 import sys
 import tempfile
 import threading
@@ -151,13 +196,23 @@ _READ_MAX  = 2000      # seen-set cap; oldest evicted first
 
 # Browser-plausible RSS-reader User-Agent so picky edges (e.g. TownNews) don't 403.
 _USER_AGENT   = "Mozilla/5.0 (compatible; Felhaven/1.0 RSS reader)"
-_HTTP_TIMEOUT = 6      # per socket operation, seconds; the whole request: 12 s
+_HTTP_TIMEOUT = 6      # per socket operation, seconds; the whole request: ~21 s
 # Per-feed byte cap (hermes rule: 4x the largest measured body, rounded up to a
-# power of two). Measured 2026-10-01, the 7 shipped feeds: largest 244,346 B
-# (theregister), then 141,717 (theverge) and 77,457 (arstechnica); the rest
-# under 27 KB. Feeds are user-editable, so a new one may need this raised.
-_MAX_BYTES = 1024 * 1024
+# power of two). Measured 2026-11-23, the 7 shipped feeds: largest 300,830 B
+# (theregister, 244,346 on 2026-10-01), then 78,126 (arstechnica) and 41,140
+# (theverge); the rest under 28 KB. At 2 MiB, hermes's default deadline is the
+# cap at 100 kB/s, about 21 s. Feeds are user-editable, so a new one may need
+# this raised.
+_MAX_BYTES = 2 * 1024 * 1024
 _MAX_STORIES  = 10     # cap per feed (panel) and on the flattened Brain list
+
+# Field caps, so one long headline can't freeze the panel or fill Pythia's
+# context (4x the longest measured, rounded up to a power of two). Measured
+# 2026-11-23 over every item of the 7 shipped feeds: title 130 characters
+# (wvnews), author 54 (arstechnica), url 176 (wvnews).
+_MAX_TITLE  = 512
+_MAX_AUTHOR = 256
+_MAX_URL    = 1024
 
 # XML namespaces. Atom puts every element in its own namespace; RSS borrows
 # Dublin Core for the author byline.
@@ -189,15 +244,53 @@ _TRACKING_PARAMS = frozenset({
 
 # ── Config loading ──────────────────────────────────────────────────────────────
 
-def _load_config() -> list[dict[str, Any]]:
+def _load_config() -> Any:
     """
-    Read the ordered feed list from pheme_rumormill.json.
-    Raises (FileNotFoundError / JSONDecodeError / KeyError) if the config is
-    unreadable — fetch() lets this propagate so Kairos delivers None.
+    The raw "feeds" value of pheme_rumormill.json, unchecked; load_feeds()
+    checks it. Raises (OSError, JSONDecodeError, KeyError, TypeError) when the
+    file can't be read.
     """
     with open(_CONFIG_PATH, encoding="utf-8") as f:
-        feeds: list[dict[str, Any]] = json.load(f)["feeds"]
-        return feeds
+        return json.load(f)["feeds"]
+
+
+def load_feeds() -> list[dict[str, Any]]:
+    """
+    The usable feed rows, in config order. Raises when the file can't be read
+    at all: fetch() lets that reach Kairos, handle() answers config_unreadable
+    and the panel shows no feeds.
+
+    A row it can't use is left out and logged: not an object, an id or url
+    that isn't a non-empty string, or an id an earlier row took. One bad row
+    then costs that feed only (§4). Measured 2026-11-23: a row with no id
+    stopped PhemePanel, and so Felhaven, from opening. A missing or empty
+    label reads as the id. Rows with none usable is unreadable too, so
+    handle()'s empty `stories` still means the feeds answered; an empty list
+    is just no feeds.
+    """
+    feeds = _load_config()
+    if not isinstance(feeds, list):
+        raise ValueError('"feeds" is not a list')
+    usable: list[dict[str, Any]] = []
+    taken: set[str] = set()
+    for row in feeds:
+        if not (isinstance(row, dict)
+                and isinstance(row.get("id"), str) and row["id"].strip()
+                and isinstance(row.get("url"), str) and row["url"].strip()
+                and row["id"] not in taken):
+            continue
+        taken.add(row["id"])
+        label = row.get("label")
+        if not (isinstance(label, str) and label.strip()):
+            row = {**row, "label": row["id"]}
+        usable.append(row)
+    if len(usable) < len(feeds):
+        log.warning("Pheme: %d feed row(s) in pheme_rumormill.json left out "
+                    "(each needs its own id and a url)", len(feeds) - len(usable))
+    if feeds and not usable:
+        # Every row was bad: unreadable, so handle() can't answer "no news".
+        raise ValueError("no usable feed row")
+    return usable
 
 
 # ── Field normalizers ────────────────────────────────────────────────────────────
@@ -275,18 +368,27 @@ def _timestamp(raw: str) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _cut(text: str, cap: int) -> str:
+    """`text`, or its first cap-1 characters and "…" when it is longer."""
+    return text if len(text) <= cap else text[:cap - 1] + "…"
+
+
 def _story(title: str, url: str, author: str, date: str,
            ts: str = "") -> dict[str, str]:
     """Assemble the normalized story dict shared by every feed format.
 
     `ts` defaults to '' so a caller that only has a display date still builds a
     valid story; both real parsers pass it. An empty ts sorts last (see fetch()).
+    Title and author are cut at their caps; a url past _MAX_URL is dropped,
+    since a cut one would be a wrong link.
     """
     url = url.strip()
+    if len(url) > _MAX_URL:
+        url = ""
     return {
-        "title":  html.unescape(title).strip() or "(no title)",
+        "title":  _cut(html.unescape(title).strip(), _MAX_TITLE) or "(no title)",
         "url":    url,
-        "author": _clean_author(html.unescape(author)),
+        "author": _cut(_clean_author(html.unescape(author)), _MAX_AUTHOR),
         "date":   date,
         "domain": _domain(url),
         "ts":     ts,
@@ -364,6 +466,45 @@ def _parse_atom(root: ET.Element) -> list[dict[str, str]]:
     return stories
 
 
+# ── Entity declarations ──────────────────────────────────────────────────────────
+
+class _EntityDeclared(Exception):
+    """The feed's DOCTYPE declared an entity."""
+
+
+class _RootReached(Exception):
+    """The root element began, so no entity was declared."""
+
+
+def _declares_entities(body: bytes) -> bool:
+    """
+    Whether the feed declares an XML entity. No feed needs one (none of the 7
+    shipped feeds has a DOCTYPE, measured 2026-11-23), and expat 2.8.2, which
+    stops a billion laughs, still lets one entity expand up to ~100x: a 900 KB
+    feed became a 54,000,000-character title and 108 MB. Declarations can come
+    only before the root element, so this reads the prolog and stops there.
+    pyexpat, not a byte search, so a UTF-16 feed can't hide one. Malformed XML
+    answers False and is left for ET.fromstring to report.
+    """
+    parser = pyexpat.ParserCreate()
+
+    def _entity(*_args: Any) -> None:
+        raise _EntityDeclared
+
+    def _root(*_args: Any) -> None:
+        raise _RootReached
+
+    parser.EntityDeclHandler = _entity
+    parser.StartElementHandler = _root
+    try:
+        parser.Parse(body, True)
+    except _EntityDeclared:
+        return True
+    except (_RootReached, pyexpat.ExpatError):
+        return False
+    return False
+
+
 # ── Per-feed fetch ───────────────────────────────────────────────────────────────
 
 # Failure identifiers are inline literals at each dict site, not ERR_*
@@ -388,6 +529,8 @@ def _fetch_feed(feed: dict[str, Any]) -> dict[str, Any]:
             timeout=_HTTP_TIMEOUT,
         )
         resp.raise_for_status()
+        if _declares_entities(resp.content):
+            raise ET.ParseError("it declares an XML entity (refused)")
         root = ET.fromstring(resp.content)
 
         if feed.get("format") == "atom":
@@ -402,26 +545,26 @@ def _fetch_feed(feed: dict[str, Any]) -> dict[str, Any]:
     except hermes.HTTPStatus as e:
         # Surface the status code so the panel can show "HTTP 404".
         log.warning(f"Pheme: feed {feed.get('id')} HTTP {e.status}")
-        return {"error": f"http_error: {e.status}"}
+        return {"error": f"unavailable: HTTP {e.status}"}
     except hermes.Timeout:
         log.warning(f"Pheme: feed {feed.get('id')} timed out")
-        return {"error": "feed_timeout"}
+        return {"error": "timeout"}
     except hermes.TooLarge:
         log.warning(f"Pheme: feed {feed.get('id')} is over the {_MAX_BYTES}-byte cap")
-        return {"error": "feed_too_large"}
+        return {"error": "too_large"}
     except hermes.NetError as e:
         # The message stays in the log (not the LLM surface, §2): it names
         # which layer refused, which the slug deliberately hides. hermes never
         # puts the URL in it.
         log.warning(f"Pheme: feed {feed.get('id')} network failure: {e}")
-        return {"error": "network_error"}
+        return {"error": "offline"}
     except ET.ParseError as e:
         log.warning(f"Pheme: feed {feed.get('id')} sent unparseable XML: {e}")
         return {"error": "invalid_feed_xml"}
     except Exception as e:
         log.warning(f"Pheme: feed {feed.get('id')} failed: "
                     f"{type(e).__name__}: {e}")
-        return {"error": f"fetch_failed: {type(e).__name__}"}
+        return {"error": f"unavailable: {type(e).__name__}"}
 
 
 def _fetch_all(feeds: list[dict[str, Any]]) -> dict[str, Any]:
@@ -456,6 +599,7 @@ def _interleave(per_feed: list[list[dict[str, str]]]) -> list[dict[str, str]]:
 
 _read_order: "deque[str]" = deque(maxlen=_READ_MAX)   # oldest first, for eviction
 _read_set:   set[str]     = set()                     # same contents, O(1) lookup
+_read_loaded = False                                  # the file is read on first use
 
 
 def _atomic_write_json(path: str, payload: Any) -> None:
@@ -518,6 +662,7 @@ def read_key(url: str) -> str:
 def read_keys() -> set[str]:
     """Snapshot of the seen-set for one render pass. A copy, so a click during
     a render can't mutate the set being iterated."""
+    _ensure_read()
     return set(_read_set)
 
 
@@ -533,6 +678,7 @@ def mark_read(url: str) -> None:
     """
     if not url:
         return
+    _ensure_read()
     key = read_key(url)
     if key in _read_set:
         return
@@ -546,10 +692,20 @@ def mark_read(url: str) -> None:
     _save_read()
 
 
+def _ensure_read() -> None:
+    """Read the file once, on first use. At import it ran before any test
+    could point _READ_PATH elsewhere, since importing Pythia imports every
+    tool (Argus's timeline moved to its first fetch() the same way)."""
+    global _read_loaded
+    if not _read_loaded:
+        _read_loaded = True
+        _load_read()
+
+
 def _load_read() -> None:
-    """Load the seen-set on import. Missing or corrupt file -> everything reads
-    as unread; never raises, because an unreadable runtime file must not stop
-    the news from rendering."""
+    """Load the seen-set from the file. Missing or corrupt file -> everything
+    reads as unread; never raises, because an unreadable runtime file must not
+    stop the news from rendering."""
     try:
         with open(_READ_PATH, encoding="utf-8") as f:
             keys: Any = json.load(f)["read"]
@@ -579,14 +735,12 @@ def _save_read() -> None:
                     type(e).__name__, e)
 
 
-_load_read()
-
-
 # ── Freshness (V0.03 audit T7) ────────────────────────────────────────────────
 # tools/aura.py's "Freshness" section is the reference for this pattern, and
 # for why the lock is held across the fan-out; it isn't repeated here. The
-# fan-out is bounded: the feeds run in parallel, each ending at its hermes
-# deadline (12 s), so the lock is held about that long at the very worst. Kairos
+# fan-out is bounded: the feeds run in parallel (up to 8 at once), each ending
+# at its hermes deadline (about 21 s), so the lock is held about that long at
+# the very worst. Kairos
 # polls fetch() every 900 s, and handle() answers from the last good fan-out
 # instead of fetching again, dated with `as_of`. Two things differ from Aura:
 #
@@ -685,7 +839,7 @@ def _clear_cache() -> None:
 def _feed_ids() -> list[str]:
     """Feed ids from config, for the tool's `feed` enum. [] if config missing."""
     try:
-        return [f["id"] for f in _load_config()]
+        return [f["id"] for f in load_feeds()]
     except Exception:
         return []
 
@@ -709,9 +863,8 @@ TOOL_DEFINITION = {
         "description": (
             "Returns current news headlines aggregated from several RSS/Atom "
             "feeds (tech, world, and local news), each with title, URL, author, "
-            "date, and source domain. Call this when the user asks about the "
-            "news, tech news, world news, what's trending, or local headlines. "
-            "Pass `feed` to limit results to one source."
+            "date, and source domain. Call when the user asks about the "
+            "news, tech news, world news, what's trending, or local headlines."
         ),
         "parameters": {
             "type": "object",
@@ -719,6 +872,14 @@ TOOL_DEFINITION = {
             "required": [],
         },
     },
+}
+
+# What the code reads about each tool here; the model never sees it
+# (CONVENTIONS §8, "TOOL_META"). network: none = local only, cached = a poll
+# or TTL cache, live = may reach the network on every call. mutates = it
+# changes state outside the turn.
+TOOL_META: dict[str, dict[str, Any]] = {
+    "get_news_stories": {"domain": "news", "network": "cached", "mutates": False},
 }
 
 
@@ -734,7 +895,7 @@ def handle(feed: str | None = None) -> dict[str, Any]:
     because the snapshot is shared by every question and by the panel's poll.
     """
     try:
-        feeds = _load_config()
+        feeds = load_feeds()
     except Exception as e:
         log.error(f"Pheme: handle() could not read config: "
                   f"{type(e).__name__}: {e}")
@@ -744,13 +905,13 @@ def handle(feed: str | None = None) -> dict[str, Any]:
         if feed:
             selected = [f for f in feeds if f["id"] == feed]
             if not selected:
-                return {"error": f"unknown_feed: {feed}"}
+                return {"error": f"not_found: {feed}"}
         current = _current(feeds)
         if current is None:
-            return {"error": "all_feeds_failed"}
+            return {"error": "unavailable: all feeds failed"}
         results, as_of, stale = current
         if selected and all("error" in results[f["id"]] for f in selected):
-            return {"error": "all_feeds_failed"}
+            return {"error": "unavailable: all feeds failed"}
         # Pull per-feed lists in config order; skip feeds that errored.
         per_feed = [results[f["id"]].get("stories", []) for f in selected]
         merged = _interleave(per_feed)[:_MAX_STORIES]
@@ -767,7 +928,7 @@ def handle(feed: str | None = None) -> dict[str, Any]:
         # Nothing in the fan-out is expected to raise (_fetch_feed never
         # does); this net is the never-raises contract, not a code path.
         log.error(f"Pheme: handle() failed: {type(e).__name__}: {e}")
-        return {"error": f"news_failed: {type(e).__name__}"}
+        return {"error": f"unavailable: {type(e).__name__}"}
 
 
 def fetch() -> dict[str, Any]:
@@ -780,7 +941,7 @@ def fetch() -> dict[str, Any]:
     A fan-out where any feed answered is stored for handle(); an all-failed
     one still reaches the panel, but leaves the last good snapshot in place.
     """
-    feeds = _load_config()
+    feeds = load_feeds()
     key = _config_key(feeds)
     with _lock:
         results = _fetch_all(feeds)

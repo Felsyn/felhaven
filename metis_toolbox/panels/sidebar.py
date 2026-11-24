@@ -19,27 +19,49 @@ Groups:      A name listed in _GROUPS is a header, NOT a view — clicking it on
              group.
 
 Scrolling:   The rows sit in a frame inside a canvas, with a PhosphorScroll
-             lane on the right (§7's _ScrollFrame pattern, built in here
-             rather than copied, because the rail IS the scrolled thing). At
-             the default 960 x 620 window the rail is taller than the window
-             once Navigation is open, and fonts grow with the window's height,
-             so a bigger window doesn't fix that. The mouse wheel scrolls it
-             while the pointer is over it, and set_active() scrolls the lit
-             row into view.
+             lane on the right (§7's scroll frame, written out here: the rail
+             predates theme.ScrollColumn, and felhaven sizes the window from
+             it). felhaven.py opens the window tall enough for the rail as it
+             stands on launch (rail_height(), felhaven.start_height), so
+             every row shows at the start. The lane stays all the same: an
+             open group, a short window or a row added later can still
+             outgrow the window, and fonts grow with the window, so making
+             it bigger doesn't fix that. The mouse wheel scrolls it while
+             the pointer is over it, and set_active() scrolls the lit row
+             into view. Whether the pointer has left is judged by where it
+             is, not by <Leave> (§12's rule for the row tips): the canvas
+             hears <Leave> as the pointer moves onto one of its own rows, so
+             the wheel used to drop as soon as it was over a row, and
+             scrolled the rail only over the gaps between them.
 
 Special:     The "aura" row is registered with Kairos (felhaven.py) and shows the
              live temperature in its subtitle; its update(data) is swapped for
              _aura_update at construction. The other rows keep the no-op base
-             update() — only aura carries live data today.
+             update() — only aura carries live data today. While a weather
+             warning or watch is active, SidebarAlert (panels/iris_panel.py)
+             puts it in that subtitle instead, through SidebarRow.set_alert.
 
 Upstream:    felhaven.py — constructs Sidebar(on_select=_show_view), registers
-             row("aura") with Kairos, and calls set_active()/rescale().
-Downstream:  themis.py (temperature_unit at render time), theme.py (colors/fonts).
+             row("aura") with Kairos, calls set_active()/rescale(), and reads
+             rail_height() once on launch to size the window.
+             panels/iris_panel.py — SidebarAlert calls row("aura").set_alert().
+Downstream:  themis.py (temperature_unit at render time), theme.py (colors,
+             fonts, PhosphorScroll), tools/virgil.py and panels/virgil_tooltip.py
+             (each row's tip).
 
 Requires:    tkinter (stdlib).
 
-V0.02: Audited 2026-07-25 — added this header docstring (the module had none) and
-       a smoke test; verified honest, no logic change.
+2026-07-25:  The first audit added this header docstring (the module had
+             none) and a smoke test; verified honest, no logic change.
+
+V0.03: Walked through 2026-11-21 (in the repo's first commit, 2026-06-10;
+       first audited 2026-07-25). The wheel dropped over every row (see
+       Scrolling); it is now judged by the pointer. Scrolling no longer
+       cites a _ScrollFrame §7 has since wrapped up as theme.ScrollColumn;
+       Upstream names SidebarAlert, Downstream the tips. Checked and left:
+       a wheel turn while the rail fits doesn't drift it, and the aura row
+       reads temp_f/temp_c only from a reading Aura always fills (it raises
+       otherwise, and Kairos hands the row None).
 """
 
 import tkinter as tk
@@ -76,6 +98,8 @@ class SidebarRow(tk.Frame):
             fg=C["text3"], bg=C["bg"], anchor="w",
         )
         self._subtitle_lbl.pack(anchor="w")
+        self._subtitle_text = subtitle
+        self._alert: tuple[str, str] | None = None
 
         _cb = lambda e, n=name: on_click(n)
         for w in (self, inner, self._dot, text_frame,
@@ -94,7 +118,20 @@ class SidebarRow(tk.Frame):
             self.configure(highlightbackground=C["border"])
 
     def _set_subtitle(self, text: str) -> None:
-        self._subtitle_lbl.configure(text=text)
+        self._subtitle_text = text
+        if self._alert is None:
+            self._subtitle_lbl.configure(text=text)
+
+    def set_alert(self, text: str | None, colour: str | None = None) -> None:
+        """Show a warning in place of the subtitle ("⚠ Storm Warning"), or None
+        to go back to it. The live subtitle keeps updating underneath, so it is
+        current again the moment the warning ends (panels/iris_panel.py)."""
+        if text:
+            self._alert = (text, colour or C["text3"])
+            self._subtitle_lbl.configure(text=text, fg=self._alert[1])
+        else:
+            self._alert = None
+            self._subtitle_lbl.configure(text=self._subtitle_text, fg=C["text3"])
 
     def update(self, data) -> None:
         pass
@@ -228,7 +265,7 @@ class Sidebar(tk.Frame):
         # §7: the wheel is bound only while the pointer is over the rail, so
         # it never fights a panel's own scroll frame for the same events.
         self._canvas.bind("<Enter>", self._bind_wheel)
-        self._canvas.bind("<Leave>", self._unbind_wheel)
+        self._canvas.bind("<Leave>", self._maybe_unbind_wheel)
 
         self._rows:        dict[str, SidebarRow] = {}   # selectable rows only
         self._groups:      dict[str, GroupRow]   = {}
@@ -317,8 +354,20 @@ class Sidebar(tk.Frame):
     def _bind_wheel(self, _event) -> None:
         self._canvas.bind_all("<MouseWheel>", self._on_wheel)
 
-    def _unbind_wheel(self, _event) -> None:
-        self._canvas.unbind_all("<MouseWheel>")
+    def _pointer_inside(self) -> bool:
+        try:
+            x, y = self.winfo_pointerxy()
+            left, top = self._canvas.winfo_rootx(), self._canvas.winfo_rooty()
+            return (left <= x < left + self._canvas.winfo_width()
+                    and top <= y < top + self._canvas.winfo_height())
+        except tk.TclError:
+            return False
+
+    def _maybe_unbind_wheel(self, _event) -> None:
+        """<Leave> also comes as the pointer moves onto a row inside the
+        canvas; the wheel lets go only once the pointer is off the rail."""
+        if not self._pointer_inside():
+            self._canvas.unbind_all("<MouseWheel>")
 
     def _on_wheel(self, event) -> None:
         self._canvas.yview_scroll(int(-event.delta / 120), "units")
@@ -346,6 +395,13 @@ class Sidebar(tk.Frame):
             self._canvas.yview_moveto(top / total)
         elif bottom > shown + view:
             self._canvas.yview_moveto((bottom - view) / total)
+
+    def rail_height(self) -> int:
+        """The height the rail asks for as it stands: every row and group
+        header with its padding, each group open or shut as it is now (all
+        shut on launch, §7). Read it after geometry has run (update_idletasks),
+        as _sync_region does. felhaven sizes its launch window from this."""
+        return self._inner.winfo_reqheight()
 
     def rescale(self, scale: float) -> None:
         """Grow the fixed sidebar width in lockstep with the fonts so the nav

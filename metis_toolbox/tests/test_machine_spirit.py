@@ -82,6 +82,17 @@ class TestSave(MachineSpiritBase):
         self.assertNotIn(machine_spirit.DEFAULT_SYSTEM_PROMPT, json.dumps(raw))
 
 
+    def test_saving_the_default_text_clears_the_override(self):
+        # What REVERT TO DEFAULT then SAVE sends (the editor adds a newline).
+        # Stored, it would keep this install on today's default through every
+        # later change to DEFAULT_SYSTEM_PROMPT.
+        machine_spirit.save("custom")
+        machine_spirit.save(machine_spirit.DEFAULT_SYSTEM_PROMPT + "\n")
+        self.assertFalse(os.path.exists(machine_spirit._DATA_PATH))
+        self.assertEqual(machine_spirit.effective_prompt(),
+                         machine_spirit.DEFAULT_SYSTEM_PROMPT)
+
+
 class TestRevert(MachineSpiritBase):
     def test_revert_clears_override(self):
         machine_spirit.save("custom")
@@ -94,6 +105,31 @@ class TestRevert(MachineSpiritBase):
         machine_spirit.revert()   # must not raise
         self.assertEqual(machine_spirit.effective_prompt(),
                          machine_spirit.DEFAULT_SYSTEM_PROMPT)
+
+
+class TestDefaultText(unittest.TestCase):
+    """What a fresh install's Pythia reads first (CONVENTIONS §12, 2026-11-16)."""
+
+    def test_names_no_tool(self):
+        # The schemas are the tool list. A copy in the prompt drifted (it
+        # never learned music, the sky, the archive or Daedalus), and §8 says
+        # anything restating _TOOL_MODULES is a copy that will drift.
+        import pythia
+        names = [t["function"]["name"] for t in pythia.TOOLS]
+        self.assertTrue(names)
+        for name in names:
+            with self.subTest(tool=name):
+                self.assertNotIn(name, machine_spirit.DEFAULT_SYSTEM_PROMPT)
+
+    def test_the_call_directive_comes_before_the_markdown_rule(self):
+        # Order is load-bearing for a small model: in July the no-Markdown
+        # sentence with nothing ahead of it stopped write_document being called
+        # (0/5); with the call directive first, 8/8 (measured 2026-11-16).
+        text = machine_spirit.DEFAULT_SYSTEM_PROMPT
+        self.assertIn("Call a tool whenever", text)
+        if "Markdown" in text:
+            self.assertLess(text.index("Call a tool whenever"),
+                            text.index("Markdown"))
 
 
 if __name__ == "__main__":

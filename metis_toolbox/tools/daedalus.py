@@ -12,17 +12,23 @@ Job:         Map Felhaven's own modules, their docstrings and their
              it. This is the only thing in Felhaven that reads source files to
              describe them.
 
-Contract:    Request-driven brain tool (CONVENTIONS §2) plus plain functions
-             for its panel:
+Contract:    Request-driven brain tool (CONVENTIONS §2): TOOL_DEFINITION,
+             TOOL_META and handle(), plus plain functions for its panel and
+             the other readers below:
                index()               -> {"revision", "nodes", "edges",
                                          "collisions"}
                docstring(name)       -> {"module", "path", "docstring"}
-                                        or {"error": "unknown_module: ...",
+                                        or {"error": "not_found: ...",
                                             "did_you_mean": [...]}
+                                        or {"error": "parse_failed: <path>
+                                            [line N]", "module", "path"}
                gloss(name)           -> the module's gloss (CONVENTIONS §0),
                                         or None
                source_path(name)     -> absolute path inside the app root,
                                         or None
+               audit_version()       -> FOE's version, e.g. "V0.03": the
+                                        newest audit marker any module
+                                        carries (CONVENTIONS §3), or None
                layout(width, height) -> {key: (x, y)}, deterministic
                handle(module)        -> the get_module_docstring tool
              `name` may be a key ("aura"), a filename ("tools/aura.py") or a
@@ -52,9 +58,11 @@ Edges:       One edge per import that lands on another node, resolved the way
              a function body. Kairos's workers are loaded from strings, not
              imports, so they are deliberately NOT edges — `emanon` has none.
 
-Cache:       In memory only. Each public call stats the scope (~4 ms) and
+Cache:       In memory only. Each public call stats the scope (~3 ms) and
              re-parses only the files whose (mtime, size) moved; a full build
-             is ~0.2 s on this tree (77 files, 1.4 MB), measured 2026-09-25.
+             is 0.36 s on this tree (92 files, 2.3 MB), measured 2026-11-23
+             (~0.4 s at 92 files, 2.1 MB, on 2026-11-16; ~0.2 s at 77 files,
+             1.4 MB, on 2026-09-25).
              Each tree is discarded as soon as it has been read, because
              holding them all nearly doubled the parse time.
 
@@ -65,7 +73,8 @@ The tool:    get_module_docstring(module) — the model picks WHICH module, from
              pythia.ask() hands that straight to the UI and gives the model
              only an acknowledgement (CONVENTIONS §12). The glosses in the
              enum's description are each module's Job: first sentence, the
-             same gloss CONVENTIONS §0 defines.
+             same gloss CONVENTIONS §0 defines, cut at a word to
+             _GLOSS_CHARS (60).
 
 Out of LLM scope: Opening a file, or starting any process, is UI-only. The
              DAEDALUS tab's Notepad button does that; no tool can, because a
@@ -75,15 +84,51 @@ Out of LLM scope: Opening a file, or starting any process, is UI-only. The
              describe Cerberus or Plutus freely: describing a module is not
              touching it.
 
+Version:     audit_version() reads FOE's version off the map rather than out
+             of a constant: an audit marker (`V0.03:` as of the V0.03
+             walkthrough) is the only version a file names (§3), so the
+             newest one in any docstring IS the release line the code has
+             reached. It moves when an audit's
+             markers land and never by hand — the retired `(FOE v.01)` label
+             is what a typed version turns into (§12, 2026-11-15). It reads
+             what is on disk, like the rest of the map, so an untracked .py
+             left in one of the three folders counts too (§12, decision 6).
+             tests/test_tool_output_contract.py uses _AUDIT_MARKER too, so
+             the two agree on what a marker is.
+
 Upstream:    pythia.py (registration + dispatch), panels/daedalus_panel.py
              (the graph and the docstring pane), tools/virgil.py (a tooltip's
-             module gloss, through gloss()).
+             module gloss, through gloss()), panels/home_panel.py (the status
+             bar's version, through audit_version()).
 Downstream:  the .py files it reads; panels/sidebar.py and every TabHost
              `_build_tabs([...])` call, for display names — read as source,
              never imported.
 
-Requires:    stdlib only — ast, difflib, logging, math, os, random, re, stat,
-             threading.
+Requires:    stdlib only — ast, collections.abc, copy, dataclasses, difflib,
+             logging, math, os, random, re, stat, threading, typing.
+
+2026-11-16:  walkthrough audit — the module never had one before
+             (V0.03 audit M7). One real bug: a file with one expression a few
+             thousand operators long makes ast.parse raise RecursionError,
+             not SyntaxError, and it escaped every public call — the map, the
+             enum and Home's version line — until it became a `too_deep`
+             node. The Contract gained docstring()'s parse_failed answer,
+             Requires its two missing imports, Cache a fresh measurement. The
+             enum's scope stayed full glosses on a measured choice (§12).
+
+2026-11-16:  the Pythia tool audit (CONVENTIONS §12). The walkthrough above
+             was the audit's M7; the enum keeps full glosses (D4, measured);
+             the description follows §3's grammar. TOOL_META says codex /
+             local / changes nothing. Its failures use the shared not_found
+             and unavailable (T9, 2026-11-16); parse_failed stays its own.
+
+V0.03:       Walked through 2026-11-23 (the V0.03 walkthrough, S34; born
+             2026-09-27). Every public function was read against the
+             Contract, the never-imports rule and the cache. Nothing was
+             wrong in the code. Words: Version and audit_version() still
+             called V0.02 the only marker and cited a BACKLOG item that has
+             closed; Cache and layout() re-measured (0.36 s and 0.23 s);
+             Contract names TOOL_DEFINITION and TOOL_META; Requires is whole.
 """
 
 from __future__ import annotations
@@ -142,6 +187,10 @@ _SPREAD = 1.0                 # multiplier on the ideal edge length
 # pattern tests/test_pantheon_docs.py holds the README_PANTHEON copies to.
 _JOB_FIELD = re.compile(r"^Job:\s*(.+?)(?=^\w[\w ]*:|\Z)", re.MULTILINE | re.DOTALL)
 _SENTENCE = re.compile(r"(.*?[.!?])(\s|$)")
+# An audit marker (CONVENTIONS §3): a docstring line that opens "V0.02:", split
+# into its two numbers. tests/test_tool_output_contract.py imports this pattern
+# for its own guard, so there is one definition of a marker, not two.
+_AUDIT_MARKER = re.compile(r"^\s*[Vv](\d+)\.(\d+):", re.MULTILINE)
 
 
 # ── Per-file record ───────────────────────────────────────────────────────────
@@ -303,6 +352,14 @@ def _parse_file(full: str, rel: str, group: str, stamp: tuple[int, int]) -> _Rec
         log.warning("Daedalus: could not read %s (%s)", rel, type(exc).__name__)
         return _Record(key, rel, group, stamp, None, None,
                        "unreadable", None, (), ())
+    except (RecursionError, MemoryError) as exc:
+        # Not a SyntaxError: one expression a few thousand operators long
+        # (`1 + 1 + ...`) overflows the parser itself. Uncaught, it escaped
+        # every public call, Home's version line included, on every refresh.
+        log.warning("Daedalus: %s is nested too deeply to parse (%s) — indexed "
+                    "without a docstring or edges", rel, type(exc).__name__)
+        return _Record(key, rel, group, stamp, None, None,
+                       "too_deep", None, (), ())
 
     doc = ast.get_docstring(tree, clean=True)
     imports: list[tuple[str, str, bool]] = []
@@ -519,7 +576,7 @@ def docstring(name: str) -> dict[str, Any]:
     view = _refresh()
     key = _resolve(view, name)
     if key is None:
-        return {"error": f"unknown_module: {name!r}",
+        return {"error": f"not_found: {name!r}",
                 "did_you_mean": _suggest(view, name)}
     rec = view.by_key[key]
     if rec.error is not None:
@@ -558,6 +615,24 @@ def source_path(name: str) -> Optional[str]:
     except ValueError:                  # different drives on Windows
         inside = False
     return full if inside and os.path.isfile(full) else None
+
+
+def audit_version() -> Optional[str]:
+    """FOE's version: the newest audit marker (CONVENTIONS §3) in any
+    module's docstring, written as the marker writes it ("V0.02"). None when
+    no module carries one.
+
+    The newest, not the oldest: an audit's markers land a few files at a
+    time (the V0.03 walkthrough marks one session's files per PR), so the
+    oldest marker would lag the release until the very last file. Numbers
+    compare as numbers, so V0.10 is newer than V0.9."""
+    best: Optional[tuple[tuple[int, int], str]] = None
+    for rec in _refresh().by_key.values():
+        for m in _AUDIT_MARKER.finditer(rec.docstring or ""):
+            rank = (int(m.group(1)), int(m.group(2)))
+            if best is None or rank > best[0]:
+                best = (rank, f"V{m.group(1)}.{m.group(2)}")
+    return best[1] if best else None
 
 
 def _unit_layout(snapshot: dict[str, Any]) -> dict[str, tuple[float, float]]:
@@ -635,8 +710,8 @@ def _unit_layout(snapshot: dict[str, Any]) -> dict[str, tuple[float, float]]:
 def layout(width: float, height: float) -> dict[str, tuple[float, float]]:
     """Node positions for a width x height canvas.
 
-    The force pass runs once per index revision (~0.2 s, measured 2026-09-25)
-    and is cached in unit coordinates; a resize only rescales them. Same
+    The force pass runs once per index revision (0.23 s at 92 nodes and 278
+    edges, measured 2026-11-23) and is cached in unit coordinates; a resize only rescales them. Same
     index, same map — nodes stay put between visits.
     """
     view = _refresh()
@@ -702,7 +777,7 @@ def _tool_definition() -> dict[str, Any]:
             "name": "get_module_docstring",
             "description": (
                 "Shows the user one of Felhaven's own modules' documentation "
-                "(its module docstring), word for word. Call this when the user "
+                "(its module docstring), word for word. Call when the user "
                 "asks what a Felhaven module, panel or tool does, how it works, "
                 "or what it is for — questions about Felhaven's own code, not "
                 "live data. The docstring is shown to the user directly, so do "
@@ -742,10 +817,18 @@ def handle(module: str) -> dict[str, Any]:
         }
     except Exception as exc:  # noqa: BLE001 — a tool must never raise (§2)
         log.error("Daedalus: handle(%r) failed: %s", module, type(exc).__name__)
-        return {"error": f"daedalus_failed: {type(exc).__name__}"}
+        return {"error": f"unavailable: {type(exc).__name__}"}
 
 
 TOOL_DEFINITION: dict[str, Any] = _tool_definition()
+
+# What the code reads about each tool here; the model never sees it
+# (CONVENTIONS §8, "TOOL_META"). network: none = local only, cached = a poll
+# or TTL cache, live = may reach the network on every call. mutates = it
+# changes state outside the turn.
+TOOL_META: dict[str, dict[str, Any]] = {
+    "get_module_docstring": {"domain": "codex", "network": "none", "mutates": False},
+}
 
 
 # ── Standalone test ───────────────────────────────────────────────────────────

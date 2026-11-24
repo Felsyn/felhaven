@@ -133,7 +133,7 @@ class TestIngestAndLoad(unittest.TestCase):
     @staticmethod
     def _Resp(payload):
         """What hermes.get returns: a finished Reply."""
-        return hermes.Reply(200, {}, payload, "https://census.example.invalid/x.zip")
+        return hermes.Reply(200, {}, payload)
 
     def test_ingest_writes_then_load_reads(self):
         os.makedirs(artemis.partial_dir(self.area))

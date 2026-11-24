@@ -330,5 +330,25 @@ class TestTheToolDefinition(unittest.TestCase):
         self.assertEqual(out["display"], "16.0934 km")
 
 
+
+class TestTheParserReadsMoreNumbers(unittest.TestCase):
+    """The number's tail was taken for the unit: "5. cups" was "unknown unit:
+    . cups", and "+5 m" and "1,000 ft" were unknown units too (measured
+    2026-11-23)."""
+
+    def test_a_trailing_point_a_plus_sign_and_comma_groups(self):
+        for expr, display in (("5. cups to ml", "1182.94 ml"), ("+5 m to km", "0.005 km"),
+                              ("1,000 ft to m", "304.8 m"),
+                              ("1,000.5 ft to m", "304.952 m"),
+                              ("1,234,567 mm to km", "1.23457 km")):
+            with self.subTest(expr=expr):
+                self.assertEqual(eudoxus.convert(expr).get("display"), display)
+
+    def test_a_decimal_comma_is_still_not_a_number(self):
+        # Read as "1" and a unit ",5 m": unknown, never silently 15.
+        out = eudoxus.convert("1,5 m to cm")
+        self.assertTrue(out.get("error", "").startswith("unknown_unit"), out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

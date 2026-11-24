@@ -15,13 +15,20 @@ Scope:       PRESENTATION ONLY — merge order, the per-source cap, collapse
              state, dimming. It never fetches, and it never persists feed
              content. Feed data and read state are tools/pheme.py's (§12).
 
-Upstream:    kairos.py — the "pheme" worker delivers to update() every 900 s.
-Downstream:  tools/pheme.py (read state), webbrowser (click-through)
+Contract:    PhemePanel(parent), and update(data) for Kairos (below).
 
-Requires:    json, os, tempfile, tkinter, webbrowser, datetime (stdlib)
+Upstream:    felhaven.py builds it and registers it with Kairos, whose "pheme"
+             worker (tools.pheme.fetch) delivers to update() every 900 s.
+Downstream:  tools/pheme.py (load_feeds() and the read state), theme.py
+             (TabHost, ScrollColumn, the right-click menu), tools/virgil.py and
+             panels/virgil_tooltip.py (the tips), webbrowser (click-through)
 
-Feeds come from config/pheme_rumormill.json in config order — no hardcoded
-sources, adding a feed to the JSON adds it to both surfaces.
+Requires:    datetime, json, logging, os, tempfile, tkinter, typing, webbrowser
+             (stdlib)
+
+Feeds come from pheme.load_feeds() in config order — no hardcoded sources,
+adding a feed to config/pheme_rumormill.json adds it to both surfaces. A row
+Pheme can't use is left out there, so it never reaches this panel.
 
 Merge:  each feed contributes at most _SCRAPSTREAM_PER_SOURCE stories, capped
         BEFORE the sort, then the pool is ordered by pheme's `ts` key descending.
@@ -49,24 +56,35 @@ state, §9). Missing or corrupt -> first section open, rest closed, silently. An
 explicitly-saved all-closed state IS honoured: overriding a choice the user made
 by hand is worse than the empty screen the default guards against.
 
-Each surface owns a _ScrollFrame (Canvas + PhosphorScroll — never tk.Scrollbar,
-CONVENTIONS §7/§12). The tab bar is theme.TabHost, not a fourth hand-rolled copy.
+Each surface is a _ScrollFrame: theme.ScrollColumn (a PhosphorScroll, never
+tk.Scrollbar, CONVENTIONS §7/§12) plus titles that wrap to its width. The tab
+bar is theme.TabHost.
 
-Kairos contract (single method): update(data), same payload as before.
+Kairos contract (single method): update(data).
     data = {"feeds": {feed_id: {"stories": [...]} | {"error": str}}}
     data is None            -> both surfaces empty, footer "stale"
     a feed's {"error": ...} -> slug mapped through _ERROR_TEXT onto that
                                section's header, and counted in the footer
 
-V0.02: Audited 2026-07-23 — grew the _ERROR_TEXT map (echo_panel pattern) in
-       lockstep with pheme's §2 slugs, replacing the raw render of
+2026-07-23: walkthrough audit — grew the _ERROR_TEXT map (echo_panel
+       pattern) in lockstep with pheme's §2 slugs, replacing the raw render of
        result["error"]; tests/test_pheme_panel_smoke.py holds the two halves
        together.
        Restructured 2026-08-02 from seven per-source tabs into Scrapstream +
        Source Fonts; adopted theme.TabHost and the shared right-click helper.
+
+V0.03: Walked through 2026-11-23 (the V0.03 walkthrough, S30; born
+       2026-06-10). The wheel worked only below the last story, because the
+       hand-rolled canvas dropped it on <Leave>, which Tk sends as the pointer
+       moves onto a row; _ScrollFrame is now theme.ScrollColumn plus title
+       wrapping. Feeds come from pheme.load_feeds(): a config row with no id
+       stopped this panel, and so Felhaven, from opening (measured). A failed
+       collapse-state save is logged, not swallowed. Contract, Upstream,
+       Downstream and Requires caught up.
 """
 
 import json
+import logging
 import os
 import tempfile
 import tkinter as tk
@@ -74,14 +92,13 @@ import webbrowser
 from datetime import datetime
 from typing import Any, Callable
 
-from theme import C, FONTS, PhosphorScroll, TabHost, popup_menu, themed_menu
-from tools import pheme
+from panels import virgil_tooltip
+from theme import C, FONTS, ScrollColumn, TabHost, popup_menu, themed_menu
+from tools import pheme, virgil
+
+log = logging.getLogger("METIS.pheme_panel")
 
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-# pheme_rumormill.json lives in config/ under the app root — two levels up from
-# panels/. abspath() makes resolution independent of the current working directory.
-_CONFIG_PATH = os.path.join(_APP_ROOT, "config", "pheme_rumormill.json")
 
 # Which sections were left open. Runtime state, gitignored (§9).
 _SECTIONS_PATH = os.path.join(_APP_ROOT, "pheme_sections.json")
@@ -103,13 +120,14 @@ _Handler = Callable[["tk.Event[Any]"], None]
 
 
 def _load_feeds() -> list[_Feed]:
-    """Ordered feed list from config. [] (empty panel) if config is unreadable —
-    a bad config degrades the panel, it never crashes the app."""
+    """Pheme's usable feed rows, in config order. [] (an empty panel) when the
+    config can't be read — a bad config degrades the panel, never the app
+    (§4). Pheme logs any row it leaves out."""
     try:
-        with open(_CONFIG_PATH, encoding="utf-8") as f:
-            feeds: list[_Feed] = json.load(f)["feeds"]
-            return feeds
-    except Exception:
+        return pheme.load_feeds()
+    except Exception as e:
+        log.warning("Scriptorium: the feed config can't be read (%s: %s); "
+                    "no feeds shown", type(e).__name__, e)
         return []
 
 
@@ -126,8 +144,6 @@ def _load_sections(feeds: list[_Feed]) -> set[str]:
     try:
         with open(_SECTIONS_PATH, encoding="utf-8") as f:
             raw = json.load(f)["expanded"]
-    except FileNotFoundError:
-        return default
     except Exception:
         return default
     if not isinstance(raw, list):
@@ -139,7 +155,9 @@ def _load_sections(feeds: list[_Feed]) -> set[str]:
 def _save_sections(expanded: set[str]) -> None:
     """Persist collapse state atomically (§9: mkstemp in the same directory,
     then os.replace). Written on toggle only, never per tick. A failed write
-    costs the restore across a restart, never the render."""
+    costs the restore across a restart, never the render, so it is logged
+    rather than raised. Tk thread only, so it can't meet the os.replace race
+    (§12, 2026-11-21)."""
     try:
         # Same directory as the destination, derived from it — os.replace is
         # only atomic within a filesystem, and on Windows fails outright across
@@ -154,8 +172,9 @@ def _save_sections(expanded: set[str]) -> None:
             if os.path.exists(tmp):
                 os.unlink(tmp)
             raise
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("Scriptorium: could not save the open sections: %s: %s",
+                    type(e).__name__, e)
 
 
 # ── Error text ───────────────────────────────────────────────────────────────
@@ -165,12 +184,11 @@ def _save_sections(expanded: set[str]) -> None:
 # swallowed — the echo_panel rule). handle()'s slugs are Pythia-facing and
 # never reach this panel, so they are deliberately not mapped here.
 _ERROR_TEXT = {
-    "http_error":       "feed returned HTTP",       # detail: the status code
-    "feed_timeout":     "feed timed out",
-    "feed_too_large":   "feed is too large to read",
-    "network_error":    "network error",
+    "unavailable":      "feed fetch failed",  # detail: HTTP status or class
+    "timeout":          "feed timed out",
+    "too_large":        "feed is too large to read",
+    "offline":          "network error",
     "invalid_feed_xml": "feed sent unreadable data",
-    "fetch_failed":     "feed fetch failed",        # detail: exception class
 }
 
 
@@ -186,59 +204,30 @@ def _error_text(code: str) -> str:
 #  _ScrollFrame — a vertically scrollable container
 # ─────────────────────────────────────────────────────────────────────────────
 
-class _ScrollFrame(tk.Frame):
+class _ScrollFrame(ScrollColumn):
     """
-    Canvas + PhosphorScroll wrapper. Pack content into `.inner`.
+    theme.ScrollColumn plus titles that wrap to its width. Pack rows into
+    `.body`.
 
     Labels that should wrap to the available width register via add_wrap_label();
     their wraplength is recomputed whenever the canvas is resized, so titles
     reflow correctly even though this tab wasn't visible (sized) when first built.
+    The wheel is ScrollColumn's, judged by the pointer. The hand-rolled canvas
+    this was dropped it on <Leave>, which Tk sends as the pointer moves onto a
+    row, so the wheel worked only below the last story (measured 2026-11-23).
     """
 
     def __init__(self, parent: tk.Misc) -> None:
-        super().__init__(parent, bg=C["card"])
-
-        self._canvas = tk.Canvas(self, bg=C["card"], highlightthickness=0, bd=0)
-        scroll = PhosphorScroll(self, command=self._canvas.yview)
-        self._canvas.configure(yscrollcommand=scroll.set)
-
-        scroll.pack(side="right", fill="y")
-        self._canvas.pack(side="left", fill="both", expand=True)
-
-        self.inner = tk.Frame(self._canvas, bg=C["card"])
-        self._win  = self._canvas.create_window((0, 0), window=self.inner, anchor="nw")
-
+        super().__init__(parent)
         # (label, horizontal_padding_px) for width-following wrap.
         self._wrap_labels: list[tuple[tk.Label, int]] = []
 
-        self.inner.bind("<Configure>", self._on_inner_config)
-        self._canvas.bind("<Configure>", self._on_canvas_config)
-
-        # Wheel only while hovering -> stacked scroll frames don't fight.
-        self._canvas.bind("<Enter>", self._bind_wheel)
-        self._canvas.bind("<Leave>", self._unbind_wheel)
-
-    # ── geometry ────────────────────────────────────────────────────────────
-    def _on_inner_config(self, _event: "tk.Event[Any]") -> None:
-        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
-
     def _on_canvas_config(self, event: "tk.Event[Any]") -> None:
-        # Pin the inner frame to the canvas width (no horizontal scroll) and
-        # reflow every registered wrap label to the new width.
-        self._canvas.itemconfigure(self._win, width=event.width)
+        # ScrollColumn pins the rows to the canvas width (no horizontal
+        # scroll); every registered wrap label then reflows to that width.
+        super()._on_canvas_config(event)
         for label, pad in self._wrap_labels:
             label.config(wraplength=max(1, event.width - pad))
-
-    # ── wheel ───────────────────────────────────────────────────────────────
-    def _bind_wheel(self, _event: "tk.Event[Any]") -> None:
-        self._canvas.bind_all("<MouseWheel>", self._on_wheel)
-
-    def _unbind_wheel(self, _event: "tk.Event[Any]") -> None:
-        self._canvas.unbind_all("<MouseWheel>")
-
-    def _on_wheel(self, event: "tk.Event[Any]") -> None:
-        # Windows wheel deltas arrive in multiples of 120.
-        self._canvas.yview_scroll(int(-event.delta / 120), "units")
 
     # ── content ─────────────────────────────────────────────────────────────
     def add_wrap_label(self, label: tk.Label, pad: int = 24) -> None:
@@ -253,14 +242,14 @@ class _ScrollFrame(tk.Frame):
         `handler`. Row widgets bind it themselves as they are built — a Label
         swallows the click that would otherwise reach the frame beneath it."""
         self._canvas.bind("<Button-3>", handler)
-        self.inner.bind("<Button-3>", handler)
+        self.body.bind("<Button-3>", handler)
 
     def clear(self) -> None:
         """Destroy all rows and drop stale wrap-label references."""
-        for w in self.inner.winfo_children():
+        for w in self.body.winfo_children():
             w.destroy()
         self._wrap_labels.clear()
-        self._canvas.yview_moveto(0)
+        self.scroll_to_top()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -270,6 +259,18 @@ class _ScrollFrame(tk.Frame):
 class PhemePanel(TabHost):
     """Scrapstream (merged river) + Source Fonts (collapsible per-source
     sections), both fed by the single `pheme` Kairos worker."""
+
+    # Hover tooltip (Virgil) for the arrow each headline row builds, a
+    # glossary entry (CONVENTIONS §7). The row builder attaches it.
+    _ROW_TIPS = {
+        "open": virgil.term("open_story"),
+    }
+    # The two tabs name no module (Pheme fills both), so each says what the
+    # view is: a glossary entry. Keys are the tab keys in _build_tabs.
+    _TAB_TIPS = {
+        "scrapstream": virgil.term("scrapstream"),
+        "sourcefonts": virgil.term("source_fonts"),
+    }
 
     def __init__(self, parent: tk.Misc) -> None:
         super().__init__(parent, "Scriptorium — rumor mill", C["coral"])
@@ -320,6 +321,9 @@ class PhemePanel(TabHost):
              ("sourcefonts", "SOURCE FONTS", self._fonts, C["coral"])],
             default="scrapstream",
         )
+        for key, tip in self._TAB_TIPS.items():
+            if key in self._tabs:
+                virgil_tooltip.attach(self._tabs[key], tip)
 
     # ── right-click menu (theme.themed_menu / popup_menu — the shared helper) ──
 
@@ -355,7 +359,7 @@ class PhemePanel(TabHost):
         """Title (full text, wrapped) + open arrow, then an optional meta line.
 
         `scroll` is only the wrap-width authority; `parent` is where the widgets
-        actually pack — the river packs into scroll.inner, a Source Fonts row
+        actually pack — the river packs into scroll.body, a Source Fonts row
         packs into its section body so collapsing hides it. `sink` collects the
         plain-text form for Copy all, `rows` the read-key registry to dim from.
         """
@@ -377,6 +381,7 @@ class PhemePanel(TabHost):
             fg=C["teal"] if clickable else C["text3"], bg=C["card"],
         )
         arrow.pack(side="right", anchor="n")
+        virgil_tooltip.attach(arrow, self._ROW_TIPS["open"])
 
         title_text = story.get("title", "(no title)")
         title = tk.Label(
@@ -479,10 +484,10 @@ class PhemePanel(TabHost):
         pool.sort(key=lambda s: s.get("ts", ""), reverse=True)
 
         if not pool:
-            self._note(self._river.inner, "no stories available")
+            self._note(self._river.body, "no stories available")
             return
         for story in pool:
-            self._build_story_row(self._river, self._river.inner, story,
+            self._build_story_row(self._river, self._river.body, story,
                                   self._text_river, self._rows_river)
 
     # ── Source Fonts ─────────────────────────────────────────────────────────
@@ -495,7 +500,7 @@ class PhemePanel(TabHost):
         self._rows_fonts = {}
 
         if not self._feeds:
-            self._note(self._fonts.inner, "no feeds configured")
+            self._note(self._fonts.body, "no feeds configured")
             return
 
         for feed in self._feeds:
@@ -505,7 +510,7 @@ class PhemePanel(TabHost):
         fid   = feed["id"]
         open_ = fid in self._expanded
 
-        outer = tk.Frame(self._fonts.inner, bg=C["card"])
+        outer = tk.Frame(self._fonts.body, bg=C["card"])
         outer.pack(fill="x", pady=(0, 2))
 
         header = tk.Frame(outer, bg=C["card"], cursor="hand2")

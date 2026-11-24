@@ -49,8 +49,16 @@ Upstream:    tools/artemis.py — ingest_area orchestrates ingest();
 Downstream:  tools/cadmus.py (byte decoding), tools/artemis.py (geometry and
              the FVEC writer).
 
-Requires:    stdlib only — io, logging, os, threading, zipfile; the
+Requires:    stdlib only — io, logging, os, sys, threading, zipfile; the
              downloads go through artemis.download.
+
+V0.03:       Walked through 2026-11-18 (the V0.03 walkthrough, CONVENTIONS
+             §3), its first audit (born 2026-08-09). Only AREAWATER may read a
+             404 as "never published"; a timeout fails the ingest (the
+             2026-08-10 lesson holds). Caps are measured, members capped,
+             rings clipped as polygons; load() never fetches; the panel
+             still fills both area tiers with one colour, as Tiers says.
+             Found clean apart from Requires, which gained sys.
 """
 
 import io

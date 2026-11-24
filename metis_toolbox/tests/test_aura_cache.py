@@ -6,9 +6,9 @@ used to fetch again: "weather, sunset and moon?" was three round trips, and
 offline each one walked BOTH sources before failing. These tests pin the fix by
 counting calls at the real I/O seam (hermes.get):
 
-  - one turn of get_weather + get_sun_times + get_moon_phase is ONE fetch,
-    online or off; since V0.03 audit M3 the sun and moon make none at all,
-    and answer offline
+  - one turn of get_weather + get_sky_report is ONE fetch, online or off;
+    since V0.03 audit M3 the sun and moon make none at all, and answer
+    offline (the sky was get_sun_times + get_moon_phase until 2026-11-14)
   - handle() answers from the last good fetch while it is younger than
     CACHE_TTL, keyed on the inputs that shape it (never the old city's weather)
   - a failed refresh serves the last reading marked `stale`, with its original
@@ -33,9 +33,23 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 from tools import aura, hermes
-from tests._fixtures import load_real_j1, load_real_open_meteo
+from tests._fixtures import ScratchSettings, load_real_j1, load_real_open_meteo
 from tests._loopback import Loopback, drip, read_head
 import pythia
+
+
+# Settings in a scratch folder: neither this checkout's place nor its PLACE
+# pick is read, so every test asks for Home at Themis's defaults (a pick
+# would add a second fetch). test_aura_place covers the pick.
+_settings = ScratchSettings()
+
+
+def setUpModule():
+    _settings.start()
+
+
+def tearDownModule():
+    _settings.stop()
 
 _T0 = 1000.0                          # arbitrary monotonic origin, patched clock
 _WALL_T0 = datetime(2026, 9, 28, 9, 0)  # the wall clock at _T0
@@ -117,7 +131,7 @@ class _ClockedCase(_CacheCase):
 
 class TestOneFetchPerTurn(_CacheCase):
 
-    _TURN = ("get_weather", "get_sun_times", "get_moon_phase")
+    _TURN = ("get_weather", "get_sky_report")
 
     def _turn(self):
         # Through the real dispatcher, the way ask() runs a turn's tool calls.
@@ -129,13 +143,12 @@ class TestOneFetchPerTurn(_CacheCase):
             self.assertNotIn("error", out, msg=name)
         self.assertEqual(len(self.net.calls), 1)
 
-    def test_sun_and_moon_make_no_fetch_of_their_own(self):
+    def test_the_sky_makes_no_fetch_of_its_own(self):
         # Computed from the Settings and the clock since V0.03 audit M3, so
         # only the weather is a reading, and only it carries `as_of`.
-        for name in ("get_sun_times", "get_moon_phase"):
-            out = pythia._dispatch(name, {})
-            self.assertNotIn("error", out, msg=name)
-            self.assertNotIn("as_of", out, msg=name)
+        out = pythia._dispatch("get_sky_report", {})
+        self.assertNotIn("error", out)
+        self.assertNotIn("as_of", out)
         self.assertEqual(self.net.calls, [])
 
     def test_offline_the_turn_makes_one_attempt(self):
@@ -145,7 +158,7 @@ class TestOneFetchPerTurn(_CacheCase):
         self.net.down()
         results = self._turn()
         self.assertEqual([out.get("error") for out in results],
-                         ["weather_offline", None, None])
+                         ["offline", None])
         self.assertEqual(len(self.net.calls), 2)
 
     def test_after_a_kairos_poll_the_turn_makes_no_fetch(self):
@@ -220,7 +233,7 @@ class TestKey(_CacheCase):
         self.net.down()
         with mock.patch("tools.aura._location", return_value="Ely"):
             out = aura.handle()
-        self.assertEqual(out.get("error"), "weather_offline")
+        self.assertEqual(out.get("error"), "offline")
         self.assertNotIn("temp_f", out)
 
 
@@ -244,13 +257,13 @@ class TestStaleOnError(_ClockedCase):
         aura.handle()
         self.at(_T0 + aura._STALE_MAX)
         self.net.down()
-        self.assertEqual(aura.handle().get("error"), "weather_offline")
+        self.assertEqual(aura.handle().get("error"), "offline")
 
     def test_a_recent_failure_is_not_retried(self):
         self.net.down()
         aura.handle()
         self.at(_T0 + aura._RETRY_AFTER - 1)
-        self.assertEqual(aura.handle().get("error"), "weather_offline")
+        self.assertEqual(aura.handle().get("error"), "offline")
         self.assertEqual(len(self.net.calls), 2)     # still just the one attempt
 
     def test_a_failure_is_retried_once_the_window_passes(self):
@@ -291,12 +304,12 @@ class TestFetch(_ClockedCase):
         # panel and Pythia's thread would share one mutable dict.
         out = aura.fetch()
         out["temp_f"] = -999
-        out["astronomy"]["sunrise"] = "tampered"
+        out["forecast"][0]["high_f"] = -999          # a nested dict, the deep case
         answer = aura.handle()
         self.assertNotEqual(answer["temp_f"], -999)
-        self.assertNotEqual(answer["astronomy"]["sunrise"], "tampered")
-        answer["astronomy"]["sunset"] = "tampered"
-        self.assertNotEqual(aura.handle()["astronomy"]["sunset"], "tampered")
+        self.assertNotEqual(answer["forecast"][0]["high_f"], -999)
+        answer["forecast"][0]["low_f"] = -999
+        self.assertNotEqual(aura.handle()["forecast"][0]["low_f"], -999)
 
 
 # ── Two threads, one fetch ────────────────────────────────────────────────────
@@ -386,7 +399,7 @@ class TestTheLockIsHeldOnlyUntilTheDeadline(unittest.TestCase):
                 if free:
                     aura._lock.release()
 
-        self.assertEqual(out.get("error"), "weather_timeout")
+        self.assertEqual(out.get("error"), "timeout")
         self.assertEqual(sum("deadline" in line for line in logs.output), 2,
                          "both sources should end at hermes' deadline")
         self.assertLess(elapsed, 2 * 0.66 + 1.5)   # two deadlines, CI slack

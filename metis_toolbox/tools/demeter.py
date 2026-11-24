@@ -17,8 +17,13 @@ Contract:    The layer shape Hecate and Poseidon use, plus the raster:
                  terrain.bin; raises FileNotFoundError. NEVER fetches.
                • raster(area) -> bytes — the P6 PPM the panel hands to
                  tk.PhotoImage. Read from derived/terrain.ppm.gz, and
-                 REGENERATED from terrain.bin if derived/ was deleted, which
-                 is what makes `rm -rf derived/` a supported operation.
+                 REGENERATED from terrain.bin if derived/ was deleted or is
+                 corrupt, which is what makes `rm -rf derived/` a supported
+                 operation.
+               • sample(info, cells, east, north) -> metres or None — the
+                 hover's elevation, from a grid load() returned; I/O-free.
+               • band_thresholds(cells) -> the tercile cuts, or None at low
+                 relief (the panel's legend reads them).
              Best-effort by design: artemis.ingest_area catches an
              IngestError from this module and commits a terrain-less area
              rather than losing the roads and water that already succeeded
@@ -45,9 +50,10 @@ Raster:      Three tiers split by PERCENTILE (terciles) of the local
                • Under ~10 m of total relief the terciles are noise, so the
                  whole grid renders at mid tier and the manifest says
                  low_relief; honest beats pretty.
-             P6 PPM is handed to Tk as RAW BYTES, never base64: this Tk
-             (8.6.12) rejects the base64 form outright — see
-             tests/test_artemis_ppm_spike.py, the step-0 spike verdict.
+             P6 PPM is handed to Tk as RAW BYTES, never base64: Tk rejects
+             the base64 form outright (8.6.12 at the step-0 spike; 8.6.15,
+             Python 3.13's, re-checked 2026-11-18) — see
+             tests/test_artemis_ppm_spike.py.
 
 Datum:       3DEP/USGS10m is NAVD88; the global products are EGM96, tens of
              metres apart. vdatum travels in the manifest and sources must
@@ -61,12 +67,14 @@ Source:      OpenTopography REST API, AAIGrid output:
              Bounds:).
 
 Upstream:    tools/artemis.py — ingest_area orchestrates ingest();
-             panels/artemis_panel.py — calls raster() to draw.
+             panels/artemis_panel.py — calls raster() and load() to draw,
+             band_thresholds() for the legend and sample() on hover.
 Downstream:  cerberus.py (the key), palette.py (the band colours),
              tools/artemis.py (geometry, paths, atomic writes).
 
-Requires:    tools/hermes.py (the bounded network read), and array, gzip,
-             logging, math, os, re, struct, threading (stdlib).
+Requires:    tools/hermes.py (the bounded network read), and array,
+             collections, gzip, logging, math, os, re, struct, sys,
+             threading, zlib (stdlib).
 
 Bounds:      The download's cap is computed from the box asked for, not
              fixed: grid_cap(box) = the cells a 1/3 arc-second grid needs to
@@ -79,7 +87,21 @@ Bounds:      The download's cap is computed from the box asked for, not
              hold (grid_cells(box) x 1.5) is refused before anything is
              allocated from it; values are read _CHUNK bytes at a time into a
              2-byte-a-cell array, so a parse costs a small fraction of the
-             download, not several times it (§12, 2026-10-03).
+             download, not several times it (§12, 2026-10-03). The raster
+             stage after it builds no object per cell either (2026-11-18).
+
+V0.03:       Walked through 2026-11-18 (the V0.03 walkthrough, CONVENTIONS
+             §3), its first audit (born 2026-08-09). The key is read at
+             ingest only and never cached; the download is capped by the
+             box; the parse is bounded. Security fix: OpenTopography's
+             error replies repeat the key (measured), and an unparseable
+             reply's first 200 bytes went to the log verbatim; the key is
+             now cut out of that excerpt and of the slug. A corrupt cached
+             raster escaped as zlib.error and is now rebuilt. write_bin and
+             write_derived build no list per cell (46 and 95.5 MB at 1024 x
+             1024 became 4.2 and 7.3, the bytes identical: the owner's call,
+             a BACKLOG item). elevation_at() went (only a test called it,
+             not the CLI its docstring named); _DERIVED_DIR is Artemis's.
 """
 
 import array
@@ -91,6 +113,8 @@ import re
 import struct
 import sys
 import threading
+import zlib
+from collections import Counter
 from typing import Any
 
 # Demeter reaches UP to app-root siblings (cerberus.py, palette.py) as well as
@@ -147,9 +171,10 @@ _MAX_TOKEN = 64      # bytes; the longest value OpenTopography writes is 18
 _QUOTED = 40         # a bad token is quoted at most this long in a message
 _VAULT_KEY_NAME = "opentopography_api_key"
 
-_BIN_NAME = artemis.TERRAIN_BIN   # a cache-layout fact; Artemis owns the name
-_DERIVED_DIR = "derived"
+_BIN_NAME = artemis.TERRAIN_BIN   # cache-layout facts; Artemis owns the names
+_DERIVED_DIR = artemis.DERIVED_DIR
 _PPM_NAME = "terrain.ppm.gz"
+_EXCERPT = 200       # bytes of an unparseable reply the log may quote
 
 GRID = 1024                  # cells per side; powers of two only (zoom stops)
 NODATA = -32768
@@ -183,6 +208,29 @@ def _api_key() -> str:
         return cerberus.vault_get(_VAULT_KEY_NAME)
     except cerberus.VaultError as exc:
         raise artemis.IngestError(ERR_NO_KEY) from exc
+
+
+def _excerpt_without(body: bytes, key: str) -> str:
+    """The reply's first _EXCERPT bytes, decoded, with the key cut out.
+
+    OpenTopography's error replies repeat the key they were sent (measured
+    2026-11-18: "Not a valid format API Key: <key>"). The key is replaced in
+    the bytes BEFORE the cut, in a window one key longer than the excerpt,
+    so a key straddling the cut can't leave its first characters behind. In
+    any case, as _without() does: an echo needn't keep the key's case."""
+    secret = key.encode("utf-8")
+    window = body[:_EXCERPT + len(secret)]
+    if secret:
+        window = re.sub(re.escape(secret), b"<key>", window, flags=re.IGNORECASE)
+    return window[:_EXCERPT].decode("utf-8", "replace")
+
+
+def _without(text: str, key: str) -> str:
+    """`text` with the key cut out, in any case: a parse error may quote a
+    token of the reply, and header field names are quoted lowercased."""
+    if not key:
+        return text
+    return re.sub(re.escape(key), "<key>", text, flags=re.IGNORECASE)
 
 
 # ── AAIGrid ───────────────────────────────────────────────────────────────────
@@ -349,10 +397,12 @@ def resample(grid: AsciiGrid, center: tuple[float, float],
 def write_bin(path: str, cells: "array.array[int]", center: tuple[float, float],
               size: int = GRID) -> dict[str, Any]:
     """Write terrain.bin atomically; returns the grid info for the manifest."""
-    valid = [v for v in cells if v != NODATA]
-    if not valid:
+    # Generators, not a list of the valid cells: that list cost 22x the grid
+    # (46 MB at 1024 x 1024, measured 2026-10-03 and again 2026-11-18).
+    elev_min = min((v for v in cells if v != NODATA), default=None)
+    if elev_min is None:
         raise artemis.IngestError("no_elevation: every cell is NODATA")
-    elev_min, elev_max = min(valid), max(valid)
+    elev_max = max(v for v in cells if v != NODATA)
     m_per_px = 2.0 * artemis.HALF_WIDTH_M / size
     header = _HEADER.pack(_MAGIC, _VERSION, size, size, center[0], center[1],
                           m_per_px, elev_min, elev_max, NODATA,
@@ -404,36 +454,56 @@ def read_bin(path: str) -> tuple[dict[str, Any], "array.array[int]"]:
 
 def band_thresholds(cells: "array.array[int]") -> "tuple[int, int] | None":
     """Tercile cuts of the VALID elevations, or None when relief is too low
-    to band honestly. NODATA is filtered before the split (see Raster:)."""
-    valid = sorted(v for v in cells if v != NODATA)
-    if not valid:
+    to band honestly. NODATA is filtered before the split (see Raster:).
+
+    The cuts are the values at positions n // 3 and 2n // 3 of the sorted
+    valid cells, read off a count of each height rather than a sorted copy:
+    an int16 grid holds at most 65,536 distinct heights, so the count stays
+    small, where the sorted list cost 22x the grid."""
+    counts = Counter(cells)
+    counts.pop(NODATA, None)
+    if not counts:
         return None
-    if valid[-1] - valid[0] < LOW_RELIEF_M:
+    heights = sorted(counts)
+    if heights[-1] - heights[0] < LOW_RELIEF_M:
         return None
-    return (valid[len(valid) // 3], valid[2 * len(valid) // 3])
+    total = sum(counts.values())
+    return (_nth(heights, counts, total // 3), _nth(heights, counts, 2 * total // 3))
+
+
+def _nth(heights: list[int], counts: "Counter[int]", n: int) -> int:
+    """The height at position n (from 0) of the cells sorted by height."""
+    seen = 0
+    for height in heights:
+        seen += counts[height]
+        if seen > n:
+            return height
+    return heights[-1]
 
 
 def render_ppm(cells: "array.array[int]", size: int = GRID) -> bytes:
-    """Three-tier P6 PPM, row-major, matching terrain.bin's orientation."""
+    """Three-tier P6 PPM, row-major, matching terrain.bin's orientation.
+
+    Each cell becomes one band byte (0 missing, 1 valley, 2 mid, 3 peak), and
+    each colour channel is that byte run through a 256-entry table into
+    every third byte of the output. No object per cell: a list of one
+    bytes object per cell cost 8 bytes a cell beside the sorted copy, 45x
+    the grid together (95.5 MB at 1024 x 1024)."""
     cuts = band_thresholds(cells)
-    lut = (bytes(RGB_NODATA), bytes(RGB_VALLEY), bytes(RGB_MID), bytes(RGB_PEAK))
-    out = bytearray(b"P6\n%d %d\n255\n" % (size, size))
     if cuts is None:
         # Low relief (or no data at all): one honest mid band, no fake structure.
-        rows = [lut[2] if v != NODATA else lut[0] for v in cells]
+        bands = bytes(0 if v == NODATA else 2 for v in cells)
     else:
         low, high = cuts
-        rows = []
-        for v in cells:
-            if v == NODATA:
-                rows.append(lut[0])
-            elif v < low:
-                rows.append(lut[1])
-            elif v < high:
-                rows.append(lut[2])
-            else:
-                rows.append(lut[3])
-    out += b"".join(rows)
+        bands = bytes(0 if v == NODATA else 1 if v < low else 2 if v < high else 3
+                      for v in cells)
+    header = b"P6\n%d %d\n255\n" % (size, size)
+    out = bytearray(len(header) + 3 * len(bands))
+    out[:len(header)] = header
+    colours = (RGB_NODATA, RGB_VALLEY, RGB_MID, RGB_PEAK)
+    for channel in range(3):
+        table = bytes(colours[b][channel] if b < 4 else 0 for b in range(256))
+        out[len(header) + channel::3] = bands.translate(table)
     return bytes(out)
 
 
@@ -454,7 +524,10 @@ def raster(area: str) -> bytes:
     try:
         with open(ppm_path, "rb") as fh:
             return gzip.decompress(fh.read())
-    except (FileNotFoundError, OSError, EOFError, gzip.BadGzipFile):
+    except (OSError, EOFError, zlib.error):
+        # Missing, unreadable or corrupt (gzip.BadGzipFile is an OSError; a
+        # damaged deflate stream is zlib.error, which escaped before): all
+        # rebuilt from terrain.bin, the authoritative copy.
         pass
     info, cells = read_bin(os.path.join(directory, _BIN_NAME))
     size = int(info["cols"])
@@ -517,11 +590,15 @@ def ingest(area: str, center: tuple[float, float], box: artemis.BBox,
     except ValueError as exc:
         # The API reports quota/auth problems as a short text body, which
         # lands here as a parse failure — keep its own slug, not a guess.
-        # Only the excerpt is decoded; the body never is.
-        excerpt = reply.content[:200].decode("utf-8", "replace")
-        log.error("Demeter: grid parse failed (%s); first 200 bytes: %s",
-                  exc, excerpt.replace("\n", " "))
-        raise artemis.IngestError(str(exc)) from exc
+        # Only the excerpt is decoded; the body never is. Such a body can
+        # repeat the key (see _excerpt_without), so the key is cut out of
+        # everything that leaves here, and `from None` keeps the unredacted
+        # ValueError out of any traceback.
+        message = _without(str(exc), key)
+        excerpt = _excerpt_without(reply.content, key)
+        log.error("Demeter: grid parse failed (%s); first %d bytes: %s",
+                  message, _EXCERPT, excerpt.replace("\n", " "))
+        raise artemis.IngestError(message) from None
     # The live confirmation of the cell limit, like the cap's line above.
     cell_count = grid.ncols * grid.nrows
     log.info("Demeter: grid %d x %d = %d cells, limit %d (%.0f%%)",
@@ -566,13 +643,6 @@ def sample(info: dict[str, Any], cells: "array.array[int]",
         return None
     value = cells[row * size + col]
     return None if value == NODATA else int(value)
-
-
-def elevation_at(area: str, east: float, north: float) -> "int | None":
-    """sample() with the grid read from disk — the one-shot convenience for
-    the CLI and tests. Panels hold the grid and call sample() directly."""
-    info, cells = load(area)
-    return sample(info, cells, east, north)
 
 
 # ── Standalone test ───────────────────────────────────────────────────────────

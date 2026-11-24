@@ -13,9 +13,9 @@ one created inside a function is re-made on every call and is not what §3 means
 The name must be the module's own stem, since a copy-pasted "METIS.aura" in
 another file would put its lines under Aura's health.
 
-The allowlist holds what has not been decided yet, not a permanent exemption.
-Horai reads only the clock and Themis and has no failure path to log, so the
-audit's choice for it — add one, or write down the exemption — is still open.
+_EXEMPT holds the written exemptions, each with its reason. Horai is the one:
+it reads only the clock and Themis, has no failure path of its own, and Themis
+logs its own file's problems (the owner's pick, 2026-11-21, CONVENTIONS §12).
 A listed module that gains a logger fails too: a stale entry is the same drift.
 
     python -X utf8 -m unittest tests.test_tool_loggers
@@ -28,8 +28,11 @@ import unittest
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TOOLS = os.path.join(_APP_ROOT, "tools")
 
-# Tool modules still without a logger. Delete a line when the module gets one.
-_NO_LOGGER_YET: set[str] = {"horai"}
+# Tool modules without a logger, by a written exemption, and why. Delete a
+# line when the module gets one.
+_EXEMPT: dict[str, str] = {
+    "horai": "reads only the clock and Themis; no failure of its own to log",
+}
 
 
 def _tool_stems():
@@ -63,19 +66,19 @@ class TestToolLoggers(unittest.TestCase):
 
     def test_every_tool_module_has_its_own_logger(self):
         missing = {s for s in _tool_stems() if not _declares_own_logger(s)}
-        unexpected = missing - _NO_LOGGER_YET
+        unexpected = missing - set(_EXEMPT)
         self.assertFalse(
             unexpected,
             f"tool modules without a module-level "
             f'log = logging.getLogger("METIS.<name>"): {sorted(unexpected)}')
 
-    def test_allowlist_has_no_stale_entries(self):
-        stale = {s for s in _NO_LOGGER_YET
+    def test_exemptions_have_no_stale_entries(self):
+        stale = {s for s in _EXEMPT
                  if s not in _tool_stems() or _declares_own_logger(s)}
         self.assertFalse(
             stale,
             f"these now have a logger (or no longer exist): {sorted(stale)} — "
-            f"delete them from _NO_LOGGER_YET.")
+            f"delete them from _EXEMPT.")
 
 
 if __name__ == "__main__":

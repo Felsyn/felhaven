@@ -33,6 +33,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import awen
 import pythia
+from tests._pythia_sandbox import PythiaSandbox
+
+_sandbox = PythiaSandbox()
+
+
+def setUpModule():
+    """Every ask() here reads the owner's settings, prompt and, with thinking
+    on, Ollama itself. The sandbox points all three away from this checkout."""
+    _sandbox.start()
+
+
+def tearDownModule():
+    _sandbox.stop()
 
 
 def _stream(*chunks) -> mock.Mock:
@@ -181,10 +194,10 @@ class TestFetchPageOpensOnlyUrlsTheUserOrASearchSupplied(_GuardCase):
     def test_only_search_web_results_are_trusted(self):
         # The shape alone earns nothing: another tool returning results[].url
         # (say, an archive note that quotes a search) is not a search.
-        self._mock("search_documents",
+        self._mock("read_archive",
                    _search_result("https://quoted.example/in-a-note"))
         records = self._turn("look in my notes",
-                             ("search_documents", {"query": "x"}),
+                             ("read_archive", {"action": "search", "query": "x"}),
                              ("fetch_page", {"url": "https://quoted.example/in-a-note"}))
         self.fetch.assert_not_called()
         self.assertSlug(records[1], "untrusted_url")
@@ -329,9 +342,10 @@ class TestFileChangesWaitForTheUsersYes(_GuardCase):
         self.assertSlug(rec, "bad_arguments")
 
     def test_a_tool_that_changes_nothing_is_not_asked_about(self):
-        read = self._mock("read_document", {"filename": "n.md", "content": "x"})
+        read = self._mock("read_archive", {"filename": "n.md", "content": "x"})
         confirm = mock.Mock(return_value=True)
-        self._turn("read my note", ("read_document", {"filename": "n.md"}),
+        self._turn("read my note",
+                   ("read_archive", {"action": "read", "filename": "n.md"}),
                    on_confirm=confirm)
         confirm.assert_not_called()
         read.assert_called_once()

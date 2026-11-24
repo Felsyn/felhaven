@@ -11,7 +11,9 @@ The rules under test (owner's decisions, 2026-10-01):
   * a bin/ copy that doesn't (one byte flipped), or that has no entry, or
     under a manifest that can't be read, is REFUSED, and is never swapped
     for the copy on PATH;
-  * a program only on PATH runs, unverified, with ONE warning per process;
+  * a program only on PATH runs, unverified, with ONE warning per process,
+    and only as <name>.exe in a PATH folder written as a full path: never
+    from the working folder, never as a .bat or .cmd (owner, 2026-11-17);
   * each program is hashed once per process, again only if the file changes;
   * `record` writes an entry only when the publisher's checksum agrees.
 
@@ -58,6 +60,20 @@ class _AegisCase(unittest.TestCase):
             self.addCleanup(patcher.stop)
         aegis._clear_cache()
         self.addCleanup(aegis._clear_cache)
+        self.set_path()             # this machine's PATH never reaches a test
+
+    def set_path(self, *folders):
+        patcher = mock.patch.dict(os.environ, {"PATH": os.pathsep.join(folders)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tool_dir(self, *files):
+        """A folder outside bin/ holding `files` (names with extensions)."""
+        folder = tempfile.mkdtemp(dir=self.root)
+        for name in files:
+            with open(os.path.join(folder, name), "wb") as fh:
+                fh.write(_BODY)
+        return folder
 
     def put(self, name, data=_BODY):
         path = os.path.join(self.bin, f"{name}.exe")
@@ -99,8 +115,8 @@ class TheBinCopyMustMatch(_AegisCase):
         """Otherwise breaking the bin/ copy would be a way to run PATH's."""
         self.put("ffmpeg", b"tampered")
         self.record(ffmpeg=_BODY)
-        with mock.patch.object(aegis.shutil, "which", return_value="C:/elsewhere/ffmpeg.exe"), \
-                self.assertLogs("METIS.aegis", "ERROR"):
+        self.set_path(self.tool_dir("ffmpeg.exe"))
+        with self.assertLogs("METIS.aegis", "ERROR"):
             self.assertIsNone(aegis.resolve("ffmpeg").path)
 
     def test_a_copy_with_no_entry_is_refused(self):
@@ -131,18 +147,45 @@ class TheBinCopyMustMatch(_AegisCase):
 class ThePathFallback(_AegisCase):
 
     def test_a_program_only_on_path_runs_with_one_warning(self):
-        with mock.patch.object(aegis.shutil, "which", return_value="C:/tools/mpv.exe"), \
-                self.assertLogs("METIS.aegis", "WARNING") as logs:
+        tools = self.tool_dir("mpv.exe")
+        self.set_path(tools)
+        with self.assertLogs("METIS.aegis", "WARNING") as logs:
             first = aegis.resolve("mpv")
             second = aegis.resolve("mpv")
-        self.assertEqual(first, aegis.Resolution("C:/tools/mpv.exe", None))
+        self.assertEqual(first, aegis.Resolution(os.path.join(tools, "mpv.exe"), None))
         self.assertEqual(second, first)
         self.assertEqual(len(logs.output), 1)
         self.assertIn("unverified", logs.output[0])
 
     def test_nowhere_is_none_without_a_problem(self):
-        with mock.patch.object(aegis.shutil, "which", return_value=None):
-            self.assertEqual(aegis.resolve("mpv"), aegis.Resolution(None, None))
+        self.set_path(self.tool_dir())
+        self.assertEqual(aegis.resolve("mpv"), aegis.Resolution(None, None))
+
+    def test_the_working_folder_is_never_searched(self):
+        """shutil.which looks there first on Windows. Felhaven.bat starts in
+        the app folder, but `python felhaven.py` can start anywhere."""
+        here = self.tool_dir("mpv.exe")
+        os.makedirs(os.path.join(here, "rel"))
+        shutil.copy(os.path.join(here, "mpv.exe"), os.path.join(here, "rel"))
+        old = os.getcwd()
+        os.chdir(here)
+        self.addCleanup(os.chdir, old)
+        self.set_path(".", "", "rel")             # the working folder, three ways
+        os.environ.pop("NoDefaultCurrentDirectoryInExePath", None)
+        self.assertEqual(aegis.resolve("mpv"), aegis.Resolution(None, None))
+
+    def test_a_script_on_path_is_never_used(self):
+        """A .bat or .cmd runs through cmd.exe, which re-reads its arguments,
+        and yt-dlp is handed text from the model and from YouTube."""
+        self.set_path(self.tool_dir("yt-dlp.cmd", "yt-dlp.bat", "yt-dlp.com"))
+        self.assertEqual(aegis.resolve("yt-dlp"), aegis.Resolution(None, None))
+
+    def test_an_exe_further_down_path_is_found_past_a_script(self):
+        scripts, exes = self.tool_dir("yt-dlp.cmd"), self.tool_dir("yt-dlp.exe")
+        self.set_path(scripts, exes)
+        with self.assertLogs("METIS.aegis", "WARNING"):
+            found = aegis.resolve("yt-dlp")
+        self.assertEqual(found, aegis.Resolution(os.path.join(exes, "yt-dlp.exe"), None))
 
 
 class HashingIsOncePerProcess(_AegisCase):
@@ -177,7 +220,7 @@ class Recording(_AegisCase):
 
     def _sums(self, digest, name="yt-dlp.exe"):
         text = f"{'0' * 64}  yt-dlp_linux\n{digest}  {name}\n"
-        return hermes.Reply(200, {}, text.encode(), "https://example.invalid/SHA2-256SUMS")
+        return hermes.Reply(200, {}, text.encode())
 
     def _version(self, version="2026.10.01"):
         return mock.patch.object(aegis, "_ytdlp_version", return_value=version)
@@ -205,6 +248,23 @@ class Recording(_AegisCase):
                 aegis.record_ytdlp()
         with open(self.manifest, encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["programs"], {})
+
+    def test_the_entry_holds_the_hash_that_was_checked(self):
+        """yt-dlp runs between its check and the write. A file that changed
+        in between must be refused at its next resolve, not recorded as
+        vouched for."""
+        path = self.put("yt-dlp")
+
+        def version_then_swap(_path):
+            with open(path, "wb") as fh:
+                fh.write(b"swapped after the check")
+            return "2026.10.01"
+        with mock.patch.object(aegis, "_ytdlp_version", side_effect=version_then_swap), \
+                mock.patch.object(aegis.hermes, "get", return_value=self._sums(_sha(_BODY))):
+            entry = aegis.record_ytdlp()
+        self.assertEqual(entry["sha256"], _sha(_BODY))
+        with self.assertLogs("METIS.aegis", "ERROR"):
+            self.assertIsNone(aegis.resolve("yt-dlp").path)
 
     def _fake_ytdlp(self, events, version=b"2026.10.01"):
         """subprocess.run as the real yt-dlp --version would answer, logging

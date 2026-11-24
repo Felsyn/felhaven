@@ -11,10 +11,20 @@ Job:         Track stock buys and sells; derive shares held and cost invested.
              what it's worth today is Midas's job, not Plutus's. Closest sibling
              is Scribe (local CRUD), not Midas.
 
-Contract:    Pure local functions. No fetch(), no TOOL_DEFINITION — Plutus is
-             intentionally out of LLM scope (Emanon precedent): it mutates a
-             ledger of real money and should only ever change via deliberate UI
-             action, never an LLM tool call.
+Contract:    Local-only ledger / persistence (§2): plain functions. No
+             fetch(), no TOOL_DEFINITION — Plutus is intentionally out of LLM
+             scope (Emanon precedent): it mutates a ledger of real money and
+             should only ever change via deliberate UI action, never an LLM
+             tool call.
+             read_events() raises LedgerError (logged) when the file is there
+             but can't be read; load_events() is the same read that never
+             raises (absent or unreadable reads as []).
+             add_event() raises ValueError on bad input, LedgerError when the
+             file can't be read (nothing is written: one ADD on a garbled
+             file used to replace its whole history), and OSError when the
+             write fails (logged here first). positions(), totals() and
+             history() skip a record they can't read; unreadable() counts
+             them, and add_event() keeps them in the file.
 
 Data model:  Append-only event log, one record per buy/sell:
                  {
@@ -28,6 +38,8 @@ Data model:  Append-only event log, one record per buy/sell:
              folding the log. Nothing mutable is stored — the log is the truth.
 
 Persistence: plutus_ledger.json at the app root. {"events": [...]}.
+             Written temp-then-replace. Read and written only on the Tk thread
+             (the LEDGER tab), so Themis's lock isn't needed (§12, 2026-11-21).
 
 Sell rule:   Average-cost. Selling reduces cost invested proportionally to the
              average cost of shares held at that moment — NOT the sell price.
@@ -35,15 +47,29 @@ Sell rule:   Average-cost. Selling reduces cost invested proportionally to the
              keeps market spikes/dips out of the bookkeeping. The sell price is
              still recorded on the event for an honest history.
 
-Requires:    json, os, datetime (stdlib). No third-party deps.
+Upstream:    panels/midas_panel.py (the LEDGER tab)
+Downstream:  plutus_ledger.json
 
-V0.02:       Audited 2026-07-24 — average-cost fold, atomic write, and the
+Requires:    json, logging, math, os, datetime, typing (stdlib). No
+             third-party deps.
+
+2026-07-24:  walkthrough audit — average-cost fold, atomic write, and the
              deliberate out-of-LLM-scope omission all verified honest; the
-             module needed no code change, only this marker.
+             module needed no code change, only the marker.
+
+V0.03:       Walked through 2026-11-22 (the V0.03 walkthrough, CONVENTIONS
+             §3; born 2026-06-10). One ADD on a ledger it couldn't read wrote
+             a new file of that one event: 40 records became 1 (measured).
+             add_event() now refuses with LedgerError. "nan" and "inf" were
+             accepted, and a NaN made that ticker vanish from the holdings
+             for good; shares and price must be finite. A record the folds
+             can't read is skipped and counted, not raised (the LEDGER tab
+             stopped drawing). A failed write is logged.
 """
 
 import json
 import logging
+import math
 import os
 from datetime import date
 from typing import Any
@@ -57,22 +83,69 @@ _LEDGER_PATH = os.path.join(
 )
 
 
+class LedgerError(Exception):
+    """The ledger file is there but can't be read, so it isn't written over."""
+
+
 # ── Persistence ───────────────────────────────────────────────────────────────
 
-def load_events() -> list[dict[str, Any]]:
-    """Read the event log. Returns [] if the file is absent or unreadable."""
+def read_events() -> list[Any]:
+    """The file's event list as it stands, every record readable or not (the
+    folds skip the rest); [] when there is no file. Raises LedgerError, after
+    logging it, when there is one that can't be read or isn't a ledger."""
     try:
         with open(_LEDGER_PATH, "r", encoding="utf-8") as f:
-            events: list[dict[str, Any]] = json.load(f).get("events", [])
-            return events
+            raw = json.load(f)
     except FileNotFoundError:
         return []
-    except Exception as e:
-        log.error(f"Plutus: failed to read ledger: {e}")
+    except (OSError, ValueError, RecursionError) as e:
+        # ValueError: not JSON, or not UTF-8. RecursionError: nested too deep.
+        err = LedgerError(f"the ledger file can't be read ({type(e).__name__})")
+        log.error("Plutus: %s", err)
+        raise err from e
+    events = raw.get("events", []) if isinstance(raw, dict) else None
+    if not isinstance(events, list):
+        err = LedgerError("the ledger file isn't a ledger")
+        log.error("Plutus: %s", err)
+        raise err
+    return events
+
+
+def load_events() -> list[dict[str, Any]]:
+    """read_events(), but [] when the file can't be read. Never raises."""
+    try:
+        return read_events()
+    except LedgerError:
         return []
 
 
-def _save_events(events: list[dict[str, Any]]) -> None:
+def _readable(ev: Any) -> bool:
+    """Whether the folds can use a record: a buy or sell of a named ticker,
+    a finite positive share count and a finite price of at least zero."""
+    if not isinstance(ev, dict):
+        return False
+    if not isinstance(ev.get("ticker"), str) or not ev["ticker"]:
+        return False
+    if ev.get("action") not in ("buy", "sell") or not isinstance(ev.get("date"), str):
+        return False
+    shares: Any = ev.get("shares")
+    price: Any = ev.get("price")
+    return _finite(shares) and _finite(price) and shares > 0 and price >= 0
+
+
+def _finite(value: Any) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
+def unreadable(events: list[Any] | None = None) -> int:
+    """How many records the folds skip."""
+    if events is None:
+        events = load_events()
+    return sum(1 for ev in events if not _readable(ev))
+
+
+def _save_events(events: list[Any]) -> None:
     """Write the event log. Raises on failure so the caller can surface it.
     Temp-then-replace so a crash mid-write can't truncate it."""
     tmp = _LEDGER_PATH + ".tmp"
@@ -86,7 +159,9 @@ def _save_events(events: list[dict[str, Any]]) -> None:
 def add_event(ticker: str, action: str, shares: float, price: float) -> dict[str, Any]:
     """
     Append one buy/sell event, dated today, and persist.
-    Returns the created event dict. Raises ValueError on bad input.
+    Returns the created event dict. Raises ValueError on bad input,
+    LedgerError when the ledger can't be read (nothing written), OSError
+    when the write fails (Contract).
     """
     ticker = (ticker or "").strip().upper()
     action = (action or "").strip().lower()
@@ -95,10 +170,10 @@ def add_event(ticker: str, action: str, shares: float, price: float) -> dict[str
         raise ValueError("ticker required")
     if action not in ("buy", "sell"):
         raise ValueError("action must be 'buy' or 'sell'")
-    if shares is None or shares <= 0:
-        raise ValueError("shares must be > 0")
-    if price is None or price < 0:
-        raise ValueError("price must be >= 0")
+    if not _finite(shares) or shares <= 0:
+        raise ValueError("shares must be a number > 0")
+    if not _finite(price) or price < 0:
+        raise ValueError("price must be a number >= 0")
 
     event = {
         "date":   date.today().isoformat(),
@@ -107,9 +182,13 @@ def add_event(ticker: str, action: str, shares: float, price: float) -> dict[str
         "shares": float(shares),
         "price":  float(price),
     }
-    events = load_events()
+    events = read_events()       # raises rather than write over what it can't read
     events.append(event)
-    _save_events(events)
+    try:
+        _save_events(events)
+    except OSError as e:
+        log.error("Plutus: could not save the ledger: %s", e)
+        raise
     return event
 
 
@@ -119,7 +198,8 @@ def positions(events: list[dict[str, Any]] | None = None) -> dict[str, dict[str,
     """
     Fold the event log into per-ticker {shares, cost} using the average-cost
     rule for sells. Returns {ticker: {"shares": float, "cost": float}} for
-    tickers with a non-trivial remaining position.
+    tickers with a non-trivial remaining position. Skips a record it can't
+    read (unreadable() counts them).
 
     Buy:  shares += s; cost += s * price
     Sell: avg = cost / shares (if shares > 0); shares -= s; cost -= s * avg
@@ -130,6 +210,8 @@ def positions(events: list[dict[str, Any]] | None = None) -> dict[str, dict[str,
 
     acc: dict[str, dict[str, float]] = {}   # ticker -> {"shares": float, "cost": float}
     for ev in events:
+        if not _readable(ev):
+            continue
         t = ev["ticker"]
         s = float(ev["shares"])
         p = float(ev["price"])
@@ -170,7 +252,8 @@ def totals(events: list[dict[str, Any]] | None = None) -> dict[str, Any]:
 def history(events: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """
     The scrolling record, newest-first. Each row carries the per-event cost
-    (shares * price) so the panel doesn't recompute it.
+    (shares * price) so the panel doesn't recompute it. Skips a record it
+    can't read.
     Returns a list of:
         {date, ticker, action, shares, price, cost}
     """
@@ -178,6 +261,8 @@ def history(events: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         events = load_events()
     rows = []
     for ev in events:
+        if not _readable(ev):
+            continue
         rows.append({
             "date":   ev["date"],
             "ticker": ev["ticker"],

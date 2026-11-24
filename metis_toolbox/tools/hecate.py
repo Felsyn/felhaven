@@ -43,8 +43,15 @@ Upstream:    tools/artemis.py — ingest_area orchestrates ingest();
 Downstream:  tools/cadmus.py (byte decoding), tools/artemis.py (geometry and
              the FVEC writer).
 
-Requires:    stdlib only — io, logging, os, threading, zipfile; the
+Requires:    stdlib only — io, logging, os, sys, threading, zipfile; the
              download goes through artemis.download.
+
+V0.03:       Walked through 2026-11-18 (the V0.03 walkthrough, CONVENTIONS
+             §3), its first audit (born 2026-08-09). Every county zip comes
+             through artemis.download with a measured cap and every member
+             through read_member(); load() never fetches; parts are read
+             through cadmus.points(). Found clean apart from Requires, which
+             gained sys.
 """
 
 import io

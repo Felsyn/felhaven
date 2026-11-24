@@ -22,6 +22,7 @@ import sys
 import tempfile
 import unittest
 from datetime import date
+from unittest import mock
 
 # Make the package root importable no matter where the runner is launched.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -268,12 +269,97 @@ class TestLoadEvents(_PatchedLedger):
     def test_corrupted_file_returns_empty(self):
         with open(plutus._LEDGER_PATH, "w", encoding="utf-8") as f:
             f.write("{not json")
-        self.assertEqual(plutus.load_events(), [])
+        with self.assertLogs("METIS.plutus", "ERROR"):
+            self.assertEqual(plutus.load_events(), [])
 
     def test_wrong_shape_returns_empty(self):
         with open(plutus._LEDGER_PATH, "w", encoding="utf-8") as f:
             json.dump({"foo": 1}, f)                        # valid JSON, no "events"
         self.assertEqual(plutus.load_events(), [])
+
+
+class TestAnUnreadableLedgerIsNeverWrittenOver(_PatchedLedger):
+    """Measured 2026-11-22: a ledger of 40 records with one hand-edit typo
+    read as empty, so one ADD wrote a new file holding that one event."""
+
+    _GARBLED = {
+        "a trailing comma": '{"events": [{"date": "2026-01-05", "ticker": "MP", '
+                            '"action": "buy", "shares": 10, "price": 15.0},]}',
+        "a list, not a ledger": "[]",
+        "events that aren't a list": '{"events": {"MP": 10}}',
+    }
+
+    def test_add_refuses_and_leaves_the_file_as_it_was(self):
+        refused = getattr(plutus, "LedgerError", ValueError)
+        for name, text in self._GARBLED.items():
+            with self.subTest(name):
+                with open(plutus._LEDGER_PATH, "w", encoding="utf-8") as f:
+                    f.write(text)
+                with self.assertLogs("METIS.plutus", "ERROR"):
+                    try:
+                        plutus.add_event("CAT", "buy", 1, 300)
+                    except refused:
+                        pass
+                    except Exception as e:
+                        self.fail(f"add_event raised {e!r}, not LedgerError")
+                    else:
+                        self.fail("add_event wrote over a ledger it couldn't read")
+                with open(plutus._LEDGER_PATH, encoding="utf-8") as f:
+                    self.assertEqual(f.read(), text)
+
+    def test_records_it_cant_read_stay_in_the_file(self):
+        odd = {"date": "2026-01-05", "ticker": "MP", "action": "buy", "shares": "ten",
+               "price": 1}
+        with open(plutus._LEDGER_PATH, "w", encoding="utf-8") as f:
+            json.dump({"events": [odd]}, f)
+        plutus.add_event("CAT", "buy", 1, 300)
+        with open(plutus._LEDGER_PATH, encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["events"][0], odd)
+
+    def test_a_failed_write_is_logged_and_raised(self):
+        with mock.patch.object(plutus.os, "replace", side_effect=PermissionError(13, "denied")), \
+                self.assertLogs("METIS.plutus", "ERROR"), \
+                self.assertRaises(OSError):
+            plutus.add_event("CAT", "buy", 1, 300)
+
+
+class TestOnlyFiniteNumbers(_PatchedLedger):
+    """Measured 2026-11-22: "nan" and "inf" were saved, and one NaN made that
+    ticker drop out of the holdings for good (NaN > 0 is false)."""
+
+    def test_nan_and_inf_are_refused(self):
+        nan, inf = float("nan"), float("inf")
+        for shares, price in ((nan, 10), (inf, 10), (5, nan), (5, inf), (True, 10)):
+            with self.subTest(shares=shares, price=price):
+                with self.assertRaises(ValueError):
+                    plutus.add_event("MP", "buy", shares, price)
+        self.assertEqual(plutus.load_events(), [])
+
+
+class TestARecordTheFoldsCantRead(_Base):
+    """A hand-edited record raised from totals() and history(), so the LEDGER
+    tab stopped drawing. The folds skip it; unreadable() counts it."""
+
+    _ODD = [
+        {"date": "2026-01-05", "ticker": "MP", "action": "buy", "shares": "ten", "price": 1},
+        {"date": "2026-01-05", "ticker": "MP", "action": "buy", "price": 1},
+        {"date": "2026-01-05", "ticker": "MP", "action": "hold", "shares": 1, "price": 1},
+        {"date": "2026-01-05", "ticker": "MP", "action": "buy", "shares": float("nan"),
+         "price": 1},
+        "not a record",
+    ]
+
+    def test_the_folds_skip_it_and_count_it(self):
+        events = _canon(2) + self._ODD
+        try:
+            pos = plutus.positions(events)
+            rows = plutus.history(events)
+        except (KeyError, TypeError, ValueError) as e:
+            self.fail(f"a fold raised {e!r}")
+        self.assertPosition(pos, "MP", 20.0, 400.0)
+        self.assertEqual(len(rows), 2)
+        unreadable = getattr(plutus, "unreadable", lambda _e: None)
+        self.assertEqual(unreadable(events), len(self._ODD))
 
 
 # ── Invariant sweep (seeded, deterministic) ────────────────────────────────────

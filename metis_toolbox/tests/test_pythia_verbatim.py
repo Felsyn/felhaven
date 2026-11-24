@@ -30,8 +30,22 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pythia
+from tests._pythia_sandbox import PythiaSandbox
 
-_APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_sandbox = PythiaSandbox()
+
+
+def setUpModule():
+    """Every ask() here reads the owner's settings, prompt and, with thinking
+    on, Ollama itself. The sandbox points all three away from this checkout."""
+    _sandbox.start()
+
+
+def tearDownModule():
+    _sandbox.stop()
+
+
+_APP_ROOT =os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 with open(os.path.join(_APP_ROOT, "tools", "aura.py"), encoding="utf-8") as _fh:
     AURA_DOC = ast.get_docstring(ast.parse(_fh.read()), clean=True)

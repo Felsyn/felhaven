@@ -1,6 +1,8 @@
 """
 Echo panel — paste text, get an audio file.
 
+Job:         Turn pasted text into a spoken audio file, in the voice you pick.
+
 EchoPanel is a bare tk.Frame tab body inside VoxArrayPanel (the ECHO tab), the
 same shape as the Cogitator tab bodies. It is NOT registered with Kairos.
 
@@ -9,7 +11,7 @@ If ffmpeg isn't found, the tab shows a calm placeholder and builds no convert UI
 precedent (CONVENTIONS §7). The dashboard never crashes over a missing binary.
 
 Top to bottom inside self (only when ffmpeg is present):
-    Text box       — paste the Markdown / prose to narrate (multi-line).
+    Text box        — paste the Markdown / prose to narrate (multi-line).
     Voice row       — a shared VoiceBar (panels/voice_bar_panel.py), also mounted
                       in the MACHINE SPIRIT tab. SESSION-ONLY and independent:
                       it is seeded from voices.pythia_voice() at build time, is
@@ -17,9 +19,11 @@ Top to bottom inside self (only when ffmpeg is present):
                       rendering a file in another voice must not change how
                       Pythia's answers are read aloud.
     Filename row    — the output name; ".opus" is appended by Echo if omitted.
+                      A name already in local_audio/ is refused, never
+                      replaced (Echo's "Write-once"); the status says so.
     Send button     — inert (dim, unbound) until BOTH fields are non-empty after
                       echo.sanitize_filename; runs the conversion off the UI thread.
-    Status line     — normal-theme path on success, LOUD RED on any error.
+    Status line     — the saved path in green on success, LOUD RED on any error.
 
 Both the text box and the filename entry get a themed right-click context menu
 (Cut/Copy/Paste/Select All) — the home_panel.py (Pythia) precedent, ported
@@ -44,9 +48,25 @@ CONVERSION THREADING + DRAIN — a documented, house-rule-aware pattern.
   conversion is in flight a no-op, not a queued second job.
 ─────────────────────────────────────────────────────────────────────────────
 
-V0.02: Audited 2026-07-25 — wired to echo.available() so a missing ffmpeg
-disables the tab with a placeholder (§7), matching OrpheusPanel; the daemon
-thread + bounded after() drain chain are now named in CONVENTIONS §6.
+Upstream:    panels/vox_array_panel.py (builds it as the ECHO tab).
+Downstream:  tools/echo.py (text_to_audio on the conversion thread,
+             sanitize_filename, available), voices.py and
+             panels/voice_bar_panel.py (the voice row), theme.py.
+
+2026-07-25:  walkthrough audit — wired to echo.available() so a missing
+             ffmpeg disables the tab with a placeholder (§7), matching
+             OrpheusPanel; the daemon thread + bounded after() drain chain
+             are now named in CONVENTIONS §6.
+
+V0.03:       Walked through 2026-11-21 (the V0.03 walkthrough, CONVENTIONS
+             §3/§12). Built 2026-07-15. Checked: _ERROR_TEXT against every
+             code text_to_audio() returns (now a test); the drain chain's
+             teardown. Changed: file_exists has its words (Echo refuses a
+             name already in local_audio/, the owner's pick); the text box
+             and filename entry stop repeating the theme's cursor colour
+             (§7); two comments cited "decision #10" and "#16" of a build
+             note that no longer exists, and now give the reasons;
+             Upstream/Downstream added.
 """
 
 import queue
@@ -75,6 +95,8 @@ _UNVERIFIED_MSG = ("ffmpeg in bin\\ isn't recorded, or doesn't match what was "
 _ERROR_TEXT = {
     "empty_filename": "enter a filename",
     "empty_text": "paste some text first",
+    "file_exists": ("a file by that name is already in local_audio — pick another "
+                    "name, or remove the old one in ORPHEUS"),
     "ffmpeg_unavailable": "ffmpeg not found — drop ffmpeg.exe in bin\\ or install to PATH",
     "synthesis_failed": "synthesis failed — is the kokoro model installed?",
     "ffmpeg_encode_failed": "ffmpeg could not encode Opus (is it built with libopus?)",
@@ -111,7 +133,7 @@ class EchoPanel(tk.Frame):
 
         self._text = tk.Text(
             self, height=8, wrap="word", font=FONTS["small"],
-            bg=C["bar_bg"], fg=C["text1"], insertbackground=C["text1"],
+            bg=C["bar_bg"], fg=C["text1"],
             highlightthickness=1, highlightbackground=C["border"], bd=0,
             padx=6, pady=4,
         )
@@ -144,7 +166,7 @@ class EchoPanel(tk.Frame):
         self._fname_var.trace_add("write", lambda *a: self._refresh_gate())
         self._fname_entry = tk.Entry(
             row, textvariable=self._fname_var, font=FONTS["small"],
-            bg=C["bar_bg"], fg=C["text1"], insertbackground=C["text1"],
+            bg=C["bar_bg"], fg=C["text1"],
             highlightthickness=1, highlightbackground=C["border"], bd=0,
         )
         self._fname_entry.pack(fill="x", expand=True, side="left")
@@ -168,8 +190,9 @@ class EchoPanel(tk.Frame):
     # ── Button gating ───────────────────────────────────────────────────────
 
     def _fields_ready(self) -> bool:
-        """Both fields usable: text non-blank AND filename survives sanitisation
-        (echo.sanitize_filename is the single source of truth — decision #10)."""
+        """Both fields usable: text non-blank AND filename survives sanitisation.
+        echo.sanitize_filename decides, so the button can never light for a
+        name Echo would refuse as empty_filename."""
         has_text = bool(self._text.get("1.0", "end").strip())
         has_name = bool(echo.sanitize_filename(self._fname_var.get()))
         return has_text and has_name
@@ -224,7 +247,7 @@ class EchoPanel(tk.Frame):
 
     def _set_status(self, text: str, *, error: bool = False, working: bool = False) -> None:
         if error:
-            color = C["red"]          # loud + red — decision #16
+            color = C["red"]          # loud: a failed conversion must not pass unseen
         elif working:
             color = C["text3"]
         else:

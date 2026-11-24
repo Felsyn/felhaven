@@ -27,6 +27,7 @@ import theme
 import themis
 from tools import artemis
 from tools import demeter
+from tools import eratosthenes
 
 _FIX = (39.2806, -80.3440)
 
@@ -53,6 +54,15 @@ class TestArtemisPanelSmoke(unittest.TestCase):
         self._dir = tempfile.mkdtemp()
         self._orig_cache = artemis.CACHE_DIR
         artemis.CACHE_DIR = self._dir
+        # A typed word reaches the waypoints file before the address lookup,
+        # so point it at a scratch folder: no test reads the real
+        # config/artemis_waypoints.json.
+        wp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, wp_dir, ignore_errors=True)
+        waypoints = mock.patch.object(eratosthenes, "_WAYPOINTS_PATH",
+                                      os.path.join(wp_dir, "waypoints.json"))
+        waypoints.start()
+        self.addCleanup(waypoints.stop)
         from panels.artemis_panel import ArtemisPanel
         self.panel = ArtemisPanel(self.root)
         self.panel.pack(fill="both", expand=True)
@@ -77,7 +87,8 @@ class TestArtemisPanelSmoke(unittest.TestCase):
         self.root.update_idletasks()
         self.assertIn("NOT CACHED", self.panel._status_lbl.cget("text"))
 
-    def _build_area(self, layers=("roads", "water", "terrain"), skipped=None):
+    def _build_area(self, layers=("roads", "water", "terrain"), skipped=None,
+                    cells=None, kept=None):
         """Write a small but real cache: FVEC files and a terrain grid."""
         area = artemis.area_id(*_FIX)
         os.makedirs(artemis.area_dir(area), exist_ok=True)
@@ -85,6 +96,8 @@ class TestArtemisPanelSmoke(unittest.TestCase):
                     "layers": list(layers)}
         if skipped:
             manifest["terrain_skipped"] = skipped
+        if kept:
+            manifest["terrain_kept"] = kept
         artemis.write_manifest(artemis.area_dir(area), manifest)
         if "roads" in layers:
             artemis.write_vec(
@@ -102,7 +115,8 @@ class TestArtemisPanelSmoke(unittest.TestCase):
                                                   (100.0, 100.0)])],
                 _FIX, artemis.LAYER_WATER)
         if "terrain" in layers:
-            cells = array.array("h", [r * 50 for r in range(8) for _ in range(8)])
+            if cells is None:
+                cells = array.array("h", [r * 50 for r in range(8) for _ in range(8)])
             demeter.write_bin(
                 os.path.join(artemis.area_dir(area), demeter._BIN_NAME),
                 cells, _FIX, size=8)
@@ -170,6 +184,20 @@ class TestArtemisPanelSmoke(unittest.TestCase):
         self.assertIn("far larger than expected",
                       self.panel._status_lbl.cget("text"))
 
+    def test_every_skipped_reason_also_reads_when_terrain_is_kept(self):
+        """A refresh that can't fetch elevation keeps the old grid and records
+        Demeter's slug as terrain_kept instead of terrain_skipped, so each
+        reason needs words in both tables."""
+        from panels.artemis_panel import _KEPT_TEXT, _SKIPPED_TEXT
+        self.assertEqual(set(_KEPT_TEXT), set(_SKIPPED_TEXT))
+
+    def test_kept_terrain_after_a_failed_download_reads_in_words(self):
+        self._build_area(kept="download_failed")
+        self._show()
+        text = self.panel._status_lbl.cget("text")
+        self.assertIn("terrain kept — elevation download failed", text)
+        self.assertNotIn("download_failed", text)
+
     def test_damaged_layer_does_not_lose_the_others(self):
         area = self._build_area()
         with open(os.path.join(artemis.area_dir(area), "water.vec"), "wb") as fh:
@@ -196,11 +224,76 @@ class TestArtemisPanelSmoke(unittest.TestCase):
         self._build_area()
         self._show()
         canvas = self.panel._canvas
-        for tag in ("mask", "ring", "compass", "scale"):
+        for tag in ("mask", "ring", "scale"):
             with self.subTest(tag=tag):
                 self.assertTrue(canvas.find_withtag(tag), f"no {tag} items")
         # Three range rings, and the mask is the documented eight shapes.
         self.assertEqual(len(canvas.find_withtag("mask")), 8)
+
+    def test_no_compass_rose_is_drawn(self):
+        # North is always up and the rim carries N/E/S/W; the rose repeated
+        # them and took the corner the CACHED AREAS list now uses.
+        self._build_area()
+        self._show()
+        self.assertEqual(self.panel._canvas.find_withtag("compass"), ())
+
+    # ── Terrain key ─────────────────────────────────────────────────────────
+
+    def _key_texts(self):
+        canvas = self.panel._canvas
+        return [canvas.itemcget(i, "text") for i in canvas.find_withtag("key")
+                if canvas.type(i) == "text"]
+
+    def test_terrain_key_names_the_raster_bands_in_feet(self):
+        # Derived from the grid, not restated: render_ppm cuts at the thirds
+        # of the sorted valid elevations.
+        from panels.artemis_panel import _FEET_PER_M
+        area = self._build_area()
+        self._show()
+        _info, cells = demeter.load(area)
+        valid = sorted(v for v in cells if v != demeter.NODATA)
+        low = int(round(valid[len(valid) // 3] * _FEET_PER_M))
+        high = int(round(valid[2 * len(valid) // 3] * _FEET_PER_M))
+        self.assertEqual(self._key_texts(),
+                         [f"{high:,}+ ft", f"{low:,}–{high:,} ft",
+                          f"under {low:,} ft"])
+        canvas = self.panel._canvas
+        swatches = [canvas.itemcget(i, "fill")
+                    for i in canvas.find_withtag("swatch")]
+        self.assertEqual(swatches, [theme.C["map_terrain_hi"],
+                                    theme.C["map_terrain_mid"],
+                                    theme.C["map_terrain_lo"]])
+        # Edged, so the valley swatch shows on the key's card.
+        for item in canvas.find_withtag("swatch"):
+            self.assertEqual(canvas.itemcget(item, "outline"), theme.C["border"])
+
+    def test_terrain_key_sits_in_the_top_right_corner(self):
+        from panels import artemis_panel
+        self._build_area()
+        self._show()
+        x0, y0, x1, _y1 = self.panel._canvas.bbox("key")
+        w, _h = self.panel._canvas_size()
+        # canvas.bbox() pads an outlined box and a text item by a pixel or two.
+        self.assertLessEqual(x1, w - artemis_panel._KEY_MARGIN + 3)
+        self.assertGreaterEqual(y0, artemis_panel._KEY_MARGIN - 3)
+        self.assertGreater(x0, w / 2)
+
+    def test_a_flat_area_says_low_relief(self):
+        self._build_area(cells=array.array("h", [300] * 64))
+        self._show()
+        self.assertEqual(self._key_texts(), ["low relief"])
+
+    def test_no_terrain_no_key(self):
+        self._build_area(layers=("roads", "water"))
+        self._show(layers=("roads", "water"))
+        self.assertEqual(self.panel._canvas.find_withtag("key"), ())
+
+    def test_the_key_survives_a_zoom(self):
+        self._build_area()
+        self._show()
+        before = self._key_texts()
+        self.panel._set_zoom(4)
+        self.assertEqual(self._key_texts(), before)
 
     def test_mask_survives_every_zoom_stop(self):
         """Replaces test_mask_is_skipped_when_zoomed_inside_the_ring: the mask
@@ -278,7 +371,7 @@ class TestArtemisPanelSmoke(unittest.TestCase):
         for item in lines:            # bearing ticks
             self.assertEqual(canvas.itemcget(item, "fill"), expected)
 
-    def test_the_compass_and_scale_bar_stay_muted(self):
+    def test_the_scale_bar_and_terrain_key_stay_muted(self):
         # The brightness hierarchy is the point: what measures the chart is
         # brighter than the legend telling you the units.
         self._build_area()
@@ -287,7 +380,8 @@ class TestArtemisPanelSmoke(unittest.TestCase):
         fix = [i for i in canvas.find_withtag("fix")
                if canvas.type(i) == "line"][0]
         bright = canvas.itemcget(fix, "fill")
-        for tag in ("compass", "scale"):
+        self.assertTrue(canvas.find_withtag("key"))
+        for tag in ("scale", "key"):
             for item in canvas.find_withtag(tag):
                 attr = "outline" if canvas.type(item) == "oval" else "fill"
                 colour = canvas.itemcget(item, attr)
@@ -415,6 +509,21 @@ class TestArtemisPanelSmoke(unittest.TestCase):
         self.assertTrue(self.panel._following)
         self.assertIn("SEARCH", self.panel._status_lbl.cget("text"))
 
+    def test_a_mistyped_coordinate_says_so_offline(self):
+        """Numbers that don't read as coordinates (a lone latitude here) get
+        words of their own, never the raw slug, and never reach the address
+        lookup."""
+        self._build_area()
+        self._show()
+        with mock.patch("tools.eratosthenes.hermes.get") as get:
+            self.panel._search_var.set("38.8977")
+            self.panel._on_search()
+        get.assert_not_called()
+        self.assertTrue(self.panel._following)
+        text = self.panel._status_lbl.cget("text")
+        self.assertIn("don't read as coordinates", text)
+        self.assertNotIn("bad_coordinates", text)
+
     def test_uncached_view_lists_the_nearest_cached_areas(self):
         # "Not cached here" is a normal state and gets a useful body.
         self._build_area()
@@ -510,6 +619,42 @@ class TestArtemisPanelSmoke(unittest.TestCase):
         self.panel._set_zoom(1)
         self.assertEqual((self.panel._pan_e, self.panel._pan_n), (0.0, 0.0))
 
+    # ── Wheel zoom ──────────────────────────────────────────────────────────
+
+    def _wheel(self, delta, clock, at):
+        """One wheel event at a fake monotonic time, the panel module only."""
+        from panels import artemis_panel
+        clock[0] = at
+        with mock.patch.object(artemis_panel, "time",
+                               SimpleNamespace(monotonic=lambda: clock[0])):
+            self.panel._on_wheel(SimpleNamespace(delta=delta))
+        return self.panel._zoom
+
+    def test_the_wheel_steps_one_zoom_stop_per_turn(self):
+        from panels import artemis_panel
+        gap = artemis_panel._WHEEL_GAP_S
+        self._build_area()
+        self._show()
+        clock = [100.0]
+        self.assertEqual(self._wheel(120, clock, 100.0), 2)
+        self.assertEqual(self._wheel(120, clock, 100.0 + gap / 2), 2)   # dropped
+        self.assertEqual(self._wheel(120, clock, 100.0 + gap * 2), 4)
+        self.assertEqual(self._wheel(120, clock, 100.0 + gap * 4), 4)   # top stop
+        self.assertEqual(self._wheel(-120, clock, 100.0 + gap * 6), 2)
+        self.assertEqual(self._wheel(-120, clock, 100.0 + gap * 8), 1)
+        self.assertEqual(self._wheel(-120, clock, 100.0 + gap * 10), 1)  # bottom
+        self.assertEqual(self._wheel(0, clock, 100.0 + gap * 12), 1)     # no delta
+
+    def test_a_wheel_zoom_lights_its_stop_button(self):
+        self._build_area()
+        self._show()
+        self._wheel(120, [0.0], 50.0)
+        self.assertEqual(self.panel._zoom_btns[2].cget("fg"), theme.C["text1"])
+        self.assertEqual(self.panel._zoom_btns[1].cget("fg"), theme.C["text3"])
+
+    def test_the_wheel_is_bound_on_the_chart(self):
+        self.assertTrue(self.panel._canvas.bind("<MouseWheel>"))
+
     def test_home_and_search_reset_the_pan(self):
         self._build_area()
         self._show()
@@ -541,6 +686,75 @@ class TestArtemisPanelSmoke(unittest.TestCase):
         return [c for c in self.panel._areas_body.winfo_children()
                 if isinstance(c, tk.Frame) and c.winfo_children()]
 
+    def _show_open(self):
+        """_show(), then unfold the overlay: it starts folded."""
+        self._show()
+        self.panel._toggle_areas()
+        self.root.update_idletasks()
+
+    def _fake_rows(self, n):
+        """n cached-area rows in nearest_cached's shape, nothing on disk."""
+        return [{"area_id": f"area{i:02d}", "center": [_FIX[0] + i * 0.01, _FIX[1]],
+                 "label": f"Area {i}", "fetched": "2026-08-09T00:00:00Z",
+                 "distance_mi": 0.7 * i, "bearing": 0}
+                for i in range(n)]
+
+    def test_overlay_starts_folded_and_opens_on_a_click(self):
+        self._build_area()
+        self._show()
+        self.assertFalse(self.panel._areas_open)
+        self.assertIn("▶ CACHED AREAS (1)", self.panel._areas_header.cget("text"))
+        self.assertFalse(self.panel._areas_column.winfo_manager())
+        self.assertEqual(self._rows(), [])
+        self.panel._toggle_areas()
+        self.root.update_idletasks()
+        self.assertIn("▼ CACHED AREAS (1)", self.panel._areas_header.cget("text"))
+        self.assertEqual(self.panel._areas_column.winfo_manager(), "pack")
+        self.assertEqual(len(self._rows()), 1)
+
+    def test_a_long_list_scrolls_inside_the_maps_room(self):
+        from panels import artemis_panel
+        self._build_area()
+        with mock.patch.object(artemis, "nearest_cached",
+                               return_value=self._fake_rows(30)):
+            self._show_open()
+            panel = self.panel
+            canvas = panel._areas_column._canvas
+            height = int(canvas.cget("height"))
+            room = (400 - artemis_panel._AREAS_MARGIN
+                    - artemis_panel._AREAS_TOP_GAP
+                    - panel._areas_header.winfo_reqheight() - 2)
+            self.assertEqual(len(self._rows()), 30)
+            self.assertLess(height, panel._areas_body.winfo_reqheight())
+            self.assertLessEqual(height, room)
+            # The box's top edge stays on the map.
+            self.assertLessEqual(panel._areas_box.winfo_reqheight(),
+                                 400 - artemis_panel._AREAS_MARGIN)
+            # The rows keep their width (the column's canvas asks 1 x 1).
+            # yview() is no witness here: a withdrawn root never maps the
+            # column, so its canvas is 1 px tall whatever it asked for.
+            self.assertEqual(int(canvas.cget("width")),
+                             panel._areas_body.winfo_reqwidth())
+
+    def test_a_short_list_is_as_tall_as_its_rows(self):
+        self._build_area()
+        self._show_open()
+        canvas = self.panel._areas_column._canvas
+        self.assertEqual(int(canvas.cget("height")),
+                         self.panel._areas_body.winfo_reqheight())
+
+    def test_a_smaller_map_shrinks_the_open_list(self):
+        self._build_area()
+        with mock.patch.object(artemis, "nearest_cached",
+                               return_value=self._fake_rows(30)):
+            self._show_open()
+            canvas = self.panel._areas_column._canvas
+            tall = int(canvas.cget("height"))
+            self.panel._canvas.config(height=260)
+            self.root.update_idletasks()
+            self.panel._fit_areas()
+            self.assertLess(int(canvas.cget("height")), tall)
+
     def _glyph(self, row_index, text):
         top = self._rows()[row_index].winfo_children()[0]
         for child in top.winfo_children():
@@ -548,29 +762,111 @@ class TestArtemisPanelSmoke(unittest.TestCase):
                 return child
         raise AssertionError(f"no {text!r} glyph in row {row_index}")
 
+    def _row_texts(self, row_index):
+        """Every label's text on one row's single line."""
+        top = self._rows()[row_index].winfo_children()[0]
+        return [c.cget("text") for c in top.winfo_children()
+                if isinstance(c, tk.Label)]
+
     def test_overlay_lists_cached_areas_with_range_and_bearing(self):
         self._build_area()
-        self._show()
+        with mock.patch.object(artemis, "nearest_cached",
+                               return_value=self._fake_rows(3)):
+            self._show_open()
         self.assertTrue(self.panel._areas_box.place_info())
-        self.assertIn("CACHED AREAS (1)",
+        self.assertIn("CACHED AREAS (3)",
                       self.panel._areas_header.cget("text"))
-        texts = [c.cget("text") for row in self._rows()
-                 for c in row.winfo_children() if isinstance(c, tk.Label)]
-        self.assertTrue(any("mi" in t and "°" in t for t in texts))
+        self.assertIn("0.7 mi  000°", self._row_texts(1))
+        self.assertIn("Area 1", self._row_texts(1))
+
+    def _add_manifest(self, lat, lon):
+        """A second cached area with no layers: enough for the list, the
+        status and a jump, without drawing anything."""
+        area = artemis.area_id(lat, lon)
+        os.makedirs(artemis.area_dir(area), exist_ok=True)
+        artemis.write_manifest(artemis.area_dir(area), {
+            "center": [lat, lon], "fetched": "2026-09-01T00:00:00Z",
+            "layers": []})
+        return area
+
+    def _marked(self):
+        """Indexes of the rows carrying the shown-area mark."""
+        return [i for i, row in enumerate(self._rows())
+                if getattr(row.winfo_children()[0], "_shown_mark", None)]
+
+    def test_the_area_on_screen_is_marked_and_the_mark_follows_a_jump(self):
+        self._build_area()
+        far = (_FIX[0] + 0.05, _FIX[1])
+        self._add_manifest(*far)
+        self._show_open()
+        self.assertEqual(len(self._rows()), 2)
+        self.assertEqual(self._marked(), [0])           # the fix's own area
+        self.panel._on_area_click(list(far), "Far")
+        self.root.update_idletasks()
+        self.assertEqual(self._marked(), [1])           # rows stay nearest-first
+        self.panel._go_home()
+        self.root.update_idletasks()
+        self.assertEqual(self._marked(), [0])
+
+    def test_no_mark_while_an_uncached_place_is_shown(self):
+        self._build_area()
+        self._show_open()
+        self.panel._apply_status(artemis.area_status(_FIX[0] + 1.0, _FIX[1]))
+        self.root.update_idletasks()
+        self.assertEqual(self._marked(), [])
+
+    def test_the_area_you_are_in_says_here(self):
+        self._build_area()
+        self._add_manifest(_FIX[0] + 0.05, _FIX[1])
+        self._show_open()
+        self.assertIn("here", self._row_texts(0))
+        self.assertFalse(any("000°" in t for t in self._row_texts(0)))
+        self.assertTrue(any(" mi  " in t for t in self._row_texts(1)))
+
+    def test_here_is_exactly_when_the_range_would_read_zero(self):
+        from panels.artemis_panel import ArtemisPanel
+        row = {"distance_mi": 0.049, "bearing": 270}
+        self.assertEqual(ArtemisPanel._range_text(row), "here")
+        row["distance_mi"] = 0.05
+        self.assertEqual(ArtemisPanel._range_text(row), "0.1 mi  270°")
+
+    def test_each_row_is_one_line_without_the_date(self):
+        self._build_area()
+        with mock.patch.object(artemis, "nearest_cached",
+                               return_value=self._fake_rows(3)):
+            self._show_open()
+        for i, row in enumerate(self._rows()):
+            with self.subTest(row=i):
+                self.assertEqual(len(row.winfo_children()), 1)
+                self.assertFalse(any("2026" in t for t in self._row_texts(i)))
+
+    def test_hovering_a_name_puts_its_date_in_the_reading_strip(self):
+        self._build_area()
+        rows = self._fake_rows(3)
+        with mock.patch.object(artemis, "nearest_cached", return_value=rows):
+            self._show_open()
+        name = self._rows()[2].winfo_children()[0]._name_label
+        self.panel._on_row_hover(name, rows[2])
+        reading = self.panel._reading.cget("text")
+        self.assertIn("Area 2", reading)
+        self.assertIn("1.4 mi  000° from fix", reading)
+        self.assertIn("cached 2026-08-09", reading)
+        self.assertEqual(name.cget("fg"), theme.C["amber"])
+        self.assertTrue(name.bind("<Enter>"))      # the name's own hover
 
     def test_overlay_is_hidden_when_nothing_is_cached(self):
         self.panel.update(_status())
         self.root.update_idletasks()
         self.assertEqual(self.panel._areas_box.place_info(), {})
 
-    def test_overlay_sits_above_the_compass_rose(self):
-        # The compass is drawn at cy = h - 42 with r = 22 and its label above,
-        # so the box's bottom must clear h - 72. Derived, not restated.
+    def test_overlay_sits_in_the_lower_left_corner(self):
+        # The same margin below as on the left, now the corner is its own.
+        from panels import artemis_panel
         self._build_area()
         self._show()
-        offset = int(self.panel._areas_box.place_info()["y"])
-        compass_top = -(42 + 22 + 8)
-        self.assertLessEqual(offset, compass_top)
+        info = self.panel._areas_box.place_info()
+        self.assertEqual(int(info["y"]), -artemis_panel._AREAS_MARGIN)
+        self.assertEqual(int(info["x"]), artemis_panel._AREAS_MARGIN)
 
     def test_overlay_survives_a_redraw(self):
         # THE trap test: _redraw() opens with canvas.delete("all"), which would
@@ -592,7 +888,7 @@ class TestArtemisPanelSmoke(unittest.TestCase):
 
     def test_rename_commits_on_return_and_survives_a_rebuild(self):
         area = self._build_area()
-        self._show()
+        self._show_open()
         top = self._rows()[0].winfo_children()[0]
         self.panel._begin_rename(top, area, "old name")
         self.panel._commit_rename(area, "Deer Camp")
@@ -607,7 +903,7 @@ class TestArtemisPanelSmoke(unittest.TestCase):
         # Both bindings route to _cancel_rename, which must never call
         # set_label — a FocusOut also fires on view switch and on teardown.
         area = self._build_area()
-        self._show()
+        self._show_open()
         top = self._rows()[0].winfo_children()[0]
         with mock.patch.object(artemis, "set_label",
                                side_effect=AssertionError("cancel wrote a label")):
@@ -624,7 +920,7 @@ class TestArtemisPanelSmoke(unittest.TestCase):
 
     def test_delete_first_click_arms_and_does_not_delete(self):
         area = self._build_area()
-        self._show()
+        self._show_open()
         glyph = self._glyph(0, "✕")
         with mock.patch.object(artemis, "delete_area") as deleter:
             self.panel._on_row_delete(glyph, area)
@@ -637,7 +933,7 @@ class TestArtemisPanelSmoke(unittest.TestCase):
 
     def test_delete_second_click_recycles_and_drops_the_row(self):
         area = self._build_area()
-        self._show()
+        self._show_open()
         glyph = self._glyph(0, "✕")
         with mock.patch.object(artemis, "_send_to_recycle_bin",
                                return_value=True) as recycler:
@@ -656,7 +952,7 @@ class TestArtemisPanelSmoke(unittest.TestCase):
 
     def test_refresh_second_click_starts_one_ingest_for_that_area(self):
         self._build_area()
-        self._show()
+        self._show_open()
         glyph = self._glyph(0, "⟳")
         with mock.patch.object(self.panel, "_start_ingest") as starter:
             self.panel._on_row_refresh(glyph, list(_FIX))     # arms
@@ -689,6 +985,65 @@ class TestArtemisPanelSmoke(unittest.TestCase):
         # Bound on the canvas itself — never tag_bind per feature, which is
         # what keeps the cost constant as the feature count grows.
         self.assertEqual(canvas.tag_bind("road", "<Motion>"), "")
+
+
+    # ── Virgil tooltips ─────────────────────────────────────────────────────
+
+    def test_every_zoom_stop_and_home_carry_their_tips(self):
+        from panels import virgil_tooltip
+        from panels.artemis_panel import ArtemisPanel
+        panel = self.panel
+        self.assertEqual(sorted(ArtemisPanel._TIPS), sorted(panel.tip_targets))
+        targets = list(panel.tip_targets.values())
+        for stop, btn in panel._zoom_btns.items():      # every stop the panel builds
+            self.assertIn(btn, targets, f"the {stop}× stop has no tip")
+        self.assertEqual(len(panel._zoom_btns), len(artemis.ZOOM_STOPS))
+        self.assertIn(panel._home_btn, targets)
+        shared = virgil_tooltip._shared(self.root)
+        for key, tip in ArtemisPanel._TIPS.items():
+            self.assertEqual(shared._tips.get(str(panel.tip_targets[key])), tip, key)
+        self.assertIs(panel.tip_targets["status"], panel._status_lbl)
+        self.assertIs(panel.tip_targets["cache"], panel._cache_btn)
+
+    def test_every_cached_area_row_glyph_and_the_header_carry_their_tips(self):
+        from panels import virgil_tooltip
+        from panels.artemis_panel import ArtemisPanel
+        shared = virgil_tooltip._shared(self.root)
+        self.assertIs(self.panel.tip_targets["areas"], self.panel._areas_header)
+        self._build_area()
+        with mock.patch.object(artemis, "nearest_cached",
+                               return_value=self._fake_rows(3)):
+            self._show_open()
+        for i in range(3):
+            for glyph, key in (("✎", "rename"), ("⟳", "refresh"), ("✕", "delete")):
+                with self.subTest(row=i, glyph=glyph):
+                    self.assertEqual(shared._tips.get(str(self._glyph(i, glyph))),
+                                     ArtemisPanel._ROW_TIPS[key])
+
+    def test_an_armed_glyph_keeps_its_tip(self):
+        from panels import virgil_tooltip
+        from panels.artemis_panel import ArtemisPanel
+        area = self._build_area()
+        self._show_open()
+        glyph = self._glyph(0, "✕")
+        with mock.patch.object(artemis, "delete_area"):
+            self.panel._on_row_delete(glyph, area)          # arms: "delete?"
+        self.assertEqual(glyph.cget("text"), "delete?")
+        self.assertEqual(virgil_tooltip._shared(self.root)._tips.get(str(glyph)),
+                         ArtemisPanel._ROW_TIPS["delete"])
+
+    def test_cache_area_keeps_its_tip_through_a_rebind(self):
+        """CACHE AREA's click is bound once, but its tip doesn't rely on that:
+        the tip rides a bindtag of its own, so unbinding and rebinding the
+        click can't reach it."""
+        from panels import virgil_tooltip
+        panel = self.panel
+        btn = panel._cache_btn
+        btn.unbind("<Button-1>")
+        btn.bind("<Button-1>", lambda e: None)
+        self.assertIn(virgil_tooltip._TAG, btn.bindtags())
+        self.assertEqual(virgil_tooltip._shared(self.root)._tips.get(str(btn)),
+                         type(panel)._TIPS["cache"])
 
 
 class TestResamplePpm(unittest.TestCase):

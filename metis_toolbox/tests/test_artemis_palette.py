@@ -39,7 +39,7 @@ _MAP_KEYS = [
     "map_terrain_lo", "map_terrain_mid", "map_terrain_hi",
     "map_water", "map_water_minor", "map_water_area",
     "map_road_hi", "map_road_mid", "map_road_lo", "map_road_track",
-    "map_ring", "map_compass",
+    "map_ring", "map_legend",
 ]
 
 

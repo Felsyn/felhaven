@@ -7,9 +7,12 @@ from the package root:
     python -X utf8 -m unittest tests.test_hypatia
 
 hypatia._active_preset is module-global mutable state (by design — see the
-module docstring's thread-safety note). Every test that touches it restores
+thread note above it). Every test that touches it restores
 "current" in tearDown so no test leaks preset state into another test file
 sharing this process (unittest discover runs everything in one process).
+
+A snapshot reads the observer's place from Themis, so the module runs on a
+scratch settings file (Themis's defaults), never this checkout's own.
 """
 
 import os
@@ -18,7 +21,18 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests._fixtures import ScratchSettings
 from tools import hypatia
+
+_SETTINGS = ScratchSettings()
+
+
+def setUpModule():
+    _SETTINGS.start()
+
+
+def tearDownModule():
+    _SETTINGS.stop()
 
 # Polaris (HIP 11767), J2000 — an independent reference figure, not read back
 # from our own catalog, so this test can't drift along with a bad catalog
@@ -163,7 +177,7 @@ class TestPayloadContract(unittest.TestCase):
         for key in ("generated_unix", "lst_deg", "preset", "stars",
                     "constellations", "planets"):
             self.assertIn(key, snap)
-        # Phase 2: kepler.positions() always returns the five classical
+        # kepler.positions() always returns the five classical
         # planets (never raises, degrades per-planet on failure — see
         # tests/test_kepler.py for that contract in detail).
         self.assertEqual(len(snap["planets"]), 5)

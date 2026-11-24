@@ -22,6 +22,7 @@ that is exactly the kind of local exception that rots when nothing holds it.
 
 import os
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -33,6 +34,7 @@ import awen
 import calliope
 import theme
 from panels.vox_controls import VoxControls, VoxToggle
+from tools import euterpe
 
 
 # One root for the whole module, not one per class. Six classes each building
@@ -62,7 +64,18 @@ class _VoxCase(unittest.TestCase):
     def setUp(self):
         calliope.set_auto_speak(False)
         self._saved_dj = awen._enabled
+        self._saved_want = awen._want_pick
         awen._enabled = False
+        # Switching Auto-DJ on reads the play ledger (euterpe.taste_anchor) to
+        # see whether there is a taste to match. Point it at an empty scratch
+        # folder, never this checkout's own euterpe_ledger.json: with a real
+        # one it also armed a pick that outlived the test.
+        scratch = tempfile.TemporaryDirectory(prefix="vox_ledger_")
+        self.addCleanup(scratch.cleanup)
+        ledger = mock.patch.object(
+            euterpe, "_LEDGER_PATH", os.path.join(scratch.name, "euterpe_ledger.json"))
+        ledger.start()
+        self.addCleanup(ledger.stop)
         self.ended = []
         self.reset = []
         self.notices = []
@@ -72,6 +85,7 @@ class _VoxCase(unittest.TestCase):
         # Awen's flag is a module global and this row is its only UI mutator, so
         # a leaked True would leave a later file's tests with a live Auto-DJ.
         awen._enabled = self._saved_dj
+        awen._want_pick = self._saved_want
 
     def _row(self) -> VoxControls:
         row = VoxControls(self.root,
@@ -115,6 +129,37 @@ class TestTheRowIsWords(_VoxCase):
         row = self._row()
         for control in (row._response, row._end, row._dj, row._reset):
             self.assertEqual(control._label.cget("fg"), theme.C["text3"])
+
+
+class TestTooltips(_VoxCase):
+    """VoxControls._TIPS against the live controls (test_virgil_surfaces holds
+    the words; this holds the widgets)."""
+
+    def test_every_control_carries_its_tip_and_nothing_else_does(self):
+        from panels import virgil_tooltip
+        row = self._row()
+        self.addCleanup(row.destroy)
+        self.assertEqual(sorted(VoxControls._TIPS), sorted(row._tip_targets))
+        self.assertEqual(
+            sorted(row._tip_targets.values(), key=str),
+            sorted((row._response, row._end, row._dj, row._reset), key=str))
+        shared = virgil_tooltip._shared(self.root)
+        for key, tip in VoxControls._TIPS.items():
+            self.assertEqual(shared._tips.get(str(row._tip_targets[key])), tip,
+                             f"the {key} control does not carry its tip")
+
+    def test_the_controls_own_bindings_are_untouched(self):
+        """The tip's handlers ride a bindtag, so each surface still has its
+        own click and hover pair, and the widget's tag is still in its
+        bindtags. Wiring, not a faked click: this root is withdrawn (see
+        TestEverySurfaceIsClickable)."""
+        row = self._row()
+        self.addCleanup(row.destroy)
+        for control in row._tip_targets.values():
+            for w in (control, control._dot, control._label):
+                for sequence in ("<Button-1>", "<Enter>", "<Leave>"):
+                    self.assertTrue(w.bind(sequence), f"{w} lost {sequence}")
+                self.assertIn(str(w), w.bindtags())
 
 
 class TestAutoDj(_VoxCase):

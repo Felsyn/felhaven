@@ -1,6 +1,8 @@
 """
 Hypatia panel — zenith star map ("Celestarium") for the Felhaven dashboard.
 
+Job:         Draw the sky overhead with its constellations, their myths and tonight's clarity.
+
 HypatiaPanel draws an all-sky zenith projection (zenith at center, horizon at
 the ring, North up) from the tools/hypatia.fetch() payload. A constellation
 list lets you highlight a shape and read its mythology; a latitude preset row
@@ -9,28 +11,64 @@ whole panel and shows a simulation notice, since the chart is then showing a
 sky this machine isn't actually under. ConditionsWidget is a small embedded
 sub-widget (bottom-left, under the canvas) that rides the `aura` worker —
 same AetherWidget precedent as Hephaestus's connectivity rows — showing
-cloud-cover-derived "clarity" stars and cloud %, plus moon illumination %,
-which rides the `selene` worker through its own `moon_row` rider.
+cloud-cover-derived "clarity" stars and cloud %. Two more rows ride their own
+workers through riders: moon illumination % (`moon_row`, the `selene`
+worker) and the aurora estimate (`aurora_row`, the `eos` worker).
 
 The panel does no astronomy: RA/Dec -> alt/az lives in tools/hypatia.py. The
 only math here is alt/az -> canvas x/y (azimuthal equidistant projection),
 plus small display lookups (cloud-cover -> star glyphs, a fixed dim ramp for
 the simulation/selection color states).
 
-V0.02: Audited 2026-07-25 — dropped this panel's duplicate _compass for the
-shared hypatia.compass, so the on-screen planet direction and the LLM digest's
-direction can never diverge. Verified ConditionsWidget is safe against aura's
-int cloud_cover_pct + string moon_illumination (no §10 string-compare bug — the
-`<=` clarity thresholds only ever see the int). No behavior change.
+Upstream:    felhaven.py builds it and registers four Kairos feeds: `hypatia`
+             (the panel), `aura` (conditions), `selene` (conditions.moon_row)
+             and `eos` (conditions.aurora_row). felhaven._apply_scale calls
+             rescale().
+Downstream:  tools/hypatia.py (set_preset() on a preset click, compass() for
+             a picked planet), panels/eos_panel.py (AuroraRow), theme.py,
+             tools/virgil.py and panels/virgil_tooltip.py (the tooltips).
+
+Requires:    math, tkinter, datetime (stdlib).
+
+2026-07-25:  walkthrough audit — dropped this panel's duplicate _compass for
+             the shared hypatia.compass, so the on-screen planet direction and
+             the LLM digest's direction can never diverge. Verified
+             ConditionsWidget is safe against aura's int cloud_cover_pct +
+             string moon_illumination (no §10 string-compare bug — the `<=`
+             clarity thresholds only ever see the int). No behavior change.
+
+2026-09-28:  the moon row became `moon_row`, fed by the `selene` worker. It
+             used to show wttr.in's illumination from the aura payload, which
+             went blank offline and on Aura's moonless fallback, and could
+             differ from SELENE's (V0.03 audit M3).
+
+2026-11-10:  the aurora row arrived as `aurora_row`, fed by the `eos` worker
+             (panels/eos_panel.py), the same pattern as the moon row.
+
+V0.03:       Walked through 2026-11-20 (the V0.03 walkthrough's S20).
+             Deselecting a constellation, or picking a planet, left the old
+             highlight lit until the next redraw, up to 60 s; it has done so
+             since the panel was born (2026-07-01). _apply_highlight() now
+             sets the neutral colours first, from the one _NEUTRAL table the
+             redraw also draws with. The dead _ScrollFrame.clear() is gone
+             (no caller, ever), and the clarity read lost a default it could
+             never use. Words: Upstream, Downstream and Requires added, the
+             aurora row named, ConditionsWidget's two dated notes moved up
+             here (§3), the preset row's width re-measured. Checked and
+             true: the projection, the simulation dim, the planet and
+             constellation exclusivity, rescale() (felhaven calls it), the
+             conditions packed first.
 """
 
 import math
 import tkinter as tk
 from datetime import datetime
 
+from panels import virgil_tooltip
+from panels.eos_panel import AuroraRow
 from theme import C, FONTS, Card, PhosphorScroll
 
-from tools import hypatia
+from tools import hypatia, virgil
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -45,6 +83,12 @@ _RAMP_KEYS = ["text1", "text2", "text3", "bar_bg"]
 def _ramp_color(base_key: str, dim_steps: int) -> str:
     idx = min(_RAMP_KEYS.index(base_key) + max(0, dim_steps), len(_RAMP_KEYS) - 1)
     return C[_RAMP_KEYS[idx]]
+
+
+# Each highlightable canvas tag's undimmed ramp key. _redraw() draws with it
+# and _apply_highlight() resets to it, so a cleared selection goes back to
+# exactly the colours a fresh redraw would give.
+_NEUTRAL = {"line": "text2", "starbright": "text1", "stardim": "text2"}
 
 
 def _clarity_stars(cloud_pct: int) -> str:
@@ -130,12 +174,6 @@ class _ScrollFrame(tk.Frame):
     def scroll_to_top(self) -> None:
         self._canvas.yview_moveto(0)
 
-    def clear(self) -> None:
-        for w in self.inner.winfo_children():
-            w.destroy()
-        self._wrap_labels.clear()
-        self._canvas.yview_moveto(0)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  ConditionsWidget — observation conditions, embedded bottom-left
@@ -152,7 +190,7 @@ class _MoonRow:
         self._label = label
 
     def update(self, info) -> None:
-        """selene.fetch()'s dict, the same one SELENE and get_moon_phase show.
+        """selene.fetch()'s dict, the same one SELENE and get_sky_report show.
         An error or None reads "—"."""
         ok = bool(info) and "error" not in info
         self._label.config(text=info["illumination"] if ok else "—")
@@ -163,16 +201,19 @@ class ConditionsWidget(tk.Frame):
     Rides the `aura` worker (AetherWidget precedent — an embedded widget with
     its own Kairos registration). update(data) receives the FULL aura
     payload (or None); missing keys / an {"error": ...} dict all degrade to
-    "-", never a crash. Collapses to a one-line local-only notice while
-    Hypatia is showing a simulated (non-current) sky.
-
-    2026-09-28: the moon row is `moon_row`, fed by the `selene` worker. It used
-    to show wttr.in's illumination from the aura payload, which went blank
-    offline and on Aura's moonless fallback, and could differ from SELENE's
-    (V0.03 audit M3).
+    "—", never a crash. Collapses to a one-line local-only notice while
+    Hypatia is showing a simulated (non-current) sky. The moon and aurora
+    rows are not aura's: `moon_row` rides `selene` and `aurora_row` rides
+    `eos`.
     """
 
-    _ROWS = ("clarity", "cloud cover", "moon illum.")
+    _ROWS = ("clarity", "cloud cover", "moon illum.", "aurora")
+
+    # Hover tooltip (Virgil) for the star rating, a glossary entry
+    # (CONVENTIONS §7). The aurora row's tip is attached beside its rider.
+    _TIPS = {
+        "clarity": virgil.term("sky_clarity"),
+    }
 
     def __init__(self, parent):
         super().__init__(parent, bg=C["card"])
@@ -193,6 +234,14 @@ class ConditionsWidget(tk.Frame):
             v.pack(side="right")
             self._values[key] = v
         self.moon_row = _MoonRow(self._values["moon illum."])
+        # The aurora here, on Kairos's "eos" worker: a rider like moon_row.
+        self.aurora_row = AuroraRow(self._values["aurora"])
+        virgil_tooltip.attach(self._values["aurora"].master,
+                              virgil.term("aurora_estimate"))
+        self.tip_targets: dict[str, tk.Misc] = {
+            "clarity": self._values["clarity"].master}
+        for key, tip in self._TIPS.items():
+            virgil_tooltip.attach(self.tip_targets[key], tip)
 
         self._sim_lbl = tk.Label(
             self, text="local conditions — current location only",
@@ -220,14 +269,15 @@ class ConditionsWidget(tk.Frame):
         self._sim_lbl.pack_forget()
         self._rows_frame.pack(fill="x")
 
-        # Only the weather rows: "moon illum." is moon_row's, fed by Selene.
+        # Only the weather rows: "moon illum." is moon_row's, fed by Selene,
+        # and "aurora" is aurora_row's, fed by Eos.
         data = self._last
         if not data or "error" in data or "cloud_cover_pct" not in data:
             for key in ("clarity", "cloud cover"):
                 self._values[key].config(text="—")
             return
 
-        cloud = data.get("cloud_cover_pct", 0)
+        cloud = data["cloud_cover_pct"]
         self._values["clarity"].config(text=_clarity_stars(cloud))
         self._values["cloud cover"].config(text=f"{cloud}%")
 
@@ -237,6 +287,11 @@ class ConditionsWidget(tk.Frame):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class HypatiaPanel(Card):
+    # Hover tooltips (Virgil) for the four sky presets: one glossary entry
+    # says what all four do (CONVENTIONS §7). Keys are the preset names in
+    # self.tip_targets.
+    _TIPS = {name: virgil.term("sky_preset") for name, _text in _PRESET_LABELS}
+
     def __init__(self, parent):
         super().__init__(parent, "Hypatia — Celestarium", C["amber"])
 
@@ -258,20 +313,25 @@ class HypatiaPanel(Card):
         left_col = tk.Frame(main_row, bg=C["card"])
         left_col.pack(side="left", fill="both", expand=True)
 
+        # The conditions and the status line are packed FIRST, at the bottom,
+        # and the map takes what is left (§7: what must stay visible is never
+        # what gets squeezed). Packed after the map, the fourth conditions
+        # row (aurora) fell off the bottom at the 760 x 500 minimum window.
+        self.conditions = ConditionsWidget(left_col)
+        self.conditions.pack(side="bottom", fill="x", anchor="w")
+        self._status_lbl = tk.Label(left_col, text="fetching...", font=FONTS["tiny"],
+                                    fg=C["text3"], bg=C["card"], anchor="w")
+        self._status_lbl.pack(side="bottom", fill="x", pady=(4, 4))
+
         canvas_frame = tk.Frame(left_col, bg=C["card"])
         canvas_frame.pack(fill="both", expand=True)
-        self._canvas = tk.Canvas(canvas_frame, bg=C["card"], highlightthickness=0)
+        self._canvas = tk.Canvas(canvas_frame, bg=C["card"], highlightthickness=0,
+                                 width=1, height=1)
         self._canvas.pack(fill="both", expand=True)
         self._canvas.bind("<Configure>", self._on_canvas_configure)
         for _name in _PLANET_NAMES:
             self._canvas.tag_bind(_name, "<Button-1>", lambda e, n=_name: self._on_planet_click(n))
 
-        self._status_lbl = tk.Label(left_col, text="fetching...", font=FONTS["tiny"],
-                                    fg=C["text3"], bg=C["card"], anchor="w")
-        self._status_lbl.pack(fill="x", pady=(4, 4))
-
-        self.conditions = ConditionsWidget(left_col)
-        self.conditions.pack(fill="x", anchor="w")
 
         # ── Right: preset row, constellation list, info box ────────────────
         # Fixed-width column. Fonts grow up to 3x when the window is maximized
@@ -347,8 +407,9 @@ class HypatiaPanel(Card):
 
     # ── preset row ──────────────────────────────────────────────────────────
     # A 2x2 grid, not a single row — four labels ("Current"/"N Pole"/"Equator"/
-    # "S Pole") plus separators need ~257px in one row, wider than the 200px
-    # right column, which silently clipped "S Pole" off the visible area.
+    # "S Pole") need ~254px in one row at their 12px gaps (measured
+    # 2026-11-20), wider than the 200px right column, which silently clipped
+    # "S Pole" off the visible area.
 
     def _build_preset_row(self, parent: tk.Frame) -> None:
         row = tk.Frame(parent, bg=C["card"])
@@ -361,6 +422,8 @@ class HypatiaPanel(Card):
             lbl.bind("<Enter>", lambda e, l=lbl: l.config(fg=C["amber"]))
             lbl.bind("<Leave>", lambda e, n=name, l=lbl: self._unhover_preset(l, n))
             self._preset_lbls[name] = lbl
+            virgil_tooltip.attach(lbl, self._TIPS[name])
+        self.tip_targets: dict[str, tk.Misc] = dict(self._preset_lbls)
 
     def _unhover_preset(self, lbl: tk.Label, name: str) -> None:
         active = self._last["preset"] if self._last else "current"
@@ -498,7 +561,8 @@ class HypatiaPanel(Card):
                         continue
                     x1, y1 = self._project(sa["alt"], sa["az"])
                     x2, y2 = self._project(sb["alt"], sb["az"])
-                    c.create_line(x1, y1, x2, y2, fill=_ramp_color("text2", sim_steps),
+                    c.create_line(x1, y1, x2, y2,
+                                  fill=_ramp_color(_NEUTRAL["line"], sim_steps),
                                   width=1, tags=("line", abbr))
 
         # ── stars ───────────────────────────────────────────────────────────
@@ -508,9 +572,8 @@ class HypatiaPanel(Card):
             x, y = self._project(s["alt"], s["az"])
             mag = s["mag"]
             radius = 3 if mag <= 1.0 else (2 if mag <= 2.5 else 1)
-            bright = mag <= 2.5
-            tier_tag = "starbright" if bright else "stardim"
-            fill = _ramp_color("text1" if bright else "text2", sim_steps)
+            tier_tag = "starbright" if mag <= 2.5 else "stardim"
+            fill = _ramp_color(_NEUTRAL[tier_tag], sim_steps)
             tags = ("star", tier_tag, *hip_to_abbrs.get(hip, ()))
             c.create_oval(x - radius, y - radius, x + radius, y + radius,
                           fill=fill, outline="", tags=tags)
@@ -538,12 +601,17 @@ class HypatiaPanel(Card):
         sim_steps = 1 if simulated else 0
         sel = self._selected
 
+        # Neutral first, every time: a selection that was just cleared (a
+        # second click, or a planet picked) must not stay lit until the next
+        # redraw, which can be a minute away.
+        for tag, key in _NEUTRAL.items():
+            c.itemconfigure(tag, fill=_ramp_color(key, sim_steps))
+        c.itemconfigure("line", width=1)
         if sel is None:
-            return  # neutral colors already set by _redraw's creation pass
+            return
 
-        c.itemconfigure(f"line&&!{sel}", fill=_ramp_color("text2", sim_steps + 1))
-        c.itemconfigure(f"starbright&&!{sel}", fill=_ramp_color("text1", sim_steps + 1))
-        c.itemconfigure(f"stardim&&!{sel}", fill=_ramp_color("text2", sim_steps + 1))
+        for tag, key in _NEUTRAL.items():
+            c.itemconfigure(f"{tag}&&!{sel}", fill=_ramp_color(key, sim_steps + 1))
         c.itemconfigure(f"line&&{sel}", fill=C["green"], width=2)
         c.itemconfigure(f"star&&{sel}", fill=C["amber"])
 
