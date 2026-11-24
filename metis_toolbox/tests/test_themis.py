@@ -48,11 +48,13 @@ class TestLoadDefaults(ThemisBase):
 
     def test_garbled_file_falls_back_to_defaults(self):
         self._write("{ not valid json")
-        self.assertEqual(themis.load(), themis.DEFAULTS)
+        with self.assertLogs("METIS.themis", "WARNING"):
+            self.assertEqual(themis.load(), themis.DEFAULTS)
 
     def test_non_object_root_falls_back(self):
         self._write([1, 2, 3])
-        self.assertEqual(themis.load(), themis.DEFAULTS)
+        with self.assertLogs("METIS.themis", "WARNING"):
+            self.assertEqual(themis.load(), themis.DEFAULTS)
 
     def test_partial_file_merges_over_defaults(self):
         self._write({"latitude": 10.0})
@@ -63,13 +65,16 @@ class TestLoadDefaults(ThemisBase):
     def test_one_bad_field_degrades_only_itself(self):
         # A junk latitude falls back to default; the good longitude survives.
         self._write({"latitude": "north", "longitude": 5.0})
-        s = themis.load()
+        with self.assertLogs("METIS.themis", "WARNING") as logs:
+            s = themis.load()
         self.assertEqual(s["latitude"], themis.DEFAULTS["latitude"])
         self.assertEqual(s["longitude"], 5.0)
+        self.assertEqual(len(logs.output), 1, "one warning, for the latitude")
 
     def test_out_of_range_field_degrades(self):
         self._write({"latitude": 999.0})
-        self.assertEqual(themis.load()["latitude"], themis.DEFAULTS["latitude"])
+        with self.assertLogs("METIS.themis", "WARNING"):
+            self.assertEqual(themis.load()["latitude"], themis.DEFAULTS["latitude"])
 
 
 class TestSaveRoundTrip(ThemisBase):
@@ -356,7 +361,10 @@ class TestHandEdits(ThemisBase):
                               (True, True), (False, False)):
             with self.subTest(raw=raw):
                 self._write({"clock_24h": raw})
-                self.assertIs(self._load()["clock_24h"], expected)
+                # A real true or false loads quietly; anything else warns.
+                quiet = isinstance(raw, bool)
+                with (self.assertNoLogs if quiet else self.assertLogs)("METIS.themis", "WARNING"):
+                    self.assertIs(self._load()["clock_24h"], expected)
 
     def test_save_refuses_a_clock_that_isnt_true_or_false(self):
         with self.assertRaises(themis.SettingsError):
@@ -366,25 +374,49 @@ class TestHandEdits(ThemisBase):
     def test_numbers_too_big_for_a_float_fall_back(self):
         huge = "9" * 400
         self._write('{"latitude": %s, "pythia_temperature": %s}' % (huge, huge))
-        data = self._load()
+        with self.assertLogs("METIS.themis", "WARNING"):
+            data = self._load()
         self.assertEqual(data["latitude"], themis.DEFAULTS["latitude"])
         self.assertIsNone(data["pythia_temperature"])
 
     def test_a_file_nested_too_deep_falls_back(self):
         self._write("[" * 100000 + "]" * 100000)
-        self.assertEqual(self._load(), themis.DEFAULTS)
+        with self.assertLogs("METIS.themis", "WARNING"):
+            self.assertEqual(self._load(), themis.DEFAULTS)
 
     def test_a_true_or_false_coordinate_is_refused(self):
-        self._write({"latitude": True, "longitude": False})
-        data = self._load()
-        self.assertEqual((data["latitude"], data["longitude"]),
-                         (themis.DEFAULTS["latitude"], themis.DEFAULTS["longitude"]))
+        # The save first, while no file exists: save() loads the file before
+        # it validates, so after the write below it would warn as well.
         with self.assertRaises(themis.SettingsError):
             themis.save(latitude=True, longitude=2.0)
+        self._write({"latitude": True, "longitude": False})
+        with self.assertLogs("METIS.themis", "WARNING"):
+            data = self._load()
+        self.assertEqual((data["latitude"], data["longitude"]),
+                         (themis.DEFAULTS["latitude"], themis.DEFAULTS["longitude"]))
+
+    def test_a_refused_coordinate_or_place_is_not_logged(self):
+        """S24's rule for the save log (§12) holds for load()'s warnings: a
+        latitude or longitude is half a location, a place id is its corner's
+        coordinates, and felhaven.log shows on the EMANON tab. float()'s own
+        message quoted the text. Made-up values."""
+        for raw in ({"latitude": "12.3456N", "longitude": "-65.4321W"},
+                    {"latitude": 1234.56, "longitude": -654.321},
+                    {"atmos_place": "n12p345_w065p432 x"}):
+            with self.subTest(raw=raw):
+                self._write(raw)
+                with self.assertLogs("METIS.themis", "WARNING") as logs:
+                    data = self._load()
+                for key in raw:
+                    self.assertEqual(data[key], themis.DEFAULTS[key], "still refused")
+                said = "\n".join(logs.output)
+                for digits in ("12.3456", "65.4321", "1234.56", "654.321", "n12p345"):
+                    self.assertNotIn(digits, said)
 
     def test_a_weather_location_that_isnt_text_falls_back(self):
         self._write({"weather_location": ["a", 1], "latitude": 1.5, "longitude": 2.5})
-        self.assertEqual(themis.weather_query(), "1.5,2.5")
+        with self.assertLogs("METIS.themis", "WARNING"):
+            self.assertEqual(themis.weather_query(), "1.5,2.5")
         # A ZIP typed without quotes is still a place.
         self._write({"weather_location": 26301})
         self.assertEqual(themis.weather_query(), "26301")

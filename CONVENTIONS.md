@@ -3935,3 +3935,15 @@ and when, one line per change, so a decision worth keeping must be written here.
   a few seconds later; the gain is that she never claims a song that didn't
   load. play() also says whether it sent anything, so a refused URL or an
   mpv that won't start is `unavailable` at once. *(2026-11-23.)*
+- **load()'s refusals name a coordinate or place without its value
+  (`themis.py`).** S24's rule kept the latitude, longitude, weather location
+  and place id out of the save log, and out of a refused weather location's
+  warning; the latitude, longitude and place refusals still quoted theirs.
+  Measured with made-up values: a hand-typed `"12.3456N"` reached
+  felhaven.log as typed (float()'s own message quotes the text), and so did
+  a slipped decimal point (`latitude 1234.56 out of range`) and a mangled
+  place id. The warning now says `latitude is not a number` or `latitude out
+  of range [-90, 90]`, which is enough to find the line in the file. The
+  Settings tab shows the same words when it refuses a save; the person who
+  typed the value can see it in the box. Found while catching the Themis
+  tests' console warnings. *(2026-11-24.)*

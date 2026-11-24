@@ -76,7 +76,7 @@ model could start would be the model scheduling its own unprompted work.
 Double-click `metis_toolbox/Felhaven.bat`, or:
 
 ```bash
-cd metis/metis_toolbox
+cd felhaven/metis_toolbox
 python felhaven.py
 ```
 

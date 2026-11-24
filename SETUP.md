@@ -47,8 +47,8 @@ untested — treat it as best-effort.
 ## 2. Clone, venv, install
 
 ```powershell
-git clone https://github.com/Felsyn/metis.git
-cd metis\metis_toolbox
+git clone https://github.com/Felsyn/felhaven.git
+cd felhaven\metis_toolbox
 py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --require-hashes --only-binary=:all: -r requirements.txt

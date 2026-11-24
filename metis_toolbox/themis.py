@@ -195,22 +195,29 @@ class SettingsError(ValueError):
 # ── Coercion / load (fail-soft, per-field) ────────────────────────────────────
 
 def _coerce_lat(value: Any) -> float:
-    # A bool is refused: float(True) is 1.0, which is no place.
-    if isinstance(value, bool):
-        raise ValueError(f"latitude {value!r} is not a number")
-    lat = float(value)
-    if not -90.0 <= lat <= 90.0:
-        raise ValueError(f"latitude {lat} out of range [-90, 90]")
-    return lat
+    return _coerce_degrees(value, "latitude", 90.0)
 
 
 def _coerce_lon(value: Any) -> float:
+    return _coerce_degrees(value, "longitude", 180.0)
+
+
+def _coerce_degrees(value: Any, key: str, limit: float) -> float:
+    """A number in [-limit, limit]. A refusal names the field and why, never
+    the value: a coordinate is half a location, and load() logs its refusals
+    to felhaven.log, which the EMANON tab shows (§12, S24's rule for the save
+    log). float()'s own message quotes the text, so it is replaced, and
+    `from None` keeps it out of a traceback too."""
+    # A bool is refused: float(True) is 1.0, which is no place.
     if isinstance(value, bool):
-        raise ValueError(f"longitude {value!r} is not a number")
-    lon = float(value)
-    if not -180.0 <= lon <= 180.0:
-        raise ValueError(f"longitude {lon} out of range [-180, 180]")
-    return lon
+        raise ValueError(f"{key} is true or false, not a number")
+    try:
+        degrees = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{key} is not a number") from None
+    if not -limit <= degrees <= limit:          # NaN fails this too
+        raise ValueError(f"{key} out of range [{-limit:g}, {limit:g}]")
+    return degrees
 
 
 def _coerce_location(value: Any) -> str:
@@ -280,7 +287,8 @@ def _coerce_place(value: Any) -> str:
     if value == "":
         return ""
     if not isinstance(value, str) or not _AREA_ID.fullmatch(value):
-        raise ValueError(f"atmos_place {value!r} is not a cached area's id")
+        # Not the value: an area's id is its corner's coordinates.
+        raise ValueError("atmos_place is not a cached area's id")
     return value
 
 
