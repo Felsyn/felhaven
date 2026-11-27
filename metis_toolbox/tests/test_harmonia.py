@@ -175,7 +175,8 @@ class TestYieldsMorpheus(_HarmoniaBase):
 
     def test_play_still_plays_if_morpheus_duck_raises(self):
         self.mock_duck.side_effect = RuntimeError("pipe gone")
-        harmonia.play(np.ones(20000, dtype=np.float32), 24000)   # must not raise
+        with self.assertLogs("METIS.harmonia", "WARNING"):
+            harmonia.play(np.ones(20000, dtype=np.float32), 24000)   # must not raise
         self.assertTrue(harmonia.is_playing())                   # audio was buffered
         self.assertTrue(_wait_until(lambda: not harmonia.is_playing()))   # and drained
 
@@ -184,7 +185,8 @@ class TestYieldsMorpheus(_HarmoniaBase):
         taken on a box whose stream will not open must still be handed back,
         or the music stays quiet forever."""
         self._sd_stub.OutputStream = mock.Mock(side_effect=RuntimeError("no device"))
-        harmonia.play(np.zeros(4, dtype=np.float32), 24000)
+        with self.assertLogs("METIS.harmonia", "WARNING"):
+            harmonia.play(np.zeros(4, dtype=np.float32), 24000)
         self.assertFalse(harmonia.is_playing())      # nothing buffered
         self.assertTrue(harmonia._yielded)           # but a restore is owed
 
@@ -265,7 +267,8 @@ class TestYieldRestore(_HarmoniaBase):
         self.assertTrue(_wait_until(lambda: not harmonia.is_playing()))
         harmonia.tick_yield()
         self._age_the_silence()
-        harmonia.tick_yield()                    # must not raise
+        with self.assertLogs("METIS.harmonia", "WARNING"):
+            harmonia.tick_yield()                    # must not raise
         self.mock_unduck.assert_called_once()
         self.assertFalse(harmonia._yielded)       # and the debt is cleared
 
@@ -376,14 +379,16 @@ class TestStreamOutlivesTheDevice(_HarmoniaBase):
     def test_a_dead_stream_is_replaced(self):
         first = self._first_stream()
         first.abort()                        # the device went away
-        harmonia.play(np.zeros(4, dtype=np.float32), 24000)
+        with self.assertLogs("METIS.harmonia", "WARNING"):
+            harmonia.play(np.zeros(4, dtype=np.float32), 24000)
         self.assertIsNot(harmonia._stream, first)
         self.assertEqual(len(_FakeStream.instances), 2)
 
     def test_audio_plays_again_on_the_replacement(self):
         """The point of the whole thing: narration comes back."""
         self._first_stream().abort()
-        harmonia.play(np.ones(20000, dtype=np.float32), 24000)
+        with self.assertLogs("METIS.harmonia", "WARNING"):
+            harmonia.play(np.ones(20000, dtype=np.float32), 24000)
         self.assertTrue(_wait_until(lambda: not harmonia.is_playing()),
                         "narration never drained after the device came back")
 
@@ -395,7 +400,8 @@ class TestStreamOutlivesTheDevice(_HarmoniaBase):
         harmonia.play(np.ones(20000, dtype=np.float32), 24000)
         self.assertEqual(harmonia._buffered_samples, 20000)
         harmonia._stream.abort()             # died mid-answer, audio still queued
-        harmonia.play(np.ones(8, dtype=np.float32), 24000)    # the recovering call
+        with self.assertLogs("METIS.harmonia", "WARNING"):
+            harmonia.play(np.ones(8, dtype=np.float32), 24000)    # the recovering call
         self.assertEqual(harmonia._buffered_samples, 8)
 
     def test_the_replacement_is_logged(self):
@@ -423,7 +429,8 @@ class TestPlayDeviceDegradation(_HarmoniaBase):
     def test_device_error_is_swallowed(self):
         # Opening the stream fails (no/busy device) → play drops the audio quietly.
         self._sd_stub.OutputStream = mock.Mock(side_effect=OSError("no output device"))
-        harmonia.play(np.zeros(4, dtype=np.float32), 24000)   # must not raise
+        with self.assertLogs("METIS.harmonia", "WARNING"):
+            harmonia.play(np.zeros(4, dtype=np.float32), 24000)   # must not raise
         self.assertFalse(harmonia.is_playing())
         self.assertIsNone(harmonia._stream)
 
@@ -431,7 +438,8 @@ class TestPlayDeviceDegradation(_HarmoniaBase):
         with mock.patch.dict(sys.modules, {"sounddevice": None}):
             # sys.modules[name] = None is the documented way to simulate an
             # uninstalled package: import raises ImportError.
-            harmonia.play(np.zeros(4, dtype=np.float32), 24000)
+            with self.assertLogs("METIS.harmonia", "WARNING"):
+                harmonia.play(np.zeros(4, dtype=np.float32), 24000)
             self.assertFalse(harmonia.is_playing())
 
 

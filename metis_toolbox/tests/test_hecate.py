@@ -191,9 +191,10 @@ class TestIngestAndLoad(unittest.TestCase):
                         return_value=["54033"]), \
              mock.patch("tools.artemis.hermes.get",
                         side_effect=hermes.Offline("no route")):
-            with self.assertRaises(artemis.IngestError) as ctx:
-                hecate.ingest(self.area, self.center, self.box,
-                              threading.Event(), lambda msg: None)
+            with self.assertLogs("METIS.artemis", "WARNING"):
+                with self.assertRaises(artemis.IngestError) as ctx:
+                    hecate.ingest(self.area, self.center, self.box,
+                                  threading.Event(), lambda msg: None)
         self.assertIn("download_failed", str(ctx.exception))
 
     def test_load_missing_area_raises_and_never_fetches(self):

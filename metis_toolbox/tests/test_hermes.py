@@ -64,8 +64,9 @@ class TheDeadlineEndsTheWholeRequest(unittest.TestCase):
     def _assert_cut_at_deadline(self, script, scheme="http", timeout=_OP_TIMEOUT):
         with Loopback(script) as srv:
             t0 = time.monotonic()
-            with self.assertRaises(hermes.DeadlinePassed):
-                _get(srv.url(scheme=scheme), timeout=timeout)
+            with self.assertLogs("METIS.hermes", "WARNING"):
+                with self.assertRaises(hermes.DeadlinePassed):
+                    _get(srv.url(scheme=scheme), timeout=timeout)
             elapsed = time.monotonic() - t0
         self.assertLess(elapsed, _DEADLINE + _SLACK)
 
@@ -110,8 +111,9 @@ class TheDeadlineEndsTheWholeRequest(unittest.TestCase):
             stop.wait(8)                         # then nothing
         with Loopback(script) as srv:
             t0 = time.monotonic()
-            with self.assertRaises(hermes.DeadlinePassed):
-                _get(srv.url(), timeout=5)
+            with self.assertLogs("METIS.hermes", "WARNING"):
+                with self.assertRaises(hermes.DeadlinePassed):
+                    _get(srv.url(), timeout=5)
             self.assertLess(time.monotonic() - t0, _DEADLINE + _SLACK)
 
     def test_the_default_deadline_follows_the_rule(self):
@@ -256,8 +258,9 @@ class TheCapRefusesBigBodies(unittest.TestCase):
             stop.wait(5)
         with Loopback(script) as srv:
             t0 = time.monotonic()
-            with self.assertRaises(hermes.TooLarge):
-                _get(srv.url(), cap=1000, deadline=5)
+            with self.assertLogs("METIS.hermes", "WARNING"):
+                with self.assertRaises(hermes.TooLarge):
+                    _get(srv.url(), cap=1000, deadline=5)
             self.assertLess(time.monotonic() - t0, _OP_TIMEOUT)
 
     def _assert_counted(self, head, body):
@@ -265,8 +268,9 @@ class TheCapRefusesBigBodies(unittest.TestCase):
             read_head(conn)
             conn.sendall(head + body)
         with Loopback(script) as srv:
-            with self.assertRaises(hermes.TooLarge):
-                _get(srv.url(), cap=1000, deadline=5)
+            with self.assertLogs("METIS.hermes", "WARNING"):
+                with self.assertRaises(hermes.TooLarge):
+                    _get(srv.url(), cap=1000, deadline=5)
 
     def test_a_body_with_no_length_is_counted(self):
         self._assert_counted(_head("200 OK", "Connection: close"), b"z" * 1001)
@@ -340,8 +344,9 @@ class ThePost(unittest.TestCase):
         def script(conn, stop):
             _read_request(conn)
             conn.sendall(_head("200 OK", "Content-Length: 5000") + b"x" * 5000)
-        with Loopback(script) as srv, self.assertRaises(hermes.TooLarge):
-            self._post(srv.url(), cap=1000)
+        with self.assertLogs("METIS.hermes", "WARNING"):
+            with Loopback(script) as srv, self.assertRaises(hermes.TooLarge):
+                self._post(srv.url(), cap=1000)
 
     def test_the_reply_is_bounded_by_the_deadline(self):
         def script(conn, stop):
@@ -350,8 +355,9 @@ class ThePost(unittest.TestCase):
             drip(conn, stop, _DRIP, _INTERVAL)
         with Loopback(script) as srv:
             t0 = time.monotonic()
-            with self.assertRaises(hermes.DeadlinePassed):
-                self._post(srv.url(), deadline=_DEADLINE)
+            with self.assertLogs("METIS.hermes", "WARNING"):
+                with self.assertRaises(hermes.DeadlinePassed):
+                    self._post(srv.url(), deadline=_DEADLINE)
         self.assertLess(time.monotonic() - t0, _DEADLINE + _SLACK)
 
     def test_a_redirect_is_never_followed(self):
@@ -462,9 +468,10 @@ class ThePolicy(unittest.TestCase):
             time.sleep(0.3)
             raise TimeoutError("timed out")
         with mock.patch.object(socket.socket, "connect", side_effect=slow):
-            with self.assertRaises(hermes.DeadlinePassed):
-                hermes.get("http://127.0.0.1:9/", cap=1000, timeout=5,
-                           deadline=0.2, allow_http=True)
+            with self.assertLogs("METIS.hermes", "WARNING"):
+                with self.assertRaises(hermes.DeadlinePassed):
+                    hermes.get("http://127.0.0.1:9/", cap=1000, timeout=5,
+                               deadline=0.2, allow_http=True)
 
     def test_every_request_asks_for_identity_and_names_felhaven(self):
         def script(conn, stop):

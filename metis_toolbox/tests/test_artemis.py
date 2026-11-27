@@ -495,8 +495,9 @@ class TestReference(_CacheDirBase):
     def test_download_failure_is_slugged(self):
         with mock.patch("tools.artemis.hermes.get",
                         side_effect=hermes.Offline("no route")):
-            with self.assertRaises(artemis.IngestError) as ctx:
-                artemis.ensure_reference(threading.Event(), lambda msg: None)
+            with self.assertLogs("METIS.artemis", "WARNING"):
+                with self.assertRaises(artemis.IngestError) as ctx:
+                    artemis.ensure_reference(threading.Event(), lambda msg: None)
         self.assertIn("download_failed", str(ctx.exception))
 
     def test_the_reference_download_and_members_are_capped(self):
@@ -544,8 +545,9 @@ class TestDownload(unittest.TestCase):
     def test_a_404_otherwise_is_a_failure_after_one_retry(self):
         with self._get(_FakeResponse(b"", status=404),
                        _FakeResponse(b"", status=404)) as get:
-            with self.assertRaises(artemis.IngestError) as ctx:
-                artemis.download("https://x.invalid/a.zip", "a", cap=10)
+            with self.assertLogs("METIS.artemis", "WARNING"):
+                with self.assertRaises(artemis.IngestError) as ctx:
+                    artemis.download("https://x.invalid/a.zip", "a", cap=10)
         self.assertEqual(str(ctx.exception), "download_failed: HTTPStatus for a")
         self.assertEqual(get.call_count, 2)
 
@@ -643,7 +645,8 @@ class TestIngestOrchestrator(_CacheDirBase):
         # The whole point of best-effort terrain: an absent key must not cost
         # the user the roads and water that already downloaded.
         with self._stub(terrain=artemis.IngestError("vault_locked")):
-            area = artemis.ingest_area(*_FIX, threading.Event(), lambda m: None)
+            with self.assertLogs("METIS.artemis", "WARNING"):
+                area = artemis.ingest_area(*_FIX, threading.Event(), lambda m: None)
         manifest = artemis.read_manifest(area)
         self.assertEqual(manifest["layers"], ["roads", "water"])
         self.assertEqual(manifest["terrain_skipped"], "vault_locked")
@@ -705,7 +708,8 @@ class TestIngestOrchestrator(_CacheDirBase):
     def test_a_first_ingest_without_terrain_still_reports_it_skipped(self):
         # Nothing to carry forward, so the honest answer is still "skipped".
         with self._stub(terrain=artemis.IngestError("no_key")):
-            area = artemis.ingest_area(*_FIX, threading.Event(), lambda m: None)
+            with self.assertLogs("METIS.artemis", "WARNING"):
+                area = artemis.ingest_area(*_FIX, threading.Event(), lambda m: None)
         manifest = artemis.read_manifest(area)
         self.assertEqual(manifest["terrain_skipped"], "no_key")
         self.assertNotIn("terrain_kept", manifest)
@@ -713,7 +717,8 @@ class TestIngestOrchestrator(_CacheDirBase):
 
     def test_terrain_download_failure_records_bare_slug(self):
         with self._stub(terrain=artemis.IngestError("download_failed: URLError")):
-            area = artemis.ingest_area(*_FIX, threading.Event(), lambda m: None)
+            with self.assertLogs("METIS.artemis", "WARNING"):
+                area = artemis.ingest_area(*_FIX, threading.Event(), lambda m: None)
         self.assertEqual(artemis.read_manifest(area)["terrain_skipped"],
                          "download_failed")
 
@@ -925,13 +930,14 @@ class TestDeleteArea(_CacheDirBase):
     def test_delete_area_refuses_anything_that_is_not_a_bare_cached_area(self):
         """The guard's teeth: this is a recursive delete driven by a string."""
         self._area()
-        for bad in ("", "..", "a/b", "a\\b", "..\\..\\Windows",
-                    os.path.abspath(self._dir), "_reference", "x.partial",
-                    "never_cached"):
-            with self.subTest(area=bad):
-                with mock.patch("tools.artemis._send_to_recycle_bin") as rec:
-                    self.assertFalse(artemis.delete_area(bad))
-                    rec.assert_not_called()
+        with self.assertLogs("METIS.artemis", "WARNING"):
+            for bad in ("", "..", "a/b", "a\\b", "..\\..\\Windows",
+                        os.path.abspath(self._dir), "_reference", "x.partial",
+                        "never_cached"):
+                with self.subTest(area=bad):
+                    with mock.patch("tools.artemis._send_to_recycle_bin") as rec:
+                        self.assertFalse(artemis.delete_area(bad))
+                        rec.assert_not_called()
 
     def test_delete_area_reports_a_failed_recycle(self):
         area = self._area()
@@ -986,7 +992,8 @@ class TestFetch(_CacheDirBase):
         with open(os.path.join(artemis.area_dir(area), "manifest.json"),
                   "w", encoding="utf-8") as fh:
             fh.write("{not json")
-        status = artemis.fetch()          # degrades to "not cached", no raise
+        with self.assertLogs("METIS.artemis", "WARNING"):
+            status = artemis.fetch()          # degrades to "not cached", no raise
         self.assertFalse(status["cached"])
 
 

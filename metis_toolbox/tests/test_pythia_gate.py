@@ -96,20 +96,23 @@ class TestTheGateRejectsWhatNoHandlerCouldInterpret(_GateCase):
         # The likely case: "weather in Pittsburgh" and the model invents
         # `location`. Running anyway would report HOME's weather as Pittsburgh's.
         handler = self._mock("get_weather")
-        out = pythia._dispatch("get_weather", {"location": "Pittsburgh"})
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            out = pythia._dispatch("get_weather", {"location": "Pittsburgh"})
         self.assertEqual(out["error"],
                          "bad_arguments: get_weather takes no parameters")
         handler.assert_not_called()
 
     def test_timezone_on_get_time_context_is_refused(self):
         handler = self._mock("get_time_context")
-        self.assertRefused(pythia._dispatch("get_time_context", {"timezone": "UTC"}),
-                           "takes no parameters")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            self.assertRefused(pythia._dispatch("get_time_context", {"timezone": "UTC"}),
+                               "takes no parameters")
         handler.assert_not_called()
 
     def test_a_misnamed_parameter_is_answered_with_the_real_names(self):
         handler = self._mock("calculate")
-        out = pythia._dispatch("calculate", {"expr": "1+1"})
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            out = pythia._dispatch("calculate", {"expr": "1+1"})
         self.assertEqual(out["error"],
                          "bad_arguments: calculate takes only: expression, ans")
         handler.assert_not_called()
@@ -118,47 +121,54 @@ class TestTheGateRejectsWhatNoHandlerCouldInterpret(_GateCase):
         # The description rides along so the refusal carries the same guidance
         # the schema gave — for a DJ turn, "an artist and a song title".
         handler = self._mock("calculate")
-        out = pythia._dispatch("calculate", {})
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            out = pythia._dispatch("calculate", {})
         self.assertRefused(out, "missing 'expression'")
         desc = pythia._SCHEMAS["calculate"]["properties"]["expression"]["description"]
         self.assertIn(desc[:30], out["error"])
         handler.assert_not_called()
 
     def test_every_missing_parameter_is_named_not_just_the_first(self):
-        out = pythia._dispatch("convert_unit", {})
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            out = pythia._dispatch("convert_unit", {})
         for name in ("value", "from_unit", "to_unit"):
             self.assertIn(f"missing '{name}'", out["error"])
 
     def test_a_word_where_a_number_belongs_is_refused_not_raised(self):
-        out = pythia._dispatch("convert_unit",
-                               {"value": "five", "from_unit": "km", "to_unit": "mi"})
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            out = pythia._dispatch("convert_unit",
+                                   {"value": "five", "from_unit": "km", "to_unit": "mi"})
         self.assertEqual(out["error"], "bad_arguments: 'value' must be a number")
 
     def test_nan_and_infinity_are_not_numbers_here(self):
         # float("nan") parses, which is exactly why this needs its own test.
         for bad in ("nan", "inf", "-Infinity", float("nan"), float("inf")):
             with self.subTest(value=bad):
-                self.assertRefused(pythia._dispatch(
-                    "convert_unit", {"value": bad, "from_unit": "km", "to_unit": "mi"}),
-                    "must be a number")
+                with self.assertLogs("METIS.pythia", "WARNING"):
+                    self.assertRefused(pythia._dispatch(
+                        "convert_unit", {"value": bad, "from_unit": "km", "to_unit": "mi"}),
+                        "must be a number")
 
     def test_a_bool_is_not_a_number(self):
         # bool is an int subclass in Python; True would silently become 1.
-        self.assertRefused(pythia._dispatch(
-            "convert_unit", {"value": True, "from_unit": "km", "to_unit": "mi"}),
-            "must be a number")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            self.assertRefused(pythia._dispatch(
+                "convert_unit", {"value": True, "from_unit": "km", "to_unit": "mi"}),
+                "must be a number")
 
     def test_an_object_where_text_belongs_is_refused(self):
         handler = self._mock("search_web")
-        self.assertRefused(pythia._dispatch("search_web", {"query": {"q": "x"}}),
-                           "'query' must be text")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            self.assertRefused(pythia._dispatch("search_web", {"query": {"q": "x"}}),
+                               "'query' must be text")
         handler.assert_not_called()
 
     def test_arguments_that_are_not_an_object_are_refused(self):
         for bad in (["x"], "[1, 2]", "{not json", 7):
             with self.subTest(arguments=bad):
-                self.assertEqual(pythia._dispatch("calculate", bad),
-                                 {"error": "bad_arguments: arguments must be an object"})
+                with self.assertLogs("METIS.pythia", "WARNING"):
+                    self.assertEqual(pythia._dispatch("calculate", bad),
+                                     {"error": "bad_arguments: arguments must be an object"})
 
 
 class TestTheGateNormalizesTheUnambiguous(_GateCase):
@@ -199,8 +209,9 @@ class TestTheGateNormalizesTheUnambiguous(_GateCase):
         handler = self._mock("get_news_stories")
         pythia._dispatch("get_news_stories", {"feed": None})
         handler.assert_called_once_with()
-        self.assertRefused(pythia._dispatch("calculate", {"expression": None}),
-                           "missing 'expression'")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            self.assertRefused(pythia._dispatch("calculate", {"expression": None}),
+                               "missing 'expression'")
         weather = self._mock("get_weather")
         pythia._dispatch("get_weather", {"location": None})
         weather.assert_called_once_with()
@@ -223,8 +234,9 @@ class TestTheGateNormalizesTheUnambiguous(_GateCase):
                     self.assertIsInstance(handler.call_args.kwargs["n"], int)
             for bad in ("3.5", 2.5, "three"):
                 with self.subTest(bad=bad):
-                    self.assertRefused(pythia._dispatch("fake_tool", {"n": bad}),
-                                       "'n' must be a whole number")
+                    with self.assertLogs("METIS.pythia", "WARNING"):
+                        self.assertRefused(pythia._dispatch("fake_tool", {"n": bad}),
+                                           "'n' must be a whole number")
 
 
 class TestTheGateLeavesMeaningToTheHandler(_GateCase):
@@ -296,7 +308,8 @@ class TestTheGateInsideATurn(_GateCase):
 
     def test_a_per_turn_override_is_gated_by_the_same_schema(self):
         override = mock.Mock(return_value={"v": 1})
-        out = pythia._dispatch("play_music", {}, None, {"play_music": override})
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            out = pythia._dispatch("play_music", {}, None, {"play_music": override})
         self.assertRefused(out, "missing 'query'")
         override.assert_not_called()
 

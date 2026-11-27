@@ -41,8 +41,9 @@ class TestEffectivePrompt(MachineSpiritBase):
     def test_garbled_file_falls_back_to_default(self):
         with open(machine_spirit._DATA_PATH, "w", encoding="utf-8") as f:
             f.write("{ not valid json")
-        self.assertEqual(machine_spirit.effective_prompt(),
-                         machine_spirit.DEFAULT_SYSTEM_PROMPT)
+        with self.assertLogs("METIS.machine_spirit", "WARNING"):
+            self.assertEqual(machine_spirit.effective_prompt(),
+                             machine_spirit.DEFAULT_SYSTEM_PROMPT)
 
     def test_non_object_root_falls_back(self):
         with open(machine_spirit._DATA_PATH, "w", encoding="utf-8") as f:

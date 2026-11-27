@@ -221,9 +221,10 @@ class TestIngestAndLoad(unittest.TestCase):
                         return_value=["54033"]), \
              mock.patch("tools.artemis.hermes.get",
                         side_effect=self._urlopen(area_error=hermes.Timeout())):
-            with self.assertRaises(artemis.IngestError) as ctx:
-                poseidon.ingest(self.area, self.center, self.box,
-                                threading.Event(), lambda msg: None)
+            with self.assertLogs("METIS.artemis", "WARNING"):
+                with self.assertRaises(artemis.IngestError) as ctx:
+                    poseidon.ingest(self.area, self.center, self.box,
+                                    threading.Event(), lambda msg: None)
         self.assertIn("download_failed", str(ctx.exception))
 
     def test_a_transient_failure_is_retried_before_giving_up(self):
@@ -242,8 +243,9 @@ class TestIngestAndLoad(unittest.TestCase):
                         return_value=["54033"]), \
              mock.patch("tools.artemis.hermes.get",
                         side_effect=flaky):
-            poseidon.ingest(self.area, self.center, self.box,
-                            threading.Event(), lambda msg: None)
+            with self.assertLogs("METIS.artemis", "WARNING"):
+                poseidon.ingest(self.area, self.center, self.box,
+                                threading.Event(), lambda msg: None)
         artemis.commit_area(self.area)
         self.assertEqual(calls["area"], 2)
         self.assertIn("water_area",
@@ -263,9 +265,10 @@ class TestIngestAndLoad(unittest.TestCase):
                         return_value=["54033"]), \
              mock.patch("tools.artemis.hermes.get",
                         side_effect=all_404):
-            with self.assertRaises(artemis.IngestError) as ctx:
-                poseidon.ingest(self.area, self.center, self.box,
-                                threading.Event(), lambda msg: None)
+            with self.assertLogs("METIS.artemis", "WARNING"):
+                with self.assertRaises(artemis.IngestError) as ctx:
+                    poseidon.ingest(self.area, self.center, self.box,
+                                    threading.Event(), lambda msg: None)
         self.assertIn("download_failed", str(ctx.exception))
         self.assertIn("linearwater", str(ctx.exception))
 
@@ -275,9 +278,10 @@ class TestIngestAndLoad(unittest.TestCase):
                         return_value=["54033"]), \
              mock.patch("tools.artemis.hermes.get",
                         side_effect=hermes.Offline("no route")):
-            with self.assertRaises(artemis.IngestError) as ctx:
-                poseidon.ingest(self.area, self.center, self.box,
-                                threading.Event(), lambda msg: None)
+            with self.assertLogs("METIS.artemis", "WARNING"):
+                with self.assertRaises(artemis.IngestError) as ctx:
+                    poseidon.ingest(self.area, self.center, self.box,
+                                    threading.Event(), lambda msg: None)
         self.assertIn("download_failed", str(ctx.exception))
 
     def test_each_layer_reads_with_its_own_caps(self):

@@ -1523,9 +1523,15 @@ class TestHomePanelPollSurvives(unittest.TestCase):
     def tearDownClass(cls):
         cls.root.destroy()
 
-    def _rearms_despite(self, target):
+    def _rearms_despite(self, target, prepare=None):
+        # The logged traceback is the proof the patched call actually raised
+        # inside the poll; without it a rider that never ran passes too.
         panel = HomePanel(self.root)
-        with mock.patch.object(panel, "_arm_poll") as arm,                 mock.patch(target, side_effect=RuntimeError("boom")):
+        if prepare is not None:
+            prepare(panel)
+        with mock.patch.object(panel, "_arm_poll") as arm, \
+                mock.patch(target, side_effect=RuntimeError("boom")), \
+                self.assertLogs("METIS.home_panel", level="ERROR"):
             panel._poll()                    # must not raise
             arm.assert_called_once()
 
@@ -1538,8 +1544,14 @@ class TestHomePanelPollSurvives(unittest.TestCase):
     def test_a_failing_queue_tick_still_rearms(self):
         """The queue window is the newest passenger on this chain, and the
         chain feeds Calliope. A box that threw would stop narration mid-answer,
-        freeze the transcript, and do it invisibly under pythonw.exe."""
-        self._rearms_despite("panels.home_panel.awen.queue_revision")
+        freeze the transcript, and do it invisibly under pythonw.exe.
+
+        The window has to be open: with none, _tick_queue returns before it
+        asks for the revision, and the patched failure never happens."""
+        box = mock.Mock()
+        box.winfo_exists.return_value = True
+        self._rearms_despite("panels.home_panel.awen.queue_revision",
+                             prepare=lambda panel: setattr(panel, "_dj_queue_box", box))
 
     def test_a_failing_tick_fade_still_rearms(self):
         self._rearms_despite("panels.home_panel.morpheus.tick_fade")
@@ -1560,8 +1572,10 @@ class TestHomePanelPollSurvives(unittest.TestCase):
     def test_a_failing_queue_handler_still_rearms(self):
         panel = HomePanel(self.root)
         panel._q.put(("delta", "hello", panel._epoch))
-        with mock.patch.object(panel, "_arm_poll") as arm,                 mock.patch.object(panel, "_on_delta",
-                                  side_effect=RuntimeError("boom")):
+        with mock.patch.object(panel, "_arm_poll") as arm, \
+                mock.patch.object(panel, "_on_delta",
+                                  side_effect=RuntimeError("boom")), \
+                self.assertLogs("METIS.home_panel", level="ERROR"):
             panel._poll()
             arm.assert_called_once()
 
@@ -1570,7 +1584,8 @@ class TestHomePanelPollSurvives(unittest.TestCase):
         felhaven.log, where it can actually be found."""
         panel = HomePanel(self.root)
         with mock.patch("panels.home_panel.harmonia.tick_yield",
-                        side_effect=RuntimeError("boom")),                 self.assertLogs("METIS.home_panel", level="ERROR") as caught:
+                        side_effect=RuntimeError("boom")), \
+                self.assertLogs("METIS.home_panel", level="ERROR") as caught:
             panel._poll()
         self.assertTrue(any("boom" in line for line in caught.output))
 
@@ -1581,7 +1596,8 @@ class TestHomePanelPollSurvives(unittest.TestCase):
         gets left running for days, so this must trickle, not flood."""
         panel = HomePanel(self.root)
         with mock.patch("panels.home_panel.harmonia.tick_yield",
-                        side_effect=RuntimeError("boom")),                 self.assertLogs("METIS.home_panel", level="ERROR") as caught:
+                        side_effect=RuntimeError("boom")), \
+                self.assertLogs("METIS.home_panel", level="ERROR") as caught:
             for _ in range(200):               # ~12 seconds of ticking
                 panel._poll()
         self.assertEqual(len(caught.output), 1,
@@ -1593,7 +1609,8 @@ class TestHomePanelPollSurvives(unittest.TestCase):
         panel = HomePanel(self.root)
         with mock.patch("panels.home_panel.harmonia.tick_yield",
                         side_effect=RuntimeError("boom")):
-            panel._poll()                      # first: reported
+            with self.assertLogs("METIS.home_panel", level="ERROR"):
+                panel._poll()                  # first: reported
             for _ in range(9):
                 panel._poll()                  # counted, not written
             panel._poll_fail_reported -= home_panel._POLL_FAIL_QUIET + 1

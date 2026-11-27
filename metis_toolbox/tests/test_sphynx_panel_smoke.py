@@ -57,6 +57,11 @@ class TestSphynxPanelSmoke(unittest.TestCase):
     def tearDown(self):
         for p in self._panels:
             try:
+                # The panel's own after() calls (the 300 ms start, the reveal)
+                # outlive a test that ends first; left pending, Tcl later prints
+                # "invalid command name ..._start" into whatever test is running.
+                for after_id in p.root.tk.splitlist(p.root.tk.call("after", "info")):
+                    p.root.after_cancel(after_id)
                 p.root.destroy()
             except tk.TclError:
                 pass

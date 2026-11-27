@@ -69,6 +69,14 @@ class MetisLoggingTests(unittest.TestCase):
 
         self.addCleanup(restore)
 
+        # setup_logging adds a console handler on sys.stderr and prints its own
+        # failures there. A buffer keeps both out of the test run's output, and
+        # the failure tests read what was printed from it.
+        self.stderr = io.StringIO()
+        patcher = mock.patch.object(sys, "stderr", self.stderr)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def tearDown(self):
         # Close the handlers this test added so the temp log file is released.
         for h in self.root.handlers[:]:
@@ -203,11 +211,13 @@ class MetisLoggingTests(unittest.TestCase):
         with mock.patch.object(Path, "mkdir", side_effect=OSError("denied")):
             p = metis_logging.setup_logging("prog")
         self.assertEqual(p, self.tmp / "prog.log")
+        self.assertIn("could not create", self.stderr.getvalue())
 
     def test_file_handler_failure_degrades_to_console_only(self):
         with mock.patch.object(logging.handlers, "RotatingFileHandler",
                                side_effect=OSError("locked")):
             metis_logging.setup_logging("prog")
+        self.assertIn("file handler failed", self.stderr.getvalue())
         # Only the plain console StreamHandler survived; no rotating file handler.
         self.assertTrue(self.root.handlers)
         self.assertFalse(any(isinstance(h, logging.handlers.RotatingFileHandler)

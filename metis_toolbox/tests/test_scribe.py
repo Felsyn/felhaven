@@ -48,12 +48,14 @@ class TestLoadDefaults(ScribeBase):
 
     def test_garbled_file_falls_back_to_default(self):
         self._write("{ not valid json")
-        self.assertEqual(scribe.load_data(), {"tasks": [], "notes": ""})
+        with self.assertLogs("METIS.scribe", "WARNING"):
+            self.assertEqual(scribe.load_data(), {"tasks": [], "notes": ""})
 
     def test_non_object_root_falls_back(self):
         # A valid-JSON but non-object file must not reach the panel as a list.
         self._write([1, 2, 3])
-        self.assertEqual(scribe.load_data(), {"tasks": [], "notes": ""})
+        with self.assertLogs("METIS.scribe", "WARNING"):
+            self.assertEqual(scribe.load_data(), {"tasks": [], "notes": ""})
 
     def test_partial_object_gets_missing_keys(self):
         # notes-but-no-tasks must not KeyError the panel, which indexes ["tasks"].
@@ -65,8 +67,9 @@ class TestLoadDefaults(ScribeBase):
     def test_load_never_raises_on_read_error(self):
         # An unreadable existing file degrades to the default, never propagates.
         self._write({"tasks": [], "notes": "x"})
-        with mock.patch.object(Path, "read_text", side_effect=OSError("boom")):
-            self.assertEqual(scribe.load_data(), {"tasks": [], "notes": ""})
+        with self.assertLogs("METIS.scribe", "WARNING"):
+            with mock.patch.object(Path, "read_text", side_effect=OSError("boom")):
+                self.assertEqual(scribe.load_data(), {"tasks": [], "notes": ""})
 
 
 class TestLoadShape(ScribeBase):
@@ -104,7 +107,8 @@ class TestLoadShape(ScribeBase):
         self._write({"tasks": [{"text": "keep", "done": True}, 7,
                                {"text": "also", "done": False, "due": "fri"}],
                      "notes": "n", "extra": 1})
-        data = scribe.load_data()
+        with self.assertLogs("METIS.scribe", "WARNING"):
+            data = scribe.load_data()
         self.assertEqual(data["tasks"], [{"text": "keep", "done": True},
                                          {"text": "also", "done": False, "due": "fri"}])
         self.assertEqual((data["notes"], data["extra"]), ("n", 1))
@@ -142,8 +146,9 @@ class TestSaveAtomicity(ScribeBase):
         good = {"tasks": [{"text": "keep me", "done": False}], "notes": "safe"}
         scribe.save_data(good)
 
-        with mock.patch("scribe.os.replace", side_effect=OSError("disk full")):
-            scribe.save_data({"tasks": [], "notes": "clobbered"})
+        with self.assertLogs("METIS.scribe", "WARNING"):
+            with mock.patch("scribe.os.replace", side_effect=OSError("disk full")):
+                scribe.save_data({"tasks": [], "notes": "clobbered"})
 
         # Original survived, no temp litter, no exception raised.
         self.assertEqual(scribe.load_data(), good)
@@ -151,11 +156,12 @@ class TestSaveAtomicity(ScribeBase):
         self.assertEqual(leftovers, [])
 
     def test_save_never_raises_on_write_error(self):
-        with mock.patch("scribe.tempfile.mkstemp", side_effect=OSError("nope")):
-            try:
-                scribe.save_data({"tasks": [], "notes": "x"})
-            except Exception as e:  # pragma: no cover - the assertion is the point
-                self.fail(f"save_data raised {e!r} — it must swallow and log")
+        with self.assertLogs("METIS.scribe", "WARNING"):
+            with mock.patch("scribe.tempfile.mkstemp", side_effect=OSError("nope")):
+                try:
+                    scribe.save_data({"tasks": [], "notes": "x"})
+                except Exception as e:  # pragma: no cover - the assertion is the point
+                    self.fail(f"save_data raised {e!r} — it must swallow and log")
 
     def test_save_says_whether_it_saved(self):
         """felhaven hands the answer to the SCRIBE tab, so a failed save shows

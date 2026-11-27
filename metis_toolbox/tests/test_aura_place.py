@@ -126,7 +126,8 @@ class TestAPick(_PlaceBase):
 
     def test_open_meteo_gets_the_areas_lat_lon_on_fallback(self):
         self._net(pick_wttr=False)
-        picked = aura.fetch()["picked"]
+        with self.assertLogs("METIS.aura", "WARNING"):
+            picked = aura.fetch()["picked"]
         self.assertNotIn("failed", picked)
         om = [params for url, params in self.calls if "open-meteo" in url]
         self.assertEqual(len(om), 1)

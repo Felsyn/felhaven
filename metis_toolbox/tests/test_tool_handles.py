@@ -163,9 +163,10 @@ class TestArgusHandle(unittest.TestCase):
         self.assertEqual(out["top_connections"][0]["remote"], "1.2.3.4:443")
 
     def test_fetch_failure_degrades(self):
-        with mock.patch("tools.argus.fetch", side_effect=OSError("no sockets")):
-            self.assertEqual(argus.handle(),
-                             {"error": "unavailable: network snapshot raised OSError"})
+        with self.assertLogs("METIS.argus", "WARNING"):
+            with mock.patch("tools.argus.fetch", side_effect=OSError("no sockets")):
+                self.assertEqual(argus.handle(),
+                                 {"error": "unavailable: network snapshot raised OSError"})
 
 
 class TestHypatiaHandle(unittest.TestCase):
@@ -191,10 +192,11 @@ class TestHypatiaHandle(unittest.TestCase):
         self.assertEqual(out["brightest_stars"][0]["direction"], "E")   # az 90
 
     def test_empty_catalog_degrades(self):
-        with mock.patch("tools.hypatia._build_snapshot",
-                        side_effect=RuntimeError("empty catalog")):
-            self.assertEqual(hypatia.handle(),
-                             {"error": "unavailable: sky snapshot raised RuntimeError"})
+        with self.assertLogs("METIS.hypatia", "WARNING"):
+            with mock.patch("tools.hypatia._build_snapshot",
+                            side_effect=RuntimeError("empty catalog")):
+                self.assertEqual(hypatia.handle(),
+                                 {"error": "unavailable: sky snapshot raised RuntimeError"})
 
 
 class TestMorpheusHandle(unittest.TestCase):

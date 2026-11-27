@@ -156,7 +156,8 @@ class TestOneFetchPerTurn(_CacheCase):
         # turn made 6, each call walking both sources on its own. The sun and
         # moon answer regardless: they never needed the weather (M3).
         self.net.down()
-        results = self._turn()
+        with self.assertLogs("METIS.aura", "WARNING"):
+            results = self._turn()
         self.assertEqual([out.get("error") for out in results],
                          ["offline", None])
         self.assertEqual(len(self.net.calls), 2)
@@ -204,7 +205,8 @@ class TestAsOf(_CacheCase):
     def test_errors_carry_no_as_of(self):
         # Nothing was fetched, so there is nothing to date.
         self.net.down()
-        self.assertNotIn("as_of", aura.handle())
+        with self.assertLogs("METIS.aura", "WARNING"):
+            self.assertNotIn("as_of", aura.handle())
 
 
 # ── The key: what shapes a reading ────────────────────────────────────────────
@@ -231,8 +233,9 @@ class TestKey(_CacheCase):
         with mock.patch("tools.aura._location", return_value="Pittsburgh"):
             aura.handle()
         self.net.down()
-        with mock.patch("tools.aura._location", return_value="Ely"):
-            out = aura.handle()
+        with self.assertLogs("METIS.aura", "WARNING"):
+            with mock.patch("tools.aura._location", return_value="Ely"):
+                out = aura.handle()
         self.assertEqual(out.get("error"), "offline")
         self.assertNotIn("temp_f", out)
 
@@ -245,7 +248,8 @@ class TestStaleOnError(_ClockedCase):
         first = aura.handle()
         self.at(_T0 + aura.CACHE_TTL + 1)
         self.net.down()
-        out = aura.handle()
+        with self.assertLogs("METIS.aura", "WARNING"):
+            out = aura.handle()
         self.assertNotIn("error", out)
         self.assertIs(out.get("stale"), True)
         self.assertEqual(out["temp_f"], first["temp_f"])
@@ -257,18 +261,21 @@ class TestStaleOnError(_ClockedCase):
         aura.handle()
         self.at(_T0 + aura._STALE_MAX)
         self.net.down()
-        self.assertEqual(aura.handle().get("error"), "offline")
+        with self.assertLogs("METIS.aura", "WARNING"):
+            self.assertEqual(aura.handle().get("error"), "offline")
 
     def test_a_recent_failure_is_not_retried(self):
         self.net.down()
-        aura.handle()
+        with self.assertLogs("METIS.aura", "WARNING"):
+            aura.handle()
         self.at(_T0 + aura._RETRY_AFTER - 1)
         self.assertEqual(aura.handle().get("error"), "offline")
         self.assertEqual(len(self.net.calls), 2)     # still just the one attempt
 
     def test_a_failure_is_retried_once_the_window_passes(self):
         self.net.down()
-        aura.handle()
+        with self.assertLogs("METIS.aura", "WARNING"):
+            aura.handle()
         self.at(_T0 + aura._RETRY_AFTER)
         self.net.up()
         self.assertNotIn("error", aura.handle())
@@ -288,8 +295,9 @@ class TestFetch(_ClockedCase):
     def test_a_failed_fetch_raises_and_keeps_the_last_reading(self):
         aura.fetch()
         self.net.down()
-        with self.assertRaises(hermes.Offline):
-            aura.fetch()
+        with self.assertLogs("METIS.aura", "WARNING"):
+            with self.assertRaises(hermes.Offline):
+                aura.fetch()
         self.at(_T0 + 5)
         out = aura.handle()
         self.assertNotIn("error", out)
@@ -392,12 +400,13 @@ class TestTheLockIsHeldOnlyUntilTheDeadline(unittest.TestCase):
                     mock.patch.object(aura.hermes, "get",
                                       lambda *a, **k: real_get(*a, allow_http=True, **k)), \
                     self.assertLogs("METIS.hermes", "WARNING") as logs:
-                t0 = time.monotonic()
-                out = aura.handle()
-                elapsed = time.monotonic() - t0
-                free = aura._lock.acquire(blocking=False)
-                if free:
-                    aura._lock.release()
+                with self.assertLogs("METIS.aura", "WARNING"):
+                    t0 = time.monotonic()
+                    out = aura.handle()
+                    elapsed = time.monotonic() - t0
+                    free = aura._lock.acquire(blocking=False)
+                    if free:
+                        aura._lock.release()
 
         self.assertEqual(out.get("error"), "timeout")
         self.assertEqual(sum("deadline" in line for line in logs.output), 2,

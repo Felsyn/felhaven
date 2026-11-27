@@ -481,7 +481,8 @@ class TestObservation(_AwenCase):
         awen._pending_pick = {"key": "dj - choice", "title": "DJ - Choice",
                               "channel": "", "url": "",
                               "intro": "Now playing: DJ - Choice."}
-        payload = self._tick(_ours("Something - Else", None))
+        with self.assertLogs("METIS.awen", "WARNING"):
+            payload = self._tick(_ours("Something - Else", None))
         self.assertEqual(euterpe.entries(), [],
                          "an unprovable song reached the listener's ledger")
         self.assertEqual([r["source"] for r in awen._session_plays], ["dj"])
@@ -1399,8 +1400,9 @@ class TestTheIntroWaitsForTheSong(_AwenCase):
         must not be a line in any of them."""
         said = [self._turn().get("say")]
         awen._observe({**_LOADING, "title": "watch?v=aaaaaaaaaaa"})
-        for snapshot in (_FAILED, _FAILED, _FAILED):
-            said.append(self._tick(dict(snapshot)).get("say"))
+        with self.assertLogs("METIS.awen", "WARNING"):
+            for snapshot in (_FAILED, _FAILED, _FAILED):
+                said.append(self._tick(dict(snapshot)).get("say"))
         # The breaker giving up is allowed to speak; the intro is not.
         self.assertEqual([s for s in said if s and s != awen._BREAKER_LINE], [])
 
@@ -1461,7 +1463,8 @@ class TestBreaker(_AwenCase):
         self._failing_turn()
         self._failing_turn()
         self.assertTrue(awen.enabled())
-        payload = self._failing_turn()
+        with self.assertLogs("METIS.awen", "WARNING"):
+            payload = self._failing_turn()
         self.assertFalse(awen.enabled())
         self.assertEqual(payload["say"], awen._BREAKER_LINE)
         self.assertEqual(payload["kind"], "notice")
@@ -1486,14 +1489,16 @@ class TestBreaker(_AwenCase):
     def test_repeated_load_failures_also_trip_it(self):
         """The 2026-08-20 shape exactly: the turn picks a song, the player
         reports load_failed, nothing ever plays."""
-        for _ in range(3):
-            self._tick(_PLAYING)
-            self._tick(_FAILED)
+        with self.assertLogs("METIS.awen", "WARNING"):
+            for _ in range(3):
+                self._tick(_PLAYING)
+                self._tick(_FAILED)
         self.assertFalse(awen.enabled())
 
     def test_once_tripped_it_stops_firing(self):
-        for _ in range(3):
-            self._failing_turn()
+        with self.assertLogs("METIS.awen", "WARNING"):
+            for _ in range(3):
+                self._failing_turn()
         with mock.patch("awen.pythia.ask") as ask:
             self._play_then_end()
         ask.assert_not_called()
@@ -1573,7 +1578,8 @@ class TestABadTurnIsNotTheEndOfTheNight(_AwenCase):
         for _ in range(2):
             self._dud_tick()
             self.assertTrue(awen.enabled())
-        payload, _ = self._dud_tick()
+        with self.assertLogs("METIS.awen", "WARNING"):
+            payload, _ = self._dud_tick()
         self.assertFalse(awen.enabled())
         self.assertEqual(payload["say"], awen._BREAKER_LINE)
 
@@ -1581,8 +1587,9 @@ class TestABadTurnIsNotTheEndOfTheNight(_AwenCase):
         """Giving up has to be quiet, or the retry outlives the flag that was
         switched off to stop it."""
         self._tick(_PLAYING)
-        for _ in range(3):
-            self._dud_tick()
+        with self.assertLogs("METIS.awen", "WARNING"):
+            for _ in range(3):
+                self._dud_tick()
         _, ask = self._dud_tick()
         ask.assert_not_called()
         self.assertFalse(awen._want_pick)
@@ -1698,11 +1705,12 @@ class TestAPickThatNeverLoads(_AwenCase):
         """The outage the breaker exists for, end to end and unaided."""
         self._tick(_PLAYING)
         self._pick_tick()
-        for n in range(1, 4):
-            self._fail_the_load()
-            if awen.enabled():
-                self.PICK = f"Newcomer - Track {n}"
-                self._pick_tick(_FAILED)
+        with self.assertLogs("METIS.awen", "WARNING"):
+            for n in range(1, 4):
+                self._fail_the_load()
+                if awen.enabled():
+                    self.PICK = f"Newcomer - Track {n}"
+                    self._pick_tick(_FAILED)
         self.assertFalse(awen.enabled())
 
 

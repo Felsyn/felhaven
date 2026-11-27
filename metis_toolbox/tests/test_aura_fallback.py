@@ -103,7 +103,8 @@ class TestFailover(_FreshCache):
         with mock.patch("tools.aura.hermes.get",
                         side_effect=_routed(hermes.Offline(),
                                             load_real_open_meteo())):
-            out = aura.fetch()
+            with self.assertLogs("METIS.aura", "WARNING"):
+                out = aura.fetch()
         self.assertNotIn("error", out)
         self.assertIn("temp_f", out)
 
@@ -114,7 +115,8 @@ class TestFailover(_FreshCache):
         with mock.patch("tools.aura.hermes.get",
                         side_effect=_routed(hermes.CertError(),
                                             load_real_open_meteo())):
-            out = aura.fetch()
+            with self.assertLogs("METIS.aura", "WARNING"):
+                out = aura.fetch()
         self.assertNotIn("error", out)
 
     def test_both_sources_failing_reraises_the_primary_error(self):
@@ -123,15 +125,17 @@ class TestFailover(_FreshCache):
         with mock.patch("tools.aura.hermes.get",
                         side_effect=_routed(hermes.Timeout(),
                                             hermes.Offline())):
-            with self.assertRaises(hermes.Timeout):
-                aura.fetch()
+            with self.assertLogs("METIS.aura", "WARNING"):
+                with self.assertRaises(hermes.Timeout):
+                    aura.fetch()
 
     def test_handle_degrades_when_both_fail(self):
         """handle() still never raises (§2), fallback or no fallback."""
         with mock.patch("tools.aura.hermes.get",
                         side_effect=_routed(hermes.CertError(),
                                             hermes.Offline())):
-            out = aura.handle()
+            with self.assertLogs("METIS.aura", "WARNING"):
+                out = aura.handle()
         self.assertEqual(out["error"], "cert_error")
 
 
@@ -150,18 +154,21 @@ class TestShapeParity(_FreshCache):
         return primary, fallback
 
     def test_top_level_keys_match_exactly(self):
-        primary, fallback = self._both()
+        with self.assertLogs("METIS.aura", "WARNING"):
+            primary, fallback = self._both()
         self.assertEqual(set(primary), set(fallback))
 
     def test_forecast_day_keys_match_exactly(self):
-        primary, fallback = self._both()
+        with self.assertLogs("METIS.aura", "WARNING"):
+            primary, fallback = self._both()
         self.assertTrue(fallback["forecast"])
         self.assertEqual(set(primary["forecast"][0]), set(fallback["forecast"][0]))
 
     def test_value_types_match(self):
         """A panel formats these with f-strings and arithmetic; a str where the
         primary gives an int is exactly the bug shape parity is meant to catch."""
-        primary, fallback = self._both()
+        with self.assertLogs("METIS.aura", "WARNING"):
+            primary, fallback = self._both()
         for key in ("temp_f", "temp_c", "feels_like_f", "high_f", "low_f",
                     "humidity_pct", "wind_mph", "uv_index", "rain_chance_pct",
                     "cloud_cover_pct"):
@@ -183,7 +190,8 @@ class TestWmoTranslation(_FreshCache):
         with mock.patch("tools.aura.hermes.get",
                         side_effect=_routed(hermes.Offline(),
                                             load_real_open_meteo())):
-            out = aura.fetch()
+            with self.assertLogs("METIS.aura", "WARNING"):
+                out = aura.fetch()
         for day in out["forecast"]:
             self.assertIn(day["weather_code"], aura_panel._CODE_TO_ICON,
                           msg=f"{day['weather_code']} is not a mapped WWO code")

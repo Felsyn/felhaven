@@ -253,15 +253,17 @@ class TestTextToAudioConversion(_ScratchAudioDir):
                 f.write(b"partial")
             return _FakeProc(1)
 
-        self.assertEqual(self._convert(mock.MagicMock(side_effect=half_write)),
-                         {"error": "ffmpeg_encode_failed"})
+        with self.assertLogs("METIS.echo", "WARNING"):
+            self.assertEqual(self._convert(mock.MagicMock(side_effect=half_write)),
+                             {"error": "ffmpeg_encode_failed"})
         self.assertFalse(os.path.exists(out_path),
                          "partial output should be removed on encode failure")
 
     def test_a_launch_that_raises_leaves_no_file(self):
         # ffmpeg vanishing between the check and the launch: the claimed name
         # must not stay behind as an empty .opus in the ORPHEUS list.
-        result = self._convert(mock.MagicMock(side_effect=FileNotFoundError()))
+        with self.assertLogs("METIS.echo", "WARNING"):
+            result = self._convert(mock.MagicMock(side_effect=FileNotFoundError()))
         self.assertEqual(result, {"error": "ffmpeg_encode_failed"})
         self.assertEqual(os.listdir(self.audio_dir), [])
 
@@ -305,8 +307,9 @@ class TestWriteOnce(_ScratchAudioDir):
                                   side_effect=synth_while_another_writes), \
                 mock.patch.object(calliope, "save_wav"), \
                 mock.patch("tools.echo.subprocess.run", run):
-            self.assertEqual(echo.text_to_audio("hello world.", "out"),
-                             {"error": "file_exists"})
+            with self.assertLogs("METIS.echo", "WARNING"):
+                self.assertEqual(echo.text_to_audio("hello world.", "out"),
+                                 {"error": "file_exists"})
         run.assert_not_called()
         with open(os.path.join(self.audio_dir, "out.opus"), "rb") as f:
             self.assertEqual(f.read(), b"written during synthesis")
@@ -323,8 +326,9 @@ class TestEncodeOnlyTakesAbsolutePaths(unittest.TestCase):
             with self.subTest(wav=wav), \
                     mock.patch("tools.echo.subprocess.run",
                                return_value=_FakeProc(0)) as run:
-                self.assertEqual(echo._encode_opus("ffmpeg", wav, out),
-                                 {"error": "ffmpeg_encode_failed"})
+                with self.assertLogs("METIS.echo", "WARNING"):
+                    self.assertEqual(echo._encode_opus("ffmpeg", wav, out),
+                                     {"error": "ffmpeg_encode_failed"})
                 run.assert_not_called()
 
     def test_an_output_path_that_isnt_absolute_never_reaches_ffmpeg(self):
@@ -333,8 +337,9 @@ class TestEncodeOnlyTakesAbsolutePaths(unittest.TestCase):
             with self.subTest(out=out), \
                     mock.patch("tools.echo.subprocess.run",
                                return_value=_FakeProc(0)) as run:
-                self.assertEqual(echo._encode_opus("ffmpeg", wav, out),
-                                 {"error": "ffmpeg_encode_failed"})
+                with self.assertLogs("METIS.echo", "WARNING"):
+                    self.assertEqual(echo._encode_opus("ffmpeg", wav, out),
+                                     {"error": "ffmpeg_encode_failed"})
                 run.assert_not_called()
 
     def test_absolute_paths_do(self):

@@ -144,7 +144,8 @@ class TestTheModelNeverSeesIt(_VerbatimCase):
     def test_a_failing_display_does_not_break_the_turn(self):
         def broken(_payload):
             raise RuntimeError("the transcript is gone")
-        answer = self._ask(_tool_round(_ASK_AURA), _final("Sorry."), sink=broken)
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            answer = self._ask(_tool_round(_ASK_AURA), _final("Sorry."), sink=broken)
         self.assertEqual(answer, "Sorry.")
         self.assertNotIn(AURA_DOC, self._every_request())
         self.assertTrue(json.loads(self._tool_message()["content"])["error"]
@@ -199,7 +200,8 @@ class TestEverythingElseIsUntouched(unittest.TestCase):
         sink = mock.Mock()
         for bad in ("just a string", {"title": "no text"}, {"text": 42}):
             with self.subTest(payload=bad):
-                out, ack = pythia._split_verbatim({"verbatim": bad}, sink)
+                with self.assertLogs("METIS.pythia", "WARNING"):
+                    out, ack = pythia._split_verbatim({"verbatim": bad}, sink)
                 self.assertTrue(out["error"].startswith("tool_failed: "))
                 self.assertIsNone(ack)
         sink.assert_not_called()

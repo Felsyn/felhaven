@@ -104,7 +104,9 @@ class TestPersistence(unittest.TestCase):
     def test_garbled_file_falls_back_instead_of_raising(self):
         with open(voices._DATA_PATH, "w", encoding="utf-8") as f:
             f.write("{not json at all")
-        self.assertEqual(voices.pythia_voice(), voices.default())
+        with self.assertLogs("METIS.voices", "WARNING") as logs:
+            self.assertEqual(voices.pythia_voice(), voices.default())
+        self.assertIn("config unreadable", logs.output[0])
 
     def test_non_dict_json_falls_back(self):
         with open(voices._DATA_PATH, "w", encoding="utf-8") as f:

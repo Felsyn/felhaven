@@ -642,6 +642,13 @@ marker. Keeping a tool off the LLM surface means keeping it out of
   date it was measured. *(2026-09-16.)*
 - **Test the degraded paths**, not just the happy one: `None` from Kairos, a
   missing binary/key, an empty config, a single failed feed.
+- **A test that causes a warning catches it.** Wrap the call in
+  `self.assertLogs("METIS.<module>", "WARNING")`: the warning becomes something
+  the test checks, and a failure that never actually fired fails the test
+  instead of passing it. A passing run prints only its dots and the summary;
+  anything else is a bug to fix, not noise to scroll past. A test that sets up
+  logging itself sends `sys.stderr` to a buffer, and a test that destroys a Tk
+  root cancels its pending `after()` calls first. *(2026-11-26.)*
 - **Guard invariants in lockstep, never with a hardcoded count.** A count rots
   red for the wrong reason. Assert that two live sources agree — the shipped
   config against the code defaults, `TOOLS` against `_DISPATCH`, the docs against
@@ -3988,3 +3995,19 @@ and when, one line per change, so a decision worth keeping must be written here.
   their files, so "until the owner's files are sealed" was the wrong trigger.
   The owner set a date instead: the SHA-256 readers go on 2026-12-01, and the
   README's V0.03 note tells people to convert before then.
+- **The test run prints nothing: each expected warning is caught in its own
+  test.** A passing run printed about 360 lines, from some 180 tests in 34
+  files that make something fail on purpose and let the warning reach the
+  console (only Themis's were caught, 2026-11-24). Each of those calls now
+  sits inside `assertLogs` (§10). One NullHandler for the whole run was the
+  one-line alternative, declined because it would also hide the warning
+  nobody expected, which is what the console is for. The change found a
+  hollow test straight away: once the Home panel's poll helper required its
+  traceback, the queue-tick test failed, because with no queue window open
+  `_tick_queue` returns before the call it patched, so it had been passing
+  without its failure ever happening. It opens a window now. Two sources
+  weren't log records: the logging tests send `sys.stderr` to a buffer
+  (`setup_logging`'s console handler and its own failure prints), and the
+  Sphynx panel tests cancel the panel's pending `after()` calls before
+  destroying it (Tcl printed "invalid command name …_start" into a later
+  test). *(2026-11-26.)*

@@ -342,13 +342,15 @@ class TestOldPinFile(_Base):
 
     def test_status_says_which_form(self):
         out = io.StringIO()
-        with redirect_stdout(out):
-            cerberus.main(["status"])
+        with self.assertLogs("METIS.cerberus", "WARNING"):
+            with redirect_stdout(out):
+                cerberus.main(["status"])
         self.assertIn("PIN:     set\n", out.getvalue())
         self._write_old()
         out = io.StringIO()
-        with redirect_stdout(out):
-            cerberus.main(["status"])
+        with self.assertLogs("METIS.cerberus", "WARNING"):
+            with redirect_stdout(out):
+                cerberus.main(["status"])
         self.assertIn("old form", out.getvalue())
 
 

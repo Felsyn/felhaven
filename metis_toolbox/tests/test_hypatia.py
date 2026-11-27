@@ -131,18 +131,22 @@ class TestDegradedPaths(unittest.TestCase):
             hypatia._active_preset = "current"
 
     def test_missing_stars_file_returns_empty_dict(self):
-        self.assertEqual(hypatia._load_stars("Z:/does/not/exist.json"), {})
+        with self.assertLogs("METIS.hypatia", "WARNING"):
+            self.assertEqual(hypatia._load_stars("Z:/does/not/exist.json"), {})
 
     def test_missing_constellations_file_returns_empty_list(self):
-        self.assertEqual(hypatia._load_constellations("Z:/does/not/exist.json"), [])
+        with self.assertLogs("METIS.hypatia", "WARNING"):
+            self.assertEqual(hypatia._load_constellations("Z:/does/not/exist.json"), [])
 
     def test_missing_lore_file_returns_empty_dict(self):
-        self.assertEqual(hypatia._load_lore("Z:/does/not/exist.json"), {})
+        with self.assertLogs("METIS.hypatia", "WARNING"):
+            self.assertEqual(hypatia._load_lore("Z:/does/not/exist.json"), {})
 
     def test_missing_lore_defaults_constellation_to_empty_string(self):
         # Same expression the module-load merge uses (lore.get(abbr, "")) —
         # with an empty lore dict every constellation must fall back to "".
-        empty_lore = hypatia._load_lore("Z:/does/not/exist.json")
+        with self.assertLogs("METIS.hypatia", "WARNING"):
+            empty_lore = hypatia._load_lore("Z:/does/not/exist.json")
         for con in hypatia._CONSTELLATIONS[:5]:
             self.assertEqual(empty_lore.get(con["abbr"], ""), "")
 

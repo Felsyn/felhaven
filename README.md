@@ -18,6 +18,20 @@ assistant, "Metis", was retired — the toolbox is typed-in, optionally spoken-b
 
 ---
 
+## A look around
+
+![Home: Pythia answers a weather question using two tools, with the token and tool tally under her answer](docs/screenshots/home.png)
+
+| Atmospherics | Celestarium | Scriptorium |
+|---|---|---|
+| ![Atmospherics: current conditions under a live Weather Service warning](docs/screenshots/atmospherics.png) | ![Celestarium: the zenith star map with constellation lines and observing conditions](docs/screenshots/celestarium.png) | ![Scriptorium: one river of headlines across the feeds, newest first](docs/screenshots/scriptorium.png) |
+| Conditions, forecast and warnings | Tonight's sky overhead | Every feed in one river |
+
+<sub>Captured 2026-11-27 from V0.03, with a demo location. Older shots may
+not match the current look.</sub>
+
+---
+
 ## V0.03 hotfix: the PIN files convert themselves (2026-11-26)
 
 The Sphynx and Cerberus PIN checks moved from a fast SHA-256 hash to scrypt,

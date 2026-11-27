@@ -105,18 +105,21 @@ class TestDecode(unittest.TestCase):
     def test_nonzero_exit_is_none(self):
         with mock.patch("tools.orpheus.subprocess.run",
                         return_value=_FakeProc(1, stderr=b"boom")):
-            self.assertIsNone(orpheus._decode("ffmpeg", _IN))
+            with self.assertLogs("METIS.orpheus", "WARNING"):
+                self.assertIsNone(orpheus._decode("ffmpeg", _IN))
 
     def test_empty_output_is_none(self):
         with mock.patch("tools.orpheus.subprocess.run",
                         return_value=_FakeProc(0, stdout=b"")):
-            self.assertIsNone(orpheus._decode("ffmpeg", _IN))
+            with self.assertLogs("METIS.orpheus", "WARNING"):
+                self.assertIsNone(orpheus._decode("ffmpeg", _IN))
 
     def test_timeout_is_none(self):
         import subprocess
         with mock.patch("tools.orpheus.subprocess.run",
                         side_effect=subprocess.TimeoutExpired("ffmpeg", 1)):
-            self.assertIsNone(orpheus._decode("ffmpeg", _IN))
+            with self.assertLogs("METIS.orpheus", "WARNING"):
+                self.assertIsNone(orpheus._decode("ffmpeg", _IN))
 
     def test_a_path_that_isnt_absolute_never_reaches_ffmpeg(self):
         # The fake ffmpeg would SUCCEED, so only the refusal can make this None.
@@ -125,7 +128,8 @@ class TestDecode(unittest.TestCase):
             with self.subTest(path=path), \
                     mock.patch("tools.orpheus.subprocess.run",
                                return_value=_FakeProc(0, stdout=raw)) as run:
-                self.assertIsNone(orpheus._decode("ffmpeg", path))
+                with self.assertLogs("METIS.orpheus", "WARNING"):
+                    self.assertIsNone(orpheus._decode("ffmpeg", path))
                 run.assert_not_called()
 
 
@@ -199,13 +203,15 @@ class TestProbeDuration(unittest.TestCase):
     def test_no_duration_line_is_none(self):
         with mock.patch("tools.orpheus.subprocess.run",
                         return_value=_FakeProc(1, stderr=b"nothing useful here")):
-            self.assertIsNone(orpheus._probe_duration("ffmpeg", _X))
+            with self.assertLogs("METIS.orpheus", "WARNING"):
+                self.assertIsNone(orpheus._probe_duration("ffmpeg", _X))
 
     def test_timeout_is_none(self):
         import subprocess
         with mock.patch("tools.orpheus.subprocess.run",
                         side_effect=subprocess.TimeoutExpired("ffmpeg", 1)):
-            self.assertIsNone(orpheus._probe_duration("ffmpeg", _X))
+            with self.assertLogs("METIS.orpheus", "WARNING"):
+                self.assertIsNone(orpheus._probe_duration("ffmpeg", _X))
 
     def test_a_path_that_isnt_absolute_never_reaches_ffmpeg(self):
         # The fake ffmpeg would SUCCEED, so only the refusal can make this None.
@@ -214,7 +220,8 @@ class TestProbeDuration(unittest.TestCase):
             with self.subTest(path=path), \
                     mock.patch("tools.orpheus.subprocess.run",
                                return_value=_FakeProc(1, stderr=stderr)) as run:
-                self.assertIsNone(orpheus._probe_duration("ffmpeg", path))
+                with self.assertLogs("METIS.orpheus", "WARNING"):
+                    self.assertIsNone(orpheus._probe_duration("ffmpeg", path))
                 run.assert_not_called()
 
 
@@ -329,10 +336,11 @@ class TestDeleteFile(unittest.TestCase):
             open(os.path.join(tmp, "real.opus"), "wb").close()
             with mock.patch.object(orpheus, "_LOCAL_AUDIO_DIR", tmp), \
                     mock.patch.object(orpheus, "_send_to_recycle_bin") as recycle:
-                for bad in ("../real.opus", "..\\real.opus", "sub/real.opus",
-                            "/real.opus", "", "nope.opus"):
-                    self.assertEqual(orpheus.delete_file(bad), {"error": "bad_name"},
-                                     f"{bad!r} should be refused")
+                with self.assertLogs("METIS.orpheus", "WARNING"):
+                    for bad in ("../real.opus", "..\\real.opus", "sub/real.opus",
+                                "/real.opus", "", "nope.opus"):
+                        self.assertEqual(orpheus.delete_file(bad), {"error": "bad_name"},
+                                         f"{bad!r} should be refused")
                 recycle.assert_not_called()
 
     def test_success_recycles_the_absolute_path(self):
@@ -387,13 +395,15 @@ class TestSendToRecycleBin(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "win32", "SHFileOperationW is Windows-only")
     def test_nonzero_return_is_false_not_an_exception(self):
         with mock.patch("ctypes.windll.shell32.SHFileOperationW", return_value=124):
-            self.assertFalse(orpheus._send_to_recycle_bin("C:\\nope\\a.opus"))
+            with self.assertLogs("METIS.orpheus", "WARNING"):
+                self.assertFalse(orpheus._send_to_recycle_bin("C:\\nope\\a.opus"))
 
     @unittest.skipUnless(sys.platform == "win32", "SHFileOperationW is Windows-only")
     def test_oserror_is_swallowed(self):
         with mock.patch("ctypes.windll.shell32.SHFileOperationW",
                         side_effect=OSError("boom")):
-            self.assertFalse(orpheus._send_to_recycle_bin("C:\\nope\\a.opus"))
+            with self.assertLogs("METIS.orpheus", "WARNING"):
+                self.assertFalse(orpheus._send_to_recycle_bin("C:\\nope\\a.opus"))
 
 
 class TestFetch(_ScratchAudio):

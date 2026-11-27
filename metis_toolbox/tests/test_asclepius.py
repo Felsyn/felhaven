@@ -73,15 +73,17 @@ class TestOnePart(_Patched):
 
     def test_a_raising_part_is_unavailable_not_a_crash(self):
         self.network.side_effect = OSError("netsh exploded at C:\\secret")
-        out = asclepius.handle("network")
+        with self.assertLogs("METIS.asclepius", "WARNING"):
+            out = asclepius.handle("network")
         self.assertTrue(out["error"].startswith("unavailable: "))
         self.assertIn("OSError", out["error"])
         self.assertNotIn("secret", out["error"])   # the message stays in the log
 
     def test_a_part_that_returns_no_dict_is_unavailable(self):
         self.online.return_value = None
-        self.assertTrue(asclepius.handle("online")["error"]
-                        .startswith("unavailable: "))
+        with self.assertLogs("METIS.asclepius", "WARNING"):
+            self.assertTrue(asclepius.handle("online")["error"]
+                            .startswith("unavailable: "))
 
     def test_a_part_outside_the_enum_is_unknown_action(self):
         out = asclepius.handle("cpu")
@@ -110,14 +112,16 @@ class TestAll(_Patched):
         # The part's own words, not a generic "failed": they are what the
         # model can repeat to the user.
         self.vitals.side_effect = RuntimeError("boom")
-        out = asclepius.handle("all")
+        with self.assertLogs("METIS.asclepius", "WARNING"):
+            out = asclepius.handle("all")
         self.assertEqual(out["vitals"], "unavailable: vitals raised RuntimeError")
 
     def test_every_part_failed_is_an_error(self):
         self.vitals.return_value = {"error": "unavailable: vitals read raised OSError"}
         self.online.side_effect = ValueError("x")
         self.network.return_value = {"error": "unavailable: network snapshot raised OSError"}
-        out = asclepius.handle("all")
+        with self.assertLogs("METIS.asclepius", "WARNING"):
+            out = asclepius.handle("all")
         self.assertEqual(set(out), {"error"})
         self.assertTrue(out["error"].startswith("unavailable: "))
         self.assertIn("vitals read raised OSError", out["error"])
@@ -125,7 +129,8 @@ class TestAll(_Patched):
 
     def test_colliding_keys_nest_instead_of_overwriting(self):
         self.network.return_value = {"uptime_s": 1, "established": 2}
-        out = asclepius.handle("all")
+        with self.assertLogs("METIS.asclepius", "WARNING"):
+            out = asclepius.handle("all")
         self.assertEqual(out["uptime_s"], 3600)        # vitals' value kept
         self.assertEqual(out["network"], {"uptime_s": 1, "established": 2})
 
@@ -154,7 +159,8 @@ class TestRegistration(unittest.TestCase):
         self.assertEqual(part["enum"], ["vitals", "online", "network", "all"])
 
     def test_the_gate_refuses_a_call_with_no_part(self):
-        out = pythia._dispatch("get_machine_status", {})
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            out = pythia._dispatch("get_machine_status", {})
         self.assertTrue(out["error"].startswith("bad_arguments"))
 
     def test_nothing_points_at_anthropic(self):

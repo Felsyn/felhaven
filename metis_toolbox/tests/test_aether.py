@@ -67,13 +67,15 @@ class TestCheckWifi(unittest.TestCase):
             self.assertEqual(aether._check_wifi(), "unknown")
 
     def test_netsh_missing_is_unknown(self):
-        with mock.patch("subprocess.run", side_effect=OSError("netsh not found")):
-            self.assertEqual(aether._check_wifi(), "unknown")
+        with self.assertLogs("METIS.aether", "WARNING"):
+            with mock.patch("subprocess.run", side_effect=OSError("netsh not found")):
+                self.assertEqual(aether._check_wifi(), "unknown")
 
     def test_netsh_timeout_is_unknown(self):
-        with mock.patch("subprocess.run",
-                        side_effect=subprocess.TimeoutExpired("netsh", 2)):
-            self.assertEqual(aether._check_wifi(), "unknown")
+        with self.assertLogs("METIS.aether", "WARNING"):
+            with mock.patch("subprocess.run",
+                            side_effect=subprocess.TimeoutExpired("netsh", 2)):
+                self.assertEqual(aether._check_wifi(), "unknown")
 
     def test_netsh_runs_by_its_absolute_system32_path(self):
         # A bare "netsh" runs a netsh.exe from the working folder before
@@ -136,8 +138,9 @@ class TestCheckInternet(unittest.TestCase):
             self.assertEqual(aether._check_internet(), "unknown")
 
     def test_anything_else_is_unknown(self):
-        with mock.patch("tools.aether.hermes.get", side_effect=RuntimeError("odd")):
-            self.assertEqual(aether._check_internet(), "unknown")
+        with self.assertLogs("METIS.aether", "WARNING"):
+            with mock.patch("tools.aether.hermes.get", side_effect=RuntimeError("odd")):
+                self.assertEqual(aether._check_internet(), "unknown")
 
 
 class TestCheckOllama(unittest.TestCase):
@@ -162,8 +165,9 @@ class TestCheckOllama(unittest.TestCase):
     def test_an_odd_answer_is_unknown(self):
         with mock.patch("tools.aether.hermes.get", return_value=_http(500, "")):
             self.assertEqual(aether._check_ollama(), "unknown")
-        with mock.patch("tools.aether.hermes.get", side_effect=hermes.Timeout("slow")):
-            self.assertEqual(aether._check_ollama(), "unknown")
+        with self.assertLogs("METIS.aether", "WARNING"):
+            with mock.patch("tools.aether.hermes.get", side_effect=hermes.Timeout("slow")):
+                self.assertEqual(aether._check_ollama(), "unknown")
 
     def test_it_asks_the_same_ollama_pythia_talks_to(self):
         # tools/ must not import the brain, so the address is derived twice —
@@ -192,9 +196,10 @@ class TestHandleContract(unittest.TestCase):
         # The real never-raise guarantee: handle() does not wrap the probes — it
         # relies on them fail-safing. With every I/O layer raising something
         # unexpected, handle() must still answer and never propagate.
-        with mock.patch("subprocess.run", side_effect=OSError("no netsh")), \
-                mock.patch("tools.aether.hermes.get", side_effect=RuntimeError("no network")):
-            out = aether.handle()
+        with self.assertLogs("METIS.aether", "WARNING"):
+            with mock.patch("subprocess.run", side_effect=OSError("no netsh")), \
+                    mock.patch("tools.aether.hermes.get", side_effect=RuntimeError("no network")):
+                out = aether.handle()
         self.assertEqual(out, {"wifi": "unknown", "internet": "unknown",
                                "ollama": "unknown"})
 

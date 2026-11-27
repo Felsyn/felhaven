@@ -397,7 +397,8 @@ class TestTimelineFile(_FakedSeams):
                 {"t": 1.0, "event": "opened", "proc": "a", "raddr": "b"},
                 {"t": 1.0, "event": "close", "proc": None, "raddr": "b"}]
         self._write(junk + [self._EVENT])
-        argus._load_timeline()
+        with self.assertLogs("METIS.argus", "WARNING"):
+            argus._load_timeline()
         self.assertEqual(list(argus._timeline), [self._EVENT])
 
     def test_a_file_holding_no_list_loads_nothing(self):
@@ -405,7 +406,8 @@ class TestTimelineFile(_FakedSeams):
             with self.subTest(data=data):
                 argus._timeline.clear()
                 self._write(data)
-                argus._load_timeline()
+                with self.assertLogs("METIS.argus", "WARNING"):
+                    argus._load_timeline()
                 self.assertEqual(list(argus._timeline), [])
 
 
@@ -480,9 +482,10 @@ class TestHandleContract(unittest.TestCase):
     def test_handle_never_raises_on_snapshot_failure(self):
         # fetch() raising wholesale (the net_connections() case) must degrade to
         # a §2 slug, not propagate — the model can recover from a dict.
-        with mock.patch.object(argus, "fetch",
-                               side_effect=OSError("net table gone")):
-            out = argus.handle()
+        with self.assertLogs("METIS.argus", "WARNING"):
+            with mock.patch.object(argus, "fetch",
+                                   side_effect=OSError("net table gone")):
+                out = argus.handle()
         self.assertEqual(out, {"error": "unavailable: network snapshot raised OSError"})
 
     def test_a_cache_argus_could_not_read_has_no_count(self):

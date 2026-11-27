@@ -100,14 +100,16 @@ class TestWaypoints(unittest.TestCase):
     def test_malformed_file_is_empty(self):
         with open(eratosthenes._WAYPOINTS_PATH, "w", encoding="utf-8") as fh:
             fh.write("{not json")
-        self.assertEqual(eratosthenes.waypoints(), [])
+        with self.assertLogs("METIS.eratosthenes", "WARNING"):
+            self.assertEqual(eratosthenes.waypoints(), [])
 
     def test_bad_entries_are_skipped_not_fatal(self):
         self._write([{"name": "HOME", "lat": 39.4, "lon": -80.3},
                      {"name": "BROKEN"},
                      {"lat": 1.0, "lon": 2.0},
                      "nonsense"])
-        saved = eratosthenes.waypoints()
+        with self.assertLogs("METIS.eratosthenes", "WARNING"):
+            saved = eratosthenes.waypoints()
         self.assertEqual([e["name"] for e in saved], ["HOME"])
 
     def test_resolve_finds_a_waypoint_case_insensitively(self):
@@ -142,10 +144,11 @@ class TestWaypoints(unittest.TestCase):
             with self.subTest(lat=lat, lon=lon):
                 self._write([{"name": "HOME", "lat": 39.4, "lon": -80.3},
                              {"name": "ODD", "lat": lat, "lon": lon}])
-                self.assertEqual([e["name"] for e in eratosthenes.waypoints()], ["HOME"])
-                with mock.patch("tools.eratosthenes._geocode",
-                                return_value={"error": "no_results"}):
-                    self.assertEqual(eratosthenes.resolve("odd"), {"error": "no_results"})
+                with self.assertLogs("METIS.eratosthenes", "WARNING"):
+                    self.assertEqual([e["name"] for e in eratosthenes.waypoints()], ["HOME"])
+                    with mock.patch("tools.eratosthenes._geocode",
+                                    return_value={"error": "no_results"}):
+                        self.assertEqual(eratosthenes.resolve("odd"), {"error": "no_results"})
 
 
 def _Resp(payload, status=200):

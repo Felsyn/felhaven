@@ -163,7 +163,8 @@ class TestTheAnswer(_IrisCase):
         bad = _feature("Flood Warning")
         bad["properties"]["id"] = ""
         self.reply = _Reply(_collection(bad, _feature("Wind Advisory")))
-        self.assertEqual([a["event"] for a in iris.fetch()["alerts"]], ["Wind Advisory"])
+        with self.assertLogs("METIS.iris", "WARNING"):
+            self.assertEqual([a["event"] for a in iris.fetch()["alerts"]], ["Wind Advisory"])
 
 
 class TestTiersAndOrder(_IrisCase):

@@ -758,8 +758,9 @@ class TestMusicEvidence(_EuterpeCase):
 
     def test_a_malformed_denylist_falls_back_to_the_default(self):
         self._write_config(not_music_categories="Education")
-        self.assertEqual(euterpe.not_music_categories(),
-                         euterpe._DEFAULT_NOT_MUSIC_CATEGORIES)
+        with self.assertLogs("METIS.euterpe", "WARNING"):
+            self.assertEqual(euterpe.not_music_categories(),
+                             euterpe._DEFAULT_NOT_MUSIC_CATEGORIES)
 
 
 class TestIsASong(_EuterpeCase):
@@ -1006,8 +1007,9 @@ class TestAtomicWrite(_EuterpeCase):
     def test_the_write_replaces_rather_than_truncating(self):
         """os.replace on a same-directory temp file is what makes this atomic —
         a plain open(path, "w") would empty the real file before writing."""
-        with mock.patch("tools.euterpe.os.replace") as replace:
-            self._play("Artist - Song")
+        with self.assertLogs("METIS.euterpe", "WARNING"):
+            with mock.patch("tools.euterpe.os.replace") as replace:
+                self._play("Artist - Song")
         replace.assert_called_once()
         source, destination = replace.call_args[0]
         self.assertEqual(os.path.dirname(source), os.path.dirname(destination))

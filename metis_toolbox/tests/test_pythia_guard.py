@@ -148,11 +148,12 @@ class TestFetchPageOpensOnlyUrlsTheUserOrASearchSupplied(_GuardCase):
         self.assertSlug(rec, "untrusted_url")
 
     def test_the_refusal_reaches_the_model_so_it_can_recover(self):
-        with mock.patch("pythia.requests.post",
-                        side_effect=[_tool_round("fetch_page",
-                                                 {"url": "https://made.up/"}),
-                                     _final("I need a link.")]) as post:
-            pythia.ask("read something")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post",
+                            side_effect=[_tool_round("fetch_page",
+                                                     {"url": "https://made.up/"}),
+                                         _final("I need a link.")]) as post:
+                pythia.ask("read something")
         second = post.call_args_list[1].kwargs["json"]["messages"]
         tool_msgs = [m for m in second if m.get("role") == "tool"]
         self.assertIn("untrusted_url", tool_msgs[0]["content"])
@@ -233,7 +234,8 @@ class TestFetchPageOpensOnlyUrlsTheUserOrASearchSupplied(_GuardCase):
 
     def test_no_turn_behind_a_direct_dispatch_means_refused(self):
         # _dispatch with no guard is a caller that skipped ask(): fail closed.
-        out = pythia._dispatch("fetch_page", {"url": "https://example.org/"})
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            out = pythia._dispatch("fetch_page", {"url": "https://example.org/"})
         self.assertTrue(out["error"].startswith("untrusted_url: "))
         self.fetch.assert_not_called()
 
@@ -315,10 +317,11 @@ class TestFileChangesWaitForTheUsersYes(_GuardCase):
         def answer_after_stop(request):
             cancel.set()                         # the user pressed Stop…
             return True                          # …and the yes arrived anyway
-        with mock.patch("pythia.requests.post",
-                        side_effect=[_tool_round("write_document", self._WRITE),
-                                     _final()]):
-            pythia.ask("save", cancel=cancel, on_confirm=answer_after_stop)
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post",
+                            side_effect=[_tool_round("write_document", self._WRITE),
+                                         _final()]):
+                pythia.ask("save", cancel=cancel, on_confirm=answer_after_stop)
         self.write.assert_not_called()
 
     def test_the_user_is_shown_the_cleaned_arguments_that_will_run(self):

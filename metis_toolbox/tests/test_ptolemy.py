@@ -67,27 +67,31 @@ class TestMerge(_Patched):
 
     def test_a_raising_part_is_unavailable_not_a_crash(self):
         self.moon.side_effect = ZeroDivisionError("math at C:\\secret")
-        out = ptolemy.handle()
+        with self.assertLogs("METIS.ptolemy", "WARNING"):
+            out = ptolemy.handle()
         self.assertEqual(out["moon"], "unavailable: moon raised ZeroDivisionError")
         self.assertNotIn("secret", str(out))           # the message stays in the log
         self.assertEqual(out["sunrise"], _SUN["sunrise"])
 
     def test_a_part_that_returns_no_dict_is_unavailable(self):
         self.sun.return_value = None
-        self.assertTrue(ptolemy.handle()["sun"].startswith("unavailable: "))
+        with self.assertLogs("METIS.ptolemy", "WARNING"):
+            self.assertTrue(ptolemy.handle()["sun"].startswith("unavailable: "))
 
     def test_every_part_failed_is_an_error(self):
         self.sun.return_value = {"error": "unavailable: sun computation raised ValueError"}
         self.moon.side_effect = ValueError("x")
         self.sky.return_value = {"error": "unavailable: sky snapshot raised RuntimeError"}
-        out = ptolemy.handle()
+        with self.assertLogs("METIS.ptolemy", "WARNING"):
+            out = ptolemy.handle()
         self.assertEqual(set(out), {"error"})
         self.assertTrue(out["error"].startswith("unavailable: "))
         self.assertIn("sky: unavailable: sky snapshot raised RuntimeError", out["error"])
 
     def test_colliding_keys_nest_instead_of_overwriting(self):
         self.sky.return_value = {"sunset": "never", "preset": "current"}
-        out = ptolemy.handle()
+        with self.assertLogs("METIS.ptolemy", "WARNING"):
+            out = ptolemy.handle()
         self.assertEqual(out["sunset"], _SUN["sunset"])   # Helios's value kept
         self.assertEqual(out["sky"], {"sunset": "never", "preset": "current"})
 
@@ -131,7 +135,8 @@ class TestRegistration(unittest.TestCase):
     def test_it_takes_no_arguments(self):
         params = ptolemy.TOOL_DEFINITION["function"]["parameters"]
         self.assertEqual(params["properties"], {})
-        out = pythia._dispatch("get_sky_report", {"part": "sun"})
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            out = pythia._dispatch("get_sky_report", {"part": "sun"})
         self.assertTrue(out["error"].startswith("bad_arguments"))
 
 

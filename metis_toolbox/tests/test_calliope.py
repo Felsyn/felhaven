@@ -98,8 +98,9 @@ class TestConfigDefaults(_CalliopeBase):
     def test_config_absent_still_yields_a_loadable_model_path(self):
         # The fail-soft path: no config at all must still name the model that
         # ships on disk, not a retired one.
-        with mock.patch.object(calliope, "_CONFIG_FILE", Path("no-such-config.json")):
-            cfg = calliope._load_config()
+        with self.assertLogs("METIS.calliope", "WARNING"):
+            with mock.patch.object(calliope, "_CONFIG_FILE", Path("no-such-config.json")):
+                cfg = calliope._load_config()
         self.assertEqual(cfg["model_path"], self._shipped()["model_path"])
 
 
@@ -210,8 +211,9 @@ class TestSynthesize(_CalliopeBase):
     def test_synthesis_error_degrades_to_none(self):
         broken = mock.Mock()
         broken.create.side_effect = RuntimeError("onnx blew up")
-        with mock.patch("calliope._load_model", return_value=broken):
-            self.assertIsNone(calliope.synthesize("boom"))   # must not raise
+        with self.assertLogs("METIS.calliope", "WARNING"):
+            with mock.patch("calliope._load_model", return_value=broken):
+                self.assertIsNone(calliope.synthesize("boom"))   # must not raise
 
 
 class TestNarrationVoice(_CalliopeBase):

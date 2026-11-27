@@ -104,8 +104,9 @@ class TestPythiaRegistry(unittest.TestCase):
         def _boom(**_):
             raise RuntimeError(secret)
 
-        with mock.patch.dict(pythia._DISPATCH, {"boom": _boom}):
-            out = pythia._dispatch("boom", {})
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch.dict(pythia._DISPATCH, {"boom": _boom}):
+                out = pythia._dispatch("boom", {})
         self.assertTrue(out["error"].startswith("tool_failed:"), out["error"])
         self.assertIn("RuntimeError", out["error"])       # class name is useful
         self.assertNotIn("SUPERSECRET123", out["error"])  # message is not leaked
@@ -207,9 +208,10 @@ class TestPythiaAsk(unittest.TestCase):
         # message, so a caller that persists turn_messages always gets a
         # well-formed user->assistant exchange, never a dangling user message.
         events = []
-        with mock.patch("pythia.requests.post",
-                        side_effect=requests.ConnectionError()):
-            out = pythia.ask("hi", on_event=events.append)
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post",
+                            side_effect=requests.ConnectionError()):
+                out = pythia.ask("hi", on_event=events.append)
 
         turn = events[0]["turn_messages"]
         self.assertEqual(turn[0], {"role": "user", "content": "hi"})
@@ -217,30 +219,34 @@ class TestPythiaAsk(unittest.TestCase):
         self.assertEqual(turn[-1]["content"], out)
 
     def test_connection_error_is_friendly(self):
-        with mock.patch("pythia.requests.post",
-                        side_effect=requests.ConnectionError()):
-            out = pythia.ask("hi")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post",
+                            side_effect=requests.ConnectionError()):
+                out = pythia.ask("hi")
         self.assertIn("unreachable", out.lower())
 
     def test_timeout_is_friendly(self):
-        with mock.patch("pythia.requests.post", side_effect=requests.Timeout()):
-            out = pythia.ask("hi")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post", side_effect=requests.Timeout()):
+                out = pythia.ask("hi")
         self.assertIn("timed out", out.lower())
 
     def test_empty_content_does_not_return_blank(self):
         # Two empty rounds: the first is retried, the second exhausts the budget.
-        with mock.patch("pythia.requests.post",
-                        side_effect=[_stream(_final("")), _stream(_final(""))]):
-            out = pythia.ask("hi")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post",
+                            side_effect=[_stream(_final("")), _stream(_final(""))]):
+                out = pythia.ask("hi")
         self.assertTrue(out.strip())      # readable line, never an empty string
         self.assertNotIn("(no answer)", out)   # and never a bare placeholder
 
     def test_empty_reply_is_retried_and_the_retry_wins(self):
         # gemma4:e2b sometimes ends a turn with no content at all.
-        with mock.patch("pythia.requests.post",
-                        side_effect=[_stream(_final("")),
-                                     _stream(_final("the real answer"))]) as post:
-            out = pythia.ask("hi")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post",
+                            side_effect=[_stream(_final("")),
+                                         _stream(_final("the real answer"))]) as post:
+                out = pythia.ask("hi")
         self.assertEqual(out, "the real answer")
         self.assertEqual(post.call_count, 2)
 
@@ -256,8 +262,9 @@ class TestPythiaAsk(unittest.TestCase):
             sent.append([dict(m) for m in kwargs["json"]["messages"]])
             return streams.pop(0)
 
-        with mock.patch("pythia.requests.post", side_effect=_post):
-            pythia.ask("hi")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post", side_effect=_post):
+                pythia.ask("hi")
 
         self.assertEqual(sent[1][-1]["content"], pythia._BLANK_NUDGE)
         # ...and the empty assistant turn is gone from the retry's context.
@@ -267,10 +274,11 @@ class TestPythiaAsk(unittest.TestCase):
         # The error handlers still emit turn_messages, so a nudged round that
         # dies mid-flight must not leave the synthetic message behind.
         events: list[dict] = []
-        with mock.patch("pythia.requests.post",
-                        side_effect=[_stream(_final("")),
-                                     requests.ConnectionError()]):
-            pythia.ask("hi", on_event=events.append)
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post",
+                            side_effect=[_stream(_final("")),
+                                         requests.ConnectionError()]):
+                pythia.ask("hi", on_event=events.append)
         contents = [m.get("content") for m in events[0]["turn_messages"]]
         self.assertNotIn(pythia._BLANK_NUDGE, contents)
 
@@ -278,9 +286,10 @@ class TestPythiaAsk(unittest.TestCase):
         # turn_messages is persisted as history — a user message the user never
         # typed must not end up in it.
         events: list[dict] = []
-        with mock.patch("pythia.requests.post",
-                        side_effect=[_stream(_final("")), _stream(_final("answer"))]):
-            pythia.ask("hi", on_event=events.append)
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post",
+                            side_effect=[_stream(_final("")), _stream(_final("answer"))]):
+                pythia.ask("hi", on_event=events.append)
         contents = [m.get("content") for m in events[0]["turn_messages"]]
         self.assertNotIn(pythia._BLANK_NUDGE, contents)
         self.assertEqual(contents, ["hi", "answer"])
@@ -288,9 +297,10 @@ class TestPythiaAsk(unittest.TestCase):
     def test_blank_retry_is_bounded(self):
         # One try plus one retry, then it degrades — it must not burn the whole
         # _MAX_TOOL_ROUNDS budget re-asking a model that keeps going silent.
-        with mock.patch("pythia.requests.post",
-                        side_effect=[_stream(_final("")) for _ in range(5)]) as post:
-            pythia.ask("hi")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post",
+                            side_effect=[_stream(_final("")) for _ in range(5)]) as post:
+                pythia.ask("hi")
         self.assertEqual(post.call_count, 1 + pythia._MAX_BLANK_RETRIES)
 
     def test_empty_turn_never_reaches_turn_messages(self):
@@ -298,19 +308,21 @@ class TestPythiaAsk(unittest.TestCase):
         # turn left in place would teach the model that a blank reply is a valid
         # turn — the transcript-imitation trap documented in home_panel.py.
         events: list[dict] = []
-        with mock.patch("pythia.requests.post",
-                        side_effect=[_stream(_final("")),
-                                     _stream(_final("real answer"))]):
-            pythia.ask("hi", on_event=events.append)
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post",
+                            side_effect=[_stream(_final("")),
+                                         _stream(_final("real answer"))]):
+                pythia.ask("hi", on_event=events.append)
         contents = [m.get("content") for m in events[0]["turn_messages"]]
         self.assertEqual(contents, ["hi", "real answer"])
 
     def test_degraded_blank_answer_is_what_gets_persisted(self):
         # When it stays silent, history must show the line the user actually saw.
         events: list[dict] = []
-        with mock.patch("pythia.requests.post",
-                        side_effect=[_stream(_final("")), _stream(_final(""))]):
-            out = pythia.ask("hi", on_event=events.append)
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post",
+                            side_effect=[_stream(_final("")), _stream(_final(""))]):
+                out = pythia.ask("hi", on_event=events.append)
         contents = [m.get("content") for m in events[0]["turn_messages"]]
         self.assertEqual(contents, ["hi", out])
 
@@ -327,8 +339,9 @@ class TestPythiaAsk(unittest.TestCase):
             return streams.pop(0)
 
         deltas: list[str] = []
-        with mock.patch("pythia.requests.post", side_effect=_post):
-            out = pythia.ask("when is sunset?", on_delta=deltas.append)
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post", side_effect=_post):
+                out = pythia.ask("when is sunset?", on_delta=deltas.append)
 
         self.assertEqual(out, "Sunset is 8:41pm.")
         self.assertNotIn("First I should", out)
@@ -382,9 +395,10 @@ class TestPythiaAsk(unittest.TestCase):
 
     def test_chat_reports_thinking_chars_in_round_stats(self):
         # ask() reads this to explain WHY a round came back empty.
-        with mock.patch("pythia.requests.post",
-                        return_value=_stream(_final_thinking("abcde"))):
-            reply, stats = pythia._chat([{"role": "user", "content": "hi"}])
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post",
+                            return_value=_stream(_final_thinking("abcde"))):
+                reply, stats = pythia._chat([{"role": "user", "content": "hi"}])
         self.assertEqual(stats["thinking_chars"], 5)
         self.assertEqual(reply["content"], "")      # and it stayed out of content
         self.assertNotIn("thinking", reply)
@@ -394,8 +408,9 @@ class TestPythiaAsk(unittest.TestCase):
         # surface only the exception's class name — never its raw message, which
         # could carry a path or key onto the screen (§2).
         secret = "SUPERSECRET at C:/keys/finnhub.txt"
-        with mock.patch("pythia.requests.post", side_effect=RuntimeError(secret)):
-            out = pythia.ask("hi")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post", side_effect=RuntimeError(secret)):
+                out = pythia.ask("hi")
         self.assertIn("RuntimeError", out)
         self.assertNotIn("supersecret", out.lower())
 

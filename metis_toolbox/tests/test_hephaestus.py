@@ -86,9 +86,10 @@ class TestFailureContracts(unittest.TestCase):
     """
 
     def test_handle_degrades_and_never_raises(self):
-        with mock.patch("tools.hephaestus.psutil.cpu_percent",
-                        side_effect=OSError("psutil is unhappy")):
-            out = hephaestus.handle()          # must not raise
+        with self.assertLogs("METIS.hephaestus", "WARNING"):
+            with mock.patch("tools.hephaestus.psutil.cpu_percent",
+                            side_effect=OSError("psutil is unhappy")):
+                out = hephaestus.handle()          # must not raise
         # §2's shared word, then the class, never the message's text.
         self.assertEqual(out, {"error": "unavailable: vitals read raised OSError"})
 
@@ -96,14 +97,16 @@ class TestFailureContracts(unittest.TestCase):
         # Every _get_*_status() read is behind the guard, not just the first.
         with _mock_psutil() as m:
             m["virtual_memory"].side_effect = RuntimeError("no memory info")
-            self.assertEqual(hephaestus.handle(),
-                             {"error": "unavailable: vitals read raised RuntimeError"})
+            with self.assertLogs("METIS.hephaestus", "WARNING"):
+                self.assertEqual(hephaestus.handle(),
+                                 {"error": "unavailable: vitals read raised RuntimeError"})
 
     def test_handle_degrades_on_a_storage_failure_too(self):
         with _mock_psutil() as m:
             m["disk_usage"].side_effect = OSError("no such drive")
-            self.assertEqual(hephaestus.handle(),
-                             {"error": "unavailable: vitals read raised OSError"})
+            with self.assertLogs("METIS.hephaestus", "WARNING"):
+                self.assertEqual(hephaestus.handle(),
+                                 {"error": "unavailable: vitals read raised OSError"})
 
     def test_fetch_still_raises_for_kairos(self):
         # Kairos needs the throw: it logs the cause and hands the panel None so

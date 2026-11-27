@@ -50,7 +50,8 @@ class TestOnePlanetFailureDegrades(unittest.TestCase):
         original = kepler._ELEMENTS["Mars"]
         kepler._ELEMENTS["Mars"] = {}   # missing keys -> KeyError inside _radec
         try:
-            out = kepler.positions(1782950400.0, hypatia.HYPATIA_LAT, hypatia.HYPATIA_LON)
+            with self.assertLogs("METIS.kepler", "WARNING"):
+                out = kepler.positions(1782950400.0, hypatia.HYPATIA_LAT, hypatia.HYPATIA_LON)
             names = [p["name"] for p in out]
             self.assertNotIn("Mars", names)
             self.assertEqual(len(out), 4)
@@ -61,7 +62,8 @@ class TestOnePlanetFailureDegrades(unittest.TestCase):
         original = kepler._ELEMENTS
         kepler._ELEMENTS = {}
         try:
-            out = kepler.positions(1782950400.0, hypatia.HYPATIA_LAT, hypatia.HYPATIA_LON)
+            with self.assertLogs("METIS.kepler", "WARNING"):
+                out = kepler.positions(1782950400.0, hypatia.HYPATIA_LAT, hypatia.HYPATIA_LON)
             self.assertEqual(out, [])
         finally:
             kepler._ELEMENTS = original

@@ -205,7 +205,8 @@ class TestAllowlistIsEnforcedAtDispatch(_SeamCase):
     def test_the_refusal_is_a_slug_the_model_can_recover_from(self):
         """§2 shape, so the model can re-pick inside the same turn rather than
         reading prose it has to interpret."""
-        result = pythia._dispatch("control_music", {}, {"play_music"})
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            result = pythia._dispatch("control_music", {}, {"play_music"})
         self.assertIn("error", result)
         slug = result["error"].split(":", 1)[0]
         self.assertRegex(slug, r"^[a-z][a-z0-9_]*$")
@@ -270,7 +271,8 @@ class TestAllowlistIsEnforcedAtDispatch(_SeamCase):
         """Order matters for the message, not just the outcome: a disallowed
         name must read as disallowed, and an unknown one as unknown, or nobody
         debugging an allowlist can tell a typo from a refusal."""
-        refused = pythia._dispatch("control_music", {}, {"play_music"})
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            refused = pythia._dispatch("control_music", {}, {"play_music"})
         unknown = pythia._dispatch("no_such_tool", {}, {"no_such_tool"})
         self.assertIn("tool_not_available", refused["error"])
         self.assertIn("unknown_tool", unknown["error"])
@@ -297,7 +299,8 @@ class TestAllowlistIsEnforcedAtDispatch(_SeamCase):
             handler.assert_not_called()
 
     def test_an_empty_allowlist_refuses_at_the_dispatcher_directly(self):
-        result = pythia._dispatch("play_music", {"query": "x"}, set())
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            result = pythia._dispatch("play_music", {"query": "x"}, set())
         self.assertIn("tool_not_available", result["error"])
 
     def test_no_allowlist_means_no_restriction(self):
@@ -334,22 +337,25 @@ class TestIsBusy(_SeamCase):
 
     def test_the_count_survives_a_connection_error(self):
         import requests
-        with mock.patch("pythia.requests.post",
-                        side_effect=requests.ConnectionError("down")):
-            pythia.ask("hi")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post",
+                            side_effect=requests.ConnectionError("down")):
+                pythia.ask("hi")
         self.assertFalse(pythia.is_busy())
 
     def test_the_count_survives_a_timeout(self):
         import requests
-        with mock.patch("pythia.requests.post",
-                        side_effect=requests.Timeout("slow")):
-            pythia.ask("hi")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post",
+                            side_effect=requests.Timeout("slow")):
+                pythia.ask("hi")
         self.assertFalse(pythia.is_busy())
 
     def test_the_count_survives_an_unexpected_failure(self):
-        with mock.patch("pythia.requests.post",
-                        side_effect=RuntimeError("boom")):
-            pythia.ask("hi")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post",
+                            side_effect=RuntimeError("boom")):
+                pythia.ask("hi")
         self.assertFalse(pythia.is_busy())
 
     def test_the_count_survives_a_cancelled_turn(self):
@@ -412,30 +418,34 @@ class TestDegradedAnswers(_SeamCase):
         self.assertTrue(pythia.is_degraded(answer), answer)
 
     def test_a_model_that_says_nothing_is_degraded(self):
-        with mock.patch("pythia.requests.post",
-                        side_effect=[_stream(_final("")), _stream(_final("")),
-                                     _stream(_final(""))]):
-            answer = pythia.ask("go")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post",
+                            side_effect=[_stream(_final("")), _stream(_final("")),
+                                         _stream(_final(""))]):
+                answer = pythia.ask("go")
         self.assertTrue(pythia.is_degraded(answer), answer)
 
     def test_an_unreachable_ollama_is_degraded(self):
         import requests
-        with mock.patch("pythia.requests.post",
-                        side_effect=requests.ConnectionError("down")):
-            answer = pythia.ask("go")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post",
+                            side_effect=requests.ConnectionError("down")):
+                answer = pythia.ask("go")
         self.assertTrue(pythia.is_degraded(answer), answer)
 
     def test_a_timeout_is_degraded(self):
         import requests
-        with mock.patch("pythia.requests.post",
-                        side_effect=requests.Timeout("slow")):
-            answer = pythia.ask("go")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post",
+                            side_effect=requests.Timeout("slow")):
+                answer = pythia.ask("go")
         self.assertTrue(pythia.is_degraded(answer), answer)
 
     def test_an_unexpected_failure_is_degraded(self):
-        with mock.patch("pythia.requests.post",
-                        side_effect=RuntimeError("boom")):
-            answer = pythia.ask("go")
+        with self.assertLogs("METIS.pythia", "WARNING"):
+            with mock.patch("pythia.requests.post",
+                            side_effect=RuntimeError("boom")):
+                answer = pythia.ask("go")
         self.assertTrue(pythia.is_degraded(answer), answer)
 
     def test_blank_and_None_are_not_degraded(self):
