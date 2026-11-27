@@ -10,6 +10,9 @@ Two hermetic guards make that safe:
   * sphynx._DATA_PATH is redirected at a temp dir, so no test reads or writes
     the real config/sphynx_data.json (or the author's PIN).
 
+The PIN check is Cerberus's sealed scrypt (DPAPI, so Windows only);
+tests/_cerberus_sandbox.cheap_pin_cost() makes it cheap for each test.
+
 after()-scheduled callbacks (the boot litany, the 500 ms launch) never fire:
 tests drive with update_idletasks(), which processes idle tasks only, not timer
 callbacks — and Popen is patched regardless. No mainloop, no window flash
@@ -31,14 +34,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import sphynx
 import sphynx_panel
+from tests._cerberus_sandbox import cheap_pin_cost
 
-_PIN  = "4661"
-_HASH = hashlib.sha256(_PIN.encode("utf-8")).hexdigest()
+_PIN = "fake-panel-pin"
 
 
+@unittest.skipUnless(sys.platform == "win32", "the PIN check needs DPAPI")
 class TestSphynxPanelSmoke(unittest.TestCase):
 
     def setUp(self):
+        cheap_pin_cost(self)
         # Never spawn felhaven, whatever a flow does.
         self._popen = mock.patch("subprocess.Popen").start()
         self.addCleanup(mock.patch.stopall)
@@ -69,8 +74,13 @@ class TestSphynxPanelSmoke(unittest.TestCase):
         return p
 
     def _seed_pin(self) -> None:
+        sphynx.create(_PIN, "Who am I?")
+
+    def _seed_old_pin(self) -> None:
+        # The form before 2026-11-26: an unsalted SHA-256.
         with open(sphynx._DATA_PATH, "w", encoding="utf-8") as f:
-            json.dump({"pin_hash": _HASH, "riddle": "Who am I?"}, f)
+            json.dump({"pin_hash": hashlib.sha256(_PIN.encode("utf-8")).hexdigest(),
+                       "riddle": "Who am I?"}, f)
 
     # ── construction ────────────────────────────────────────────────────
 
@@ -111,21 +121,21 @@ class TestSphynxPanelSmoke(unittest.TestCase):
     def test_create_seals_gate_and_flags_success(self):
         p = self._panel()
         p._begin_first_run()
-        p._riddle_entry.insert(0, "What has keys but no locks?")
-        p._pin_entry.insert(0, "2468")
-        p._confirm_entry.insert(0, "2468")
+        p._riddle_entry.insert(0, "fake riddle: what has keys but no locks?")
+        p._pin_entry.insert(0, "fake-chosen-pin")
+        p._confirm_entry.insert(0, "fake-chosen-pin")
         p._on_create()
         p.root.update_idletasks()
         self.assertTrue(os.path.exists(sphynx._DATA_PATH))
-        self.assertTrue(sphynx.verify("2468"))
+        self.assertTrue(sphynx.verify("fake-chosen-pin"))
         self.assertTrue(p._success)
 
     def test_create_rejects_mismatched_pins(self):
         p = self._panel()
         p._begin_first_run()
-        p._riddle_entry.insert(0, "riddle")
-        p._pin_entry.insert(0, "1111")
-        p._confirm_entry.insert(0, "2222")
+        p._riddle_entry.insert(0, "fake riddle")
+        p._pin_entry.insert(0, "fake-pin-one")
+        p._confirm_entry.insert(0, "fake-pin-two")
         p._on_create()
         p.root.update_idletasks()
         self.assertFalse(os.path.exists(sphynx._DATA_PATH))   # nothing written
@@ -133,7 +143,7 @@ class TestSphynxPanelSmoke(unittest.TestCase):
         self.assertIn("match", p._setup_status.cget("text").lower())
 
     def test_first_run_says_to_use_a_pin_used_nowhere_else(self):
-        # The gate file's fast hash gives a short PIN away (sphynx.py).
+        # A short PIN can still be guessed from this account (sphynx.py).
         p = self._panel()
         p._begin_first_run()
         self.assertIn("Use a PIN you use nowhere else", p._log.get("1.0", "end"))
@@ -177,7 +187,7 @@ class TestSphynxPanelSmoke(unittest.TestCase):
         self._seed_pin()
         p = self._panel()
         p._start()
-        p._entry.insert(0, "0000")
+        p._entry.insert(0, "fake-wrong-pin")
         p._on_submit()
         p.root.update_idletasks()
         self.assertEqual(sphynx.attempts_left(), 2)
@@ -193,6 +203,18 @@ class TestSphynxPanelSmoke(unittest.TestCase):
         p.root.update_idletasks()
         self.assertTrue(p._success)
         self._popen.assert_not_called()      # launch is scheduled via after(500)
+
+    def test_an_old_gate_file_still_opens_and_is_sealed(self):
+        self._seed_old_pin()
+        p = self._panel()
+        p._start()
+        p.root.update_idletasks()
+        self.assertEqual(p._riddle_line, "Who am I?")    # a gate, not first-run setup
+        p._entry.insert(0, _PIN)
+        p._on_submit()
+        self.assertTrue(p._success)
+        with open(sphynx._DATA_PATH, encoding="utf-8") as f:
+            self.assertNotIn("pin_hash", json.load(f))
 
 
 class TestTheGateLogsItsErrors(unittest.TestCase):

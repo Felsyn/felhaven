@@ -198,8 +198,9 @@ _WRITES: dict[str, Write] = {
         "trusted",
         "Cerberus's three files (the PIN check, the DPAPI vault, the Ledger), each a "
         "constant beside this file; mkstemp in the same folder, fsync, os.replace.",
-        callers=("cerberus.py::set_pin", "cerberus.py::_vault_write",
-                 "cerberus.py::dismiss_alarm", "cerberus.py::_ledger_write")),
+        callers=("cerberus.py::set_pin", "cerberus.py::_upgrade_pin_file",
+                 "cerberus.py::_vault_write", "cerberus.py::dismiss_alarm",
+                 "cerberus.py::_ledger_write")),
     "cerberus.py::retire_vault": Write(
         ("os.rename",), frozenset({"app folder"}), frozenset({"constant", "app path"}),
         "trusted",
@@ -277,9 +278,10 @@ _WRITES: dict[str, Write] = {
         "os.replace."),
 
     # ── config/ ──
-    "sphynx.py::create": Write(
+    "sphynx.py::_write": Write(
         _ATOMIC, frozenset({"config/"}), frozenset({"constant", "app path"}), "trusted",
-        "config/sphynx_data.json, a constant; mkstemp in the same folder, os.replace."),
+        "config/sphynx_data.json, a constant (create() on first run, and once to "
+        "seal an old-form PIN check); mkstemp in the same folder, os.replace."),
     "tools/aegis.py::_write_manifest": Write(
         _ATOMIC, frozenset({"config/"}), frozenset({"constant", "app path"}), "trusted",
         "config/bin_manifest.json (per machine, gitignored), a constant, written "

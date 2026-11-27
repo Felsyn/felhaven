@@ -18,6 +18,26 @@ assistant, "Metis", was retired — the toolbox is typed-in, optionally spoken-b
 
 ---
 
+## V0.03 hotfix: the PIN files convert themselves (2026-11-26)
+
+The Sphynx and Cerberus PIN checks moved from a fast SHA-256 hash to scrypt,
+sealed with Windows DPAPI ([`CHANGELOG.md`](CHANGELOG.md), 2026-11-26). Your
+PINs stay the same, and nothing needs doing beyond a restart.
+
+When you restart after the pull:
+
+- The Sphynx gate takes about half a second at launch and rewrites its file in
+  the new form.
+- Cerberus does the same the first time you unlock it, and adds a
+  `pin_upgraded` row to its Ledger.
+- To confirm both converted, run `python cerberus.py status` and
+  `python sphynx.py` from `metis_toolbox\`. Neither should say "old form".
+
+Do this before 2026-12-01. From that date Felhaven stops reading the old
+form, and a gate whose file is still in it asks you to set a new PIN.
+
+---
+
 ## How the modules connect
 
 Three pieces of shared infrastructure tie ~30 independent modules together. Each

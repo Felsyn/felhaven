@@ -20,6 +20,11 @@ Two of its modules *look* security-shaped. Here is exactly what each one does:
     yields no key. It is a child lock: it keeps people at the keyboard from
     clicking into things, and it locks itself when Felhaven closes, when Windows
     is locked, when the PC sleeps, and after an hour with no input.
+  - **How the PINs are stored:** Cerberus's and Sphynx's PIN files each keep
+    a scrypt hash (OWASP's minimum cost), sealed with DPAPI like the keys. A
+    copy of either file can't be read on another account or PC, and on yours
+    every guess costs a scrypt run. A short PIN is still guessable by a program
+    running as you, so use one you use nowhere else.
   - **What it does not protect against:** anyone who can sign in to your
     Windows account, and any program running as you. Such a program can decrypt
     the keys at any time, PIN or no PIN, vault open or not.

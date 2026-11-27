@@ -6,18 +6,18 @@ Metis Toolbox | Anti-Legion: ONE JOB
 Job:         Draw the Sphynx boot sequence, take the PIN, and open Felhaven on
              success. The boot sequence is the riddle; success hands off to
              felhaven.py. Owns tkinter and subprocess; all
-             hash/attempt logic lives in sphynx.py — this module never
-             computes a hash or touches the attempt counter directly.
+             PIN-check/attempt logic lives in sphynx.py — this module never
+             checks a PIN or touches the attempt counter directly.
 
 First run:   When sphynx_data.json is absent (a fresh clone — the file is
-             per-user now, no longer shipped) or holds no readable PIN, the
+             per-user now, no longer shipped) or holds no usable PIN check, the
              gate can't verify anything, so instead of failing closed this
              panel shows a SETUP screen: the user writes their own riddle +
              PIN (or skips the gate entirely), and is told to pick a PIN they
-             use nowhere else, since the gate file gives it away (sphynx.py,
-             Threat model). sphynx.create() persists the choice; later
-             launches gate normally against the stored riddle, or bypass if
-             the user skipped.
+             use nowhere else, since a short one can still be guessed from
+             this account (sphynx.py, Threat model). sphynx.create() persists
+             the choice; later launches gate normally against the stored
+             riddle, or bypass if the user skipped.
 
 Entry point: launched by Felhaven.bat in place of felhaven.py. On a correct
              PIN (or a skipped/just-created gate) it spawns felhaven.py as its
@@ -246,8 +246,8 @@ class SphynxPanel:
         self._print("Write a riddle or statement and choose a PIN to guard the")
         self._print("gate, or skip it (it's soft 'family-misclick' theater, not")
         self._print("real security — a solo user may not want it).")
-        self._print("Use a PIN you use nowhere else: anyone who can read the")
-        self._print("gate file can work out a short one in seconds.")
+        self._print("Use a PIN you use nowhere else: the gate stops a curious")
+        self._print("hand, not a determined one.")
         self._print("")
         self._setup_frame.pack(side="bottom", fill="x")
         self._riddle_entry.focus_set()

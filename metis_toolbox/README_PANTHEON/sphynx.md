@@ -1,6 +1,6 @@
 # Sphynx
 
-Verify a PIN against the stored hash, and track how many attempts remain. Soft
+Verify a PIN against the stored check, and track how many attempts remain. Soft
 boot gate, not real security.
 
 - **UI:** the boot gate, shown before the dashboard launches

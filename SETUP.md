@@ -263,8 +263,9 @@ setting your own** instead of inheriting the author's:
   one-time **setup screen**: write your own riddle/statement and choose a PIN, or
   click **skip the gate** (it's soft theater; a solo user may not want it — the
   choice is remembered). Use a PIN you use nowhere else: `sphynx_data.json`
-  keeps it as a fast hash, so anyone who can read that file can work a short PIN
-  out in seconds. Later launches pose your riddle and take your PIN; three
+  keeps it slow-hashed and sealed to your Windows account, so a copy of the file
+  gives nothing away, but a program running as you can still guess a short PIN
+  in minutes to hours. Later launches pose your riddle and take your PIN; three
   wrong tries close the window (relaunch for a fresh three — nothing is ever
   locked on disk).
 - **Cerberus** — guards your API keys (§6). The keys are encrypted to your

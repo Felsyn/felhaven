@@ -29,10 +29,19 @@ At rest:     Each key is encrypted with Windows DPAPI (CryptProtectData) under
 The PIN:     A CHILD LOCK and a policy gate. It decrypts nothing, so knowing it
              yields no key. It decides when tools may USE the keys (vault_get),
              when the UI may change them (vault_set, retire_vault), and when
-             Custody opens a config. cerberus_data.json holds a salted SHA-256
-             of it; that hash is fast, and that's fine, because nothing secret
-             sits behind it. Changing the PIN touches no key. Three tries per
-             process: theater, kept on purpose.
+             Custody opens a config. Changing the PIN touches no key. Three
+             tries per process: theater, kept on purpose.
+
+The check:   What cerberus_data.json keeps of the PIN, and Sphynx's gate file
+             of its own (pin_record / pin_matches, the toolbox's one recipe):
+             scrypt at OWASP's floor (N=2**17, r=8, p=1; about 0.48 s and
+             128 MiB a check on Obelisk), its salt, cost and digest sealed
+             with DPAPI under the gate's name. A copied file opens on no other
+             account, a check moved to the other gate's file won't open, and
+             on this account every guess still costs scrypt. It protects a PIN
+             used somewhere else too; it can't make a short PIN strong. A file
+             from before 2026-11-26 holds a salted SHA-256: the first right
+             PIN rewrites it (a `pin_upgraded` Ledger row). CONVENTIONS §12.
 
 Session:     unlock(pin) opens ONE module-level session shared by every tab and
              tool; lock(reason) closes it. fetch(), Cerberus's own 2 s Kairos
@@ -47,11 +56,17 @@ Tamper:      Loud, never silent. An old PIN-encrypted (v1) or unparseable vault
              shows it) and raise an alarm. fetch() carries the alarms to the
              Cerberus tab, the Dynastic Vault and the Home lamp.
 
-Contract:    preflight()                 — the PIN file loads (else HashFileError)
+Contract:    preflight()                 — the PIN file loads and its check opens
+                                           (else HashFileError)
              verify(pin) -> bool         — PIN check; a miss burns an attempt
              attempts_left() -> int
              unlock(pin) -> bool · lock(reason) · is_unlocked() · lock_reason()
              set_pin(pin)                — write the PIN check; touches no key
+             pin_record(pin, purpose) -> dict — a new sealed check for
+                                           "cerberus" or "sphynx" (see The check)
+             pin_matches(pin, record, purpose) -> bool · check_pin_record(record,
+                                           purpose) — raise PinCheckError for a
+                                           check that won't open
              vault_set(name, value)      — encrypt + store; session required
              vault_get(name) -> str      — decrypt; session required
              vault_names() -> list       — names only, never values
@@ -94,13 +109,15 @@ Concurrency: Called from worker threads (Midas's pool, Pythia, Kairos's own
 Upstream:    panels/cerberus_panel.py, panels/midas_panel.py,
              panels/home_panel.py (the lamp), panels/artemis_panel.py (is_unlocked:
              CACHE AREA warns when terrain will be skipped), felhaven.py (exit), kairos.py
-             (fetch), tools/midas.py, tools/callimachus.py, tools/demeter.py
+             (fetch), tools/midas.py, tools/callimachus.py, tools/demeter.py,
+             sphynx.py (the PIN check)
 Downstream:  cerberus_data.json (the PIN check), cerberus_vault.json (DPAPI
              blobs), cerberus_ledger.json (access log) — all gitignored, per
              user; config/cerberus_manifest.json (committed); tools/hypnos.py;
              Windows crypt32 (DPAPI, through ctypes)
 
-Requires:    stdlib only (ctypes for DPAPI). No tkinter, no subprocess.
+Requires:    stdlib only (ctypes for DPAPI, hashlib.scrypt for the PIN check).
+             No tkinter, no subprocess.
 
 2026-07-24:  walkthrough audit — the deferred Ledger-corruption finding fixed:
              _LEDGER_LOCK + atomic writes (was a non-atomic truncate+rewrite that
@@ -115,6 +132,9 @@ V0.03:       Walked through 2026-11-17 (the V0.03 walkthrough, CONVENTIONS
              value or a PIN. Its VaultError slugs stay its own: every tool
              turns them into §2's words before the model sees one. Upstream
              gained artemis_panel; the Contract names away_reason.
+
+2026-11-26:  the PIN check moved from one salted SHA-256 to scrypt sealed with
+             DPAPI, and Sphynx's gate uses the same recipe (see The check).
 """
 
 import base64
@@ -177,6 +197,23 @@ _ENTROPY_LABEL = b"felhaven/cerberus/v2\x00"
 # decrypt. Without it, DPAPI binds the blob to the current Windows user.
 _DPAPI_FLAGS = 0x1
 
+# ── The PIN check (Cerberus's and Sphynx's; see "The check" above) ──────────
+PIN_SCHEME = "scrypt-dpapi-1"
+_PIN_ENTROPY_LABEL = b"felhaven/pin-check/v1\x00"   # + the gate's name
+_PIN_PURPOSES = ("cerberus", "sphynx")
+_PIN_PURPOSE = "cerberus"                            # this module's own gate
+# scrypt's (N, r, p). New checks use _PIN_COST; a check asking less than
+# _PIN_COST_FLOOR, or more memory than _PIN_MEM_CEILING, is refused, so a
+# changed record can neither cheapen a guess nor ask for gigabytes. The tests
+# lower both through tests/_cerberus_sandbox.py; _PIN_COST_DEFAULT stays put.
+_PIN_COST_DEFAULT = (2 ** 17, 8, 1)     # OWASP's floor: ~0.48 s, 128 MiB on Obelisk
+_PIN_COST = _PIN_COST_DEFAULT
+_PIN_COST_FLOOR = _PIN_COST_DEFAULT
+_PIN_MEM_CEILING = 1 << 30              # scrypt's 128·r·N bytes; Python caps at 2 GiB
+_PIN_P_CEILING = 16
+_PIN_SALT_BYTES = 16
+_PIN_DIGEST_BYTES = 32
+
 # ── Error slugs (§2) ─────────────────────────────────────────────────────────
 ERR_LOCKED = "cerberus_locked"
 ERR_NO_ENTRY = "cerberus_no_entry"
@@ -234,6 +271,12 @@ class VaultError(Exception):
         self.slug = slug
 
 
+class PinCheckError(Exception):
+    """A PIN check that won't open: malformed, sealed on another account or
+    for the other gate, changed, or asking a cost outside the bounds. The
+    message is the cause's class name, never the record."""
+
+
 class CustodyError(Exception):
     """Custody refused to open a file. `slug` is the stable part (§2)."""
 
@@ -243,42 +286,96 @@ class CustodyError(Exception):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  The PIN — a salted hash, and a policy gate only
+#  The PIN — a sealed scrypt check, and a policy gate only
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _load_verify() -> tuple[bytes, str, dict[str, Any]]:
-    """(verify_salt, pin_hash, the whole file) from cerberus_data.json."""
+def _read_pin_file() -> dict[str, Any]:
+    """cerberus_data.json, holding a sealed check or an old one, WITHOUT opening
+    the seal: fetch reads `reset_at` from it every 2 s. Raises HashFileError if
+    the file is missing, unreadable, or holds neither."""
     try:
         with open(_DATA_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
-        salt = bytes.fromhex(data["verify_salt"])
-        pin_hash = data["pin_hash"]
-        if not isinstance(pin_hash, str):
-            raise TypeError("pin_hash is not a string")
-        return salt, pin_hash, data
+        if not isinstance(data, dict):
+            raise TypeError("not an object")
+        if "pin_check" not in data:
+            _legacy_parts(data)
+        return data
     except (OSError, ValueError, KeyError, TypeError) as e:
         raise HashFileError(
             f"cerberus_data.json missing or malformed: {type(e).__name__}") from e
 
 
-def _hash_pin(pin: str, salt: bytes) -> str:
-    """Salted SHA-256 of the PIN. Fast on purpose: it guards a child lock, not
-    a key (see the module docstring)."""
-    return hashlib.sha256(salt + pin.strip().encode("utf-8")).hexdigest()
+def _load_pin_file() -> dict[str, Any]:
+    """_read_pin_file(), and a sealed check must also open. One that won't
+    (another account's, Sphynx's, changed bytes) counts as no PIN at all: the
+    tab offers setup, and set_pin then raises the reset alarm if keys exist."""
+    data = _read_pin_file()
+    if "pin_check" in data:
+        try:
+            check_pin_record(data["pin_check"], _PIN_PURPOSE)
+        except PinCheckError as e:
+            raise HashFileError(f"cerberus_data.json's PIN check won't open: {e}") from e
+    return data
+
+
+def _legacy_parts(data: dict[str, Any]) -> tuple[bytes, str]:
+    """(verify_salt, pin_hash) of a PIN file from before 2026-11-26."""
+    salt = bytes.fromhex(data["verify_salt"])
+    pin_hash = data["pin_hash"]
+    # 64 characters that are 32 bytes of hex: no spaces, all ASCII.
+    if not (isinstance(pin_hash, str) and len(pin_hash) == 64
+            and len(bytes.fromhex(pin_hash)) == 32):
+        raise TypeError("pin_hash is not a SHA-256 hex digest")
+    return salt, pin_hash
+
+
+def _legacy_pin_matches(pin: str, data: dict[str, Any]) -> bool:
+    """The old check, one salted SHA-256. Read only so the first right PIN can
+    rewrite the file in the sealed form; BACKLOG says when it goes."""
+    salt, expected = _legacy_parts(data)
+    return hmac.compare_digest(
+        hashlib.sha256(salt + pin.strip().encode("utf-8")).hexdigest(), expected)
+
+
+def _upgrade_pin_file(pin: str, data: dict[str, Any]) -> None:
+    """Rewrite an old PIN file as a sealed check, keeping `reset_at`: the first
+    right PIN after the change does it, once, with a `pin_upgraded` Ledger row.
+    If DPAPI or the disk refuses, the old file stays, a WARNING says so, and
+    the next right PIN tries again. Caller holds _SESSION_LOCK."""
+    try:
+        payload: dict[str, Any] = {"pin_check": pin_record(pin, _PIN_PURPOSE)}
+        if data.get("reset_at"):
+            payload["reset_at"] = data["reset_at"]
+        _atomic_write_json(_DATA_PATH, payload)
+    except (OSError, VaultError) as e:
+        log.warning("cerberus: the PIN check stays in its old form for now (%s)",
+                    type(e).__name__)
+        return
+    _ledger_event("session", "pin_upgraded")
 
 
 def preflight() -> None:
-    """Raise HashFileError unless the PIN file loads. Lets a panel fail closed
-    (or offer first-run setup) before it draws its gate."""
-    _load_verify()
+    """Raise HashFileError unless the PIN file loads and its check opens. Lets
+    a panel fail closed (or offer first-run setup) before it draws its gate."""
+    _load_pin_file()
 
 
 def _verify(pin: str) -> bool:
     global _ATTEMPTS_REMAINING
-    salt, expected, _ = _load_verify()
+    data = _load_pin_file()
     if _ATTEMPTS_REMAINING <= 0:
         return False
-    if hmac.compare_digest(_hash_pin(pin, salt), expected):
+    if "pin_check" in data:
+        try:
+            ok = pin_matches(pin, data["pin_check"], _PIN_PURPOSE)
+        except PinCheckError as e:      # it opened a moment ago in _load_pin_file
+            raise HashFileError(f"cerberus_data.json's PIN check won't open: {e}") from e
+    else:
+        ok = _legacy_pin_matches(pin, data)
+        if ok:
+            _upgrade_pin_file(pin, data)
+    if ok:
         return True
     _ATTEMPTS_REMAINING -= 1
     return False
@@ -299,26 +396,25 @@ def attempts_left() -> int:
 
 
 def set_pin(pin: str) -> None:
-    """Write a fresh salt and the PIN's hash to cerberus_data.json. Touches no
+    """Write a fresh sealed check of the PIN to cerberus_data.json. Touches no
     key: the PIN decrypts nothing, so changing it needs no re-encryption.
 
     Called by the Cerberus tab's first-run screen and by `setpin`. If no PIN
-    file loaded but the vault already holds keys, someone deleted the PIN file
-    to get past the child lock (or it broke): the new file keeps a `reset_at`
-    mark and the pin_reset alarm stays up until it's dismissed."""
+    file loaded (or its check won't open) but the vault already holds keys,
+    someone got rid of the PIN file to get past the child lock (or it broke):
+    the new file keeps a `reset_at` mark and the pin_reset alarm stays up
+    until it's dismissed. Raises OSError if DPAPI or the disk refuses."""
     if not isinstance(pin, str) or not pin.strip():
         raise ValueError(ERR_BAD_INPUT)
     with _SESSION_LOCK:
         try:
-            _, _, old = _load_verify()
+            old = _load_pin_file()
             had_pin = True
         except HashFileError:
             old, had_pin = {}, False
         _, entries = _vault_read()
         reset = not had_pin and bool(entries)
-        salt = secrets.token_bytes(16)
-        payload: dict[str, Any] = {"verify_salt": salt.hex(),
-                                   "pin_hash": _hash_pin(pin, salt)}
+        payload: dict[str, Any] = {"pin_check": pin_record(pin, _PIN_PURPOSE)}
         if reset:
             payload["reset_at"] = _now()
         elif old.get("reset_at"):
@@ -454,6 +550,81 @@ def _open_entry(name: str, entry: Any) -> str:
         return _dpapi(False, blob, _entropy(name)).decode("utf-8")
     except (OSError, ValueError) as e:      # binascii.Error, UnicodeDecodeError too
         raise VaultError(ERR_UNREADABLE, name) from e
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  The PIN check — scrypt, sealed with DPAPI (Cerberus's gate and Sphynx's)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _pin_entropy(purpose: str) -> bytes:
+    if purpose not in _PIN_PURPOSES:
+        raise ValueError(f"no gate is called {purpose!r}")
+    return _PIN_ENTROPY_LABEL + purpose.encode("ascii")
+
+
+def _scrypt(pin: str, salt: bytes, n: int, r: int, p: int) -> bytes:
+    # OpenSSL wants room for 128·r·(N+2) + 128·r·p bytes; a MiB to spare.
+    return hashlib.scrypt(pin.strip().encode("utf-8"), salt=salt, n=n, r=r, p=p,
+                          maxmem=128 * r * (n + p + 2) + (1 << 20),
+                          dklen=_PIN_DIGEST_BYTES)
+
+
+def pin_record(pin: str, purpose: str) -> dict[str, str]:
+    """A new PIN check for the gate `purpose` ("cerberus" or "sphynx"): scrypt
+    of the stripped PIN under a fresh salt at _PIN_COST, the salt, cost and
+    digest sealed together with DPAPI under the gate's name. Takes about half a
+    second. Raises ValueError for an empty PIN or an unknown gate, OSError if
+    DPAPI refuses (VaultError off Windows)."""
+    if not isinstance(pin, str) or not pin.strip():
+        raise ValueError(ERR_BAD_INPUT)
+    entropy = _pin_entropy(purpose)
+    n, r, p = _PIN_COST
+    salt = secrets.token_bytes(_PIN_SALT_BYTES)
+    inner = json.dumps({"salt": salt.hex(), "n": n, "r": r, "p": p,
+                        "digest": _scrypt(pin, salt, n, r, p).hex()})
+    blob = _dpapi(True, inner.encode("ascii"), entropy)
+    return {"scheme": PIN_SCHEME, "blob": base64.b64encode(blob).decode("ascii")}
+
+
+def _open_pin_record(record: Any, purpose: str) -> tuple[bytes, int, int, int, bytes]:
+    """(salt, n, r, p, digest) from a sealed check. Raises PinCheckError."""
+    entropy = _pin_entropy(purpose)
+    try:
+        if (not isinstance(record, dict) or record.get("scheme") != PIN_SCHEME
+                or not isinstance(record.get("blob"), str)):
+            raise ValueError("not a sealed PIN check")
+        sealed = base64.b64decode(record["blob"], validate=True)
+        inner = json.loads(_dpapi(False, sealed, entropy).decode("ascii"))
+        salt = bytes.fromhex(inner["salt"])
+        digest = bytes.fromhex(inner["digest"])
+        n, r, p = inner["n"], inner["r"], inner["p"]
+        if not all(type(v) is int for v in (n, r, p)):
+            raise TypeError("the cost is not whole numbers")
+        floor_n, floor_r, floor_p = _PIN_COST_FLOOR
+        if (n < floor_n or r < floor_r or p < floor_p or n & (n - 1)
+                or 128 * r * n > _PIN_MEM_CEILING or p > _PIN_P_CEILING
+                or len(salt) < _PIN_SALT_BYTES or len(digest) != _PIN_DIGEST_BYTES):
+            raise ValueError("the cost or a size is out of bounds")
+        return salt, n, r, p, digest
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        # binascii.Error, json.JSONDecodeError and UnicodeDecodeError are
+        # ValueErrors; DPAPI's wrong-entropy/changed-byte refusal is OSError.
+        raise PinCheckError(type(e).__name__) from e
+
+
+def check_pin_record(record: Any, purpose: str) -> None:
+    """Raise PinCheckError unless `record` opens as `purpose`'s check. Needs no
+    PIN and no scrypt (one DPAPI call), so a gate can tell a usable PIN file
+    from a broken one before it asks for the PIN."""
+    _open_pin_record(record, purpose)
+
+
+def pin_matches(pin: str, record: Any, purpose: str) -> bool:
+    """True if `pin` (stripped, as pin_record took it) is the one sealed in
+    `record`, compared in constant time. Costs one scrypt at the record's own
+    cost. Raises PinCheckError if the record won't open."""
+    salt, n, r, p, digest = _open_pin_record(record, purpose)
+    return hmac.compare_digest(_scrypt(pin, salt, n, r, p), digest)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -670,7 +841,7 @@ def _refresh_alarms() -> None:
     """Re-derive the file-level alarms. Caller holds _SESSION_LOCK."""
     _note_vault_state(_vault_read()[0])
     try:
-        marked = bool(_load_verify()[2].get("reset_at"))
+        marked = bool(_read_pin_file().get("reset_at"))
     except HashFileError:
         marked = False
     if marked:
@@ -697,7 +868,7 @@ def dismiss_alarm(alarm: str) -> None:
     with _SESSION_LOCK:
         if not _SESSION_OPEN:
             raise VaultError(ERR_LOCKED)
-        _, _, data = _load_verify()
+        data = _load_pin_file()
         if data.pop("reset_at", None) is not None:
             _atomic_write_json(_DATA_PATH, data)
         _ALARMS.discard(ALARM_PIN_RESET)
@@ -982,8 +1153,9 @@ _STATUS_TEXT = {
 
 def _cli_status() -> int:
     try:
-        preflight()
-        print("PIN:     set")
+        sealed = "pin_check" in _load_pin_file()
+        print("PIN:     set" if sealed else
+              "PIN:     set, in the old form (the next right PIN seals it)")
     except HashFileError:
         print("PIN:     not set — run `python cerberus.py setpin`")
     state = vault_status()

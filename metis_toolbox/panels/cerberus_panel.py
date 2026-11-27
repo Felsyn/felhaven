@@ -482,8 +482,9 @@ class CerberusPanel(tk.Frame):
         self._enter_btn.config(text="CREATE")
         if cerberus.vault_names():
             self._gate_status.config(
-                text="The PIN file is gone, but the vault holds keys. A new PIN "
-                     "will work, and it will be logged as a PIN reset.",
+                text="The PIN file is gone or won't open, but the vault holds "
+                     "keys. A new PIN will work, and it will be logged as a PIN "
+                     "reset.",
                 fg=C["red"])
         else:
             self._gate_status.config(

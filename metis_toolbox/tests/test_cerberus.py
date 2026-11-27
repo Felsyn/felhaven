@@ -8,12 +8,15 @@ enter this file. The fixture PIN is obviously fake.
 The encryption tests use REAL Windows DPAPI, not a fake: it costs ~0.2 ms a
 call (measured on Obelisk, 2026-09-30), and a fake would test our idea of
 DPAPI rather than DPAPI. They skip off Windows; CI runs on windows-latest.
+Since 2026-11-26 the PIN check is sealed with DPAPI too, so every sandboxed
+test needs Windows; the sandbox makes its scrypt cheap.
 
     python -X utf8 -m unittest tests.test_cerberus
 """
 
 import ast
 import base64
+import hashlib
 import importlib
 import io
 import json
@@ -140,6 +143,7 @@ class TestSetPin(_Base):
         cerberus.preflight()
         self.assertTrue(cerberus.verify("fake-first-pin"))
 
+    @_NEEDS_DPAPI
     def test_set_pin_uses_fresh_salt_each_time(self):
         cerberus.set_pin("fake-same-pin")
         with open(cerberus._DATA_PATH, encoding="utf-8") as f:
@@ -147,8 +151,11 @@ class TestSetPin(_Base):
         cerberus.set_pin("fake-same-pin")
         with open(cerberus._DATA_PATH, encoding="utf-8") as f:
             second = json.load(f)
-        self.assertNotEqual(first["verify_salt"], second["verify_salt"])
-        self.assertNotEqual(first["pin_hash"], second["pin_hash"])   # salted
+        self.assertEqual(set(first), {"pin_check"})      # nothing in the clear
+        salt_1, *_, digest_1 = cerberus._open_pin_record(first["pin_check"], "cerberus")
+        salt_2, *_, digest_2 = cerberus._open_pin_record(second["pin_check"], "cerberus")
+        self.assertNotEqual(salt_1, salt_2)
+        self.assertNotEqual(digest_1, digest_2)         # salted
 
     def test_set_pin_atomic_no_tmp_left(self):
         cerberus.set_pin("fake-other-pin")
@@ -187,6 +194,165 @@ class TestSetPin(_Base):
 
 
 @_NEEDS_DPAPI
+class TestPinCheck(_Base):
+    """The check: scrypt, sealed with DPAPI under the gate's name. The sandbox
+    makes it cheap; test_the_default_cost_is_owasps_floor pays the real one."""
+
+    def _sealed(self, inner, purpose="cerberus"):
+        """A record sealed by hand, to reach the bounds without running scrypt."""
+        blob = cerberus._dpapi(True, json.dumps(inner).encode("ascii"),
+                               cerberus._pin_entropy(purpose))
+        return {"scheme": cerberus.PIN_SCHEME,
+                "blob": base64.b64encode(blob).decode("ascii")}
+
+    def test_a_record_matches_its_pin_and_no_other(self):
+        record = cerberus.pin_record(FAKE_PIN, "cerberus")
+        self.assertTrue(cerberus.pin_matches(FAKE_PIN, record, "cerberus"))
+        self.assertTrue(cerberus.pin_matches(f"  {FAKE_PIN} \n", record, "cerberus"))
+        self.assertFalse(cerberus.pin_matches(WRONG_PIN, record, "cerberus"))
+
+    def test_the_pin_file_holds_nothing_in_the_clear(self):
+        with open(cerberus._DATA_PATH, encoding="utf-8") as f:
+            text = f.read()
+        data = json.loads(text)
+        self.assertEqual(set(data), {"pin_check"})
+        self.assertEqual(set(data["pin_check"]), {"scheme", "blob"})
+        for word in (FAKE_PIN, "salt", "digest", "pin_hash"):
+            self.assertNotIn(word, text)
+
+    def test_one_gates_check_wont_open_as_the_others(self):
+        record = cerberus.pin_record(FAKE_PIN, "sphynx")
+        with self.assertRaises(cerberus.PinCheckError):
+            cerberus.pin_matches(FAKE_PIN, record, "cerberus")
+        with open(cerberus._DATA_PATH, "w", encoding="utf-8") as f:
+            json.dump({"pin_check": record}, f)
+        with self.assertRaises(cerberus.HashFileError):
+            cerberus.preflight()
+        with self.assertRaises(cerberus.HashFileError):
+            cerberus.verify(FAKE_PIN)
+
+    def test_an_unknown_gate_or_an_empty_pin_is_refused(self):
+        with self.assertRaises(ValueError):
+            cerberus.pin_record(FAKE_PIN, "fake-gate")
+        with self.assertRaises(ValueError):
+            cerberus.pin_record("   ", "cerberus")
+
+    def test_a_changed_byte_wont_open(self):
+        record = cerberus.pin_record(FAKE_PIN, "cerberus")
+        blob = bytearray(base64.b64decode(record["blob"]))
+        blob[len(blob) // 2] ^= 0x01
+        record["blob"] = base64.b64encode(bytes(blob)).decode("ascii")
+        with self.assertRaises(cerberus.PinCheckError):
+            cerberus.check_pin_record(record, "cerberus")
+
+    def test_a_malformed_record_wont_open(self):
+        good = cerberus.pin_record(FAKE_PIN, "cerberus")
+        for record in (None, [], "fake-text", {}, {"scheme": "sha256", "blob": good["blob"]},
+                       {"scheme": cerberus.PIN_SCHEME}, {"scheme": cerberus.PIN_SCHEME, "blob": 7},
+                       {"scheme": cerberus.PIN_SCHEME, "blob": "not base64!"}):
+            with self.subTest(record=record):
+                with self.assertRaises(cerberus.PinCheckError):
+                    cerberus.check_pin_record(record, "cerberus")
+
+    def test_a_cost_or_size_out_of_bounds_wont_open(self):
+        """A changed record can neither cheapen a guess nor ask for gigabytes.
+        Each is sealed by hand, so no scrypt runs at these costs."""
+        cerberus._PIN_COST_FLOOR = (16, 2, 1)
+        good = {"salt": "ab" * 16, "n": 16, "r": 2, "p": 1, "digest": "cd" * 32}
+        cerberus.check_pin_record(self._sealed(good), "cerberus")   # the control
+        for change in ({"n": 8}, {"r": 1}, {"n": 24}, {"n": 2 ** 23, "r": 8},
+                       {"p": 17}, {"n": 16.0}, {"r": True}, {"n": "16"},
+                       {"salt": "ab" * 8}, {"digest": "cd" * 16}, {"digest": None}):
+            with self.subTest(change=change):
+                with self.assertRaises(cerberus.PinCheckError):
+                    cerberus.check_pin_record(self._sealed({**good, **change}), "cerberus")
+        for inner in ([], "fake-text", {"salt": "ab" * 16}):
+            with self.subTest(inner=inner):
+                with self.assertRaises(cerberus.PinCheckError):
+                    cerberus.check_pin_record(self._sealed(inner), "cerberus")
+
+    def test_the_default_cost_is_owasps_floor(self):
+        """The real cost, paid once here (~1 s): a record made and checked at
+        N=2**17, r=8, p=1, and nothing the sandbox lowered leaks into it."""
+        self.assertEqual(cerberus._PIN_COST_DEFAULT, (2 ** 17, 8, 1))
+        cerberus._PIN_COST = cerberus._PIN_COST_FLOOR = cerberus._PIN_COST_DEFAULT
+        record = cerberus.pin_record(FAKE_PIN, "cerberus")
+        _, n, r, p, _ = cerberus._open_pin_record(record, "cerberus")
+        self.assertEqual((n, r, p), (2 ** 17, 8, 1))
+        self.assertTrue(cerberus.pin_matches(FAKE_PIN, record, "cerberus"))
+
+
+@_NEEDS_DPAPI
+class TestOldPinFile(_Base):
+    """A PIN file from before 2026-11-26 holds a salted SHA-256. It still
+    unlocks, and the first right PIN rewrites it sealed."""
+
+    def _write_old(self, **extra):
+        salt = os.urandom(16)
+        data = {"verify_salt": salt.hex(),
+                "pin_hash": hashlib.sha256(salt + FAKE_PIN.encode("utf-8")).hexdigest(),
+                **extra}
+        with open(cerberus._DATA_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+    def _data(self):
+        with open(cerberus._DATA_PATH, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_the_first_right_pin_seals_it(self):
+        self._write_old()
+        cerberus.preflight()
+        self.assertTrue(cerberus.unlock(FAKE_PIN))
+        self.assertEqual(set(self._data()), {"pin_check"})
+        self.assertEqual(len(self._rows("session", "pin_upgraded")), 1)
+        cerberus.lock()
+        self.assertTrue(cerberus.unlock(FAKE_PIN))        # the sealed check works
+        self.assertEqual(len(self._rows("session", "pin_upgraded")), 1)   # once
+
+    def test_a_wrong_pin_leaves_it_alone(self):
+        self._write_old()
+        before = self._data()
+        self.assertFalse(cerberus.unlock(WRONG_PIN))
+        self.assertEqual(self._data(), before)
+        self.assertFalse(self._rows("session", "pin_upgraded"))
+
+    def test_the_rewrite_keeps_a_reset_mark(self):
+        self._write_old(reset_at="2026-11-01T00:00:00")
+        self.assertTrue(cerberus.verify(FAKE_PIN))
+        self.assertEqual(self._data().get("reset_at"), "2026-11-01T00:00:00")
+
+    def test_a_failed_rewrite_keeps_the_old_file_and_warns(self):
+        self._write_old()
+        before = self._data()
+        with mock.patch.object(cerberus, "pin_record", side_effect=OSError("fake")), \
+                self.assertLogs("METIS.cerberus", level="WARNING") as logs:
+            self.assertTrue(cerberus.verify(FAKE_PIN))
+        self.assertEqual(self._data(), before)
+        self.assertIn("old form", "\n".join(logs.output))
+        self.assertTrue(cerberus.verify(FAKE_PIN))        # the next right PIN retries
+        self.assertEqual(set(self._data()), {"pin_check"})
+
+    def test_a_garbled_old_hash_is_no_pin(self):
+        for pin_hash in ("zz" * 32, "ab" * 31, "ab " * 21 + "a", 7, None):
+            with self.subTest(pin_hash=pin_hash):
+                with open(cerberus._DATA_PATH, "w", encoding="utf-8") as f:
+                    json.dump({"verify_salt": "00" * 16, "pin_hash": pin_hash}, f)
+                with self.assertRaises(cerberus.HashFileError):
+                    cerberus.preflight()
+
+    def test_status_says_which_form(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cerberus.main(["status"])
+        self.assertIn("PIN:     set\n", out.getvalue())
+        self._write_old()
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cerberus.main(["status"])
+        self.assertIn("old form", out.getvalue())
+
+
+@_NEEDS_DPAPI
 class TestPinReset(_Base):
     """Deleting the PIN file is the cheapest way past a child lock. It still
     works (the PIN guards no secret), but it leaves a trace that stays up until
@@ -199,6 +365,24 @@ class TestPinReset(_Base):
         os.remove(cerberus._DATA_PATH)
         with self.assertLogs("METIS.cerberus", level="ERROR"):
             cerberus.set_pin("fake-reset-pin")
+
+    def test_a_pin_check_that_wont_open_is_a_reset_too(self):
+        """Garbling the sealed check is as good as deleting the file: the tab
+        offers setup, so the new PIN must still raise the alarm."""
+        cerberus.unlock(FAKE_PIN)
+        cerberus.vault_set("finnhub_api_key", "fake-finnhub-value")
+        cerberus.lock()
+        with open(cerberus._DATA_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        data["pin_check"]["blob"] = base64.b64encode(b"fake-garbled").decode("ascii")
+        with open(cerberus._DATA_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        with self.assertRaises(cerberus.HashFileError):
+            cerberus.preflight()
+        with self.assertLogs("METIS.cerberus", level="ERROR"):
+            cerberus.set_pin("fake-reset-pin")
+        self.assertIn(cerberus.ALARM_PIN_RESET, cerberus.alarms())
+        self.assertEqual(len(self._rows("session", "pin_reset")), 1)
 
     def test_reset_raises_the_alarm_and_writes_a_row(self):
         self._reset()
@@ -1106,10 +1290,36 @@ class TestStructure(unittest.TestCase):
                 self.assertNotEqual(node.module, "random")
 
     def test_derives_no_key_from_the_pin(self):
-        """No key-derivation function anywhere: the PIN is a gate, not a key."""
-        for node in ast.walk(self._tree()):
-            if isinstance(node, ast.Attribute):
-                self.assertNotIn(node.attr, ("pbkdf2_hmac", "scrypt"))
+        """The PIN is a gate, not a key. No PBKDF2; scrypt only inside _scrypt;
+        and _scrypt's digest is only compared (pin_matches) or sealed inside
+        the record (pin_record), never handed to DPAPI or used as a key."""
+        tree = self._tree()
+        funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+        parent = {child: node for node in ast.walk(tree)
+                  for child in ast.iter_child_nodes(node)}
+
+        attrs = [n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)]
+        self.assertNotIn("pbkdf2_hmac", attrs)
+        self.assertEqual(attrs.count("scrypt"), 1)
+        self.assertIn("scrypt", [n.attr for n in ast.walk(funcs["_scrypt"])
+                                 if isinstance(n, ast.Attribute)])
+
+        calls = {name: [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                        and isinstance(n.func, ast.Name) and n.func.id == "_scrypt"]
+                 for name, fn in funcs.items()}
+        self.assertEqual({name for name, found in calls.items() if found},
+                         {"pin_record", "pin_matches"})
+        # pin_matches: only ever an argument of hmac.compare_digest.
+        (match_call,) = calls["pin_matches"]
+        self.assertEqual(ast.unparse(parent[match_call].func), "hmac.compare_digest")
+        # pin_record: only ever `_scrypt(...).hex()`, a value in the dict that
+        # json.dumps turns into the sealed text.
+        (record_call,) = calls["pin_record"]
+        hexed = parent[parent[record_call]]
+        self.assertIsInstance(hexed, ast.Call)
+        self.assertEqual(ast.unparse(hexed.func).rsplit(".", 1)[-1], "hex")
+        self.assertIsInstance(parent[hexed], ast.Dict)
+        self.assertEqual(ast.unparse(parent[parent[hexed]].func), "json.dumps")
 
 
 if __name__ == "__main__":

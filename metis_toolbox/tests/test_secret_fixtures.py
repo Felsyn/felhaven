@@ -9,7 +9,8 @@ same mistake fail before it can be committed:
 
   1. Fixture PINs and values. In every test that touches Cerberus, a string
      literal handed to a PIN or key sink (unlock, verify, set_pin, vault_set,
-     the test helpers that wrap them, or text typed into an entry box) must
+     pin_record, pin_matches, Sphynx's create, the test helpers that wrap
+     them, or text typed into an entry box) must
      contain "fake". A real PIN or key can't pass by accident, and a reader can
      see at a glance that the value means nothing.
 
@@ -48,7 +49,8 @@ _APP = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Sinks: callee name -> index of the positional argument that carries the PIN
 # or the value. Names are not secrets; values and PINs are.
-_PIN_SINKS = {"unlock": 0, "verify": 0, "set_pin": 0, "_unlock": 0}
+_PIN_SINKS = {"unlock": 0, "verify": 0, "set_pin": 0, "_unlock": 0,
+              "pin_record": 0, "pin_matches": 0, "create": 0}   # create: sphynx's
 _VALUE_SINKS = {"vault_set": 1, "_seed": 1, "_submit": 1}
 _TYPED = ("entry", "editor")          # x._entry.insert(0, "...") and friends
 

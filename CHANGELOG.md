@@ -14,6 +14,8 @@ New here? Start with [`README.md`](README.md) for what Felhaven is,
 [`SETUP.md`](SETUP.md) to run it, and [`CONVENTIONS.md`](CONVENTIONS.md) for how
 the code is put together.
 
+- `2026-11-26` — `README.md`: a V0.03 hotfix note says the PIN files convert on the first restart after the pull, how to confirm it, and that the old form stops being read on 2026-12-01.
+- `2026-11-26` — `cerberus.py`, `sphynx.py`: both PIN checks are scrypt at OWASP's floor, sealed with DPAPI under the gate's name, and an old file is rewritten on the first right PIN. A copied PIN file gave a short PIN away in milliseconds.
 - `2026-11-24` — `SETUP.md`, `README.md`: the clone and run steps name the public repository, `Felsyn/felhaven`, and its folder; they cloned `Felsyn/metis`, the private one, which a visitor can't reach.
 - `2026-11-24` — `themis.py`: a refused latitude, longitude or Atmospherics place no longer writes its value to the log; the warning names the field and why. A typo like `"12.3456N"` was logged as typed.
 - `2026-11-24` — `tests/test_themis.py`: the Themis warnings that reached the console in every test run are caught with `assertLogs`, and a real true or false for the clock must load without one.

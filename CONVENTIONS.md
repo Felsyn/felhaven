@@ -3947,3 +3947,44 @@ and when, one line per change, so a decision worth keeping must be written here.
   Settings tab shows the same words when it refuses a save; the person who
   typed the value can see it in the box. Found while catching the Themis
   tests' console warnings. *(2026-11-24.)*
+- **Both PIN checks are scrypt sealed with DPAPI (the owner's call, reversing
+  two earlier lines).** Cerberus kept one salted SHA-256 and Sphynx an
+  unsalted one, both on purpose: neither PIN decrypts anything, so the fast
+  hash "guards nothing worth slowing down" (Cerberus v2, 2026-09-30), and key
+  stretching stayed out of Sphynx (2026-11-17). What a fast hash still gave
+  away was the PIN itself: every four-digit PIN against a copied file in about
+  10 ms, and with it any phone or card PIN the person reused. Code scanning
+  flagged Cerberus's, and the owner chose a fix over a dismissal.
+  (1) **scrypt, not Argon2id.** Argon2id is the stronger algorithm (OWASP
+  lists it first), but the standard library has no Argon2, the OpenSSL that
+  ships with Python 3.13 is 3.0 (Argon2 arrived in 3.2), and `argon2-cffi`
+  would be a new package under the toolbox's crypto, against §11. At four to
+  six digits the gap between the two is small next to what a longer PIN buys.
+  Revisit if the parked passphrase vault is built: there the hash is the whole
+  protection.
+  (2) **OWASP's floor, N=2**17, r=8, p=1:** 0.48 s and 128 MiB a check on
+  Obelisk (2**16 was 0.24 s). The unlock runs on the Tk thread, as v1's
+  0.435 s PBKDF2 did, and a gate is passed a few times a day. All 10,000
+  four-digit PINs now take about 80 minutes on one core, a million six-digit
+  ones about five and a half days.
+  (3) **Sealed with DPAPI under the gate's name**, salt, cost and digest
+  together (entropy `felhaven/pin-check/v1\0` + `cerberus` or `sphynx`). A
+  copied file opens on no other account, a check moved into the other gate's
+  file won't open, and the cost can't be lowered without breaking the seal;
+  a floor and a 1 GiB memory ceiling are still checked after opening. A
+  check that won't open counts as no PIN, so a new one set while the vault
+  holds keys still raises the reset alarm.
+  (4) **One recipe, in Cerberus** (`pin_record`, `pin_matches`), which
+  Sphynx imports: the toolbox keeps its crypto in one place.
+  (5) **An old file is rewritten on the first right PIN** (Cerberus writes a
+  `pin_upgraded` Ledger row; a failed rewrite logs a WARNING and the next
+  right PIN tries again). The SHA-256 readers stay until the owner's files are
+  sealed (BACKLOG), so code scanning keeps flagging them until then.
+  (6) **Sphynx's tests import the sandbox** for its cheap test cost, which
+  puts them under `test_secret_fixtures`, so their PINs say "fake" now
+  (2026-11-17 had kept that guard to the vault's tests). The guard also
+  watches `pin_record`, `pin_matches` and Sphynx's `create`. *(2026-11-26.)*
+  *Same day, on (5):* other people run the public copy, and no one can see
+  their files, so "until the owner's files are sealed" was the wrong trigger.
+  The owner set a date instead: the SHA-256 readers go on 2026-12-01, and the
+  README's V0.03 note tells people to convert before then.

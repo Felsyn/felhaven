@@ -50,7 +50,7 @@ the module's own docstring, where it cannot drift from the code.
 | [Pythia](pythia.md) | Answer a question by talking to the local LLM, using toolbox tools for live data. |
 | [Scribe](scribe.md) | Store the to-do list and notes. |
 | [Selene](selene.md) | Report the moon's phase, illumination, moonrise, and moonset. |
-| [Sphynx](sphynx.md) | Verify a PIN against the stored hash, and track how many attempts remain. |
+| [Sphynx](sphynx.md) | Verify a PIN against the stored check, and track how many attempts remain. |
 | [Talos](talos.md) | Report which models Ollama has installed and which it has loaded. |
 | [Themis](themis.md) | Own the per-install user preferences: location, units, clock, and how Pythia answers. |
 | [Virgil](virgil.md) | Give a tooltip its words: a module's own gloss, or a glossary entry. |

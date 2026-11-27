@@ -221,6 +221,18 @@ Sections are ordered by what an item needs before work can start.
 
 ## Parked, until a trigger
 
+- **The old SHA-256 PIN readers are still in the code.**
+  `cerberus._legacy_pin_matches` and `sphynx._legacy_matches` read PIN files
+  from before 2026-11-26 so the first right PIN can seal them (§12), and
+  until they go, code scanning still flags a fast hash on a PIN. The owner
+  set the date, and the README's V0.03 note tells people running the public
+  copy. Removed as the code stands, a file still in the old form becomes
+  "no PIN": setup, plus Cerberus's reset alarm if the vault holds keys. The
+  removal should spot an old file by its `pin_hash` field (no hashing) and
+  ask for a new PIN without the alarm. — needs: 2026-12-01, then delete both
+  readers and their tests, and take the date out of the README note · found
+  2026-11-26 (PIN checks sealed)
+
 - **Clio's captures would blur on a scaled display.** Felhaven isn't
   DPI-aware, so at a Windows display scale above 100% its window is drawn
   stretched and gdigrab records the stretched pixels. Today the Obelisk runs
